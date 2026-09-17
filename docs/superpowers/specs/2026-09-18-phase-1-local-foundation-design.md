@@ -12,6 +12,7 @@ Phase 1 proves media handling and rendering. It does not claim automatic highlig
 
 - Generic `video-editor` CLI and `video_editor` Python package.
 - Recursive media discovery and stable source identification.
+- Automatic GoPro filename detection, chapter grouping, and chronological sequencing.
 - ffprobe-based media inspection and warnings.
 - Configurable storage roots, including external SSD volumes.
 - Lightweight proxy and extracted-audio generation.
@@ -43,6 +44,7 @@ Core units have narrow interfaces:
 
 - `config`: load and validate user settings and storage roots.
 - `media.discover`: find candidate files without changing originals.
+- `media.sequencing`: recognize camera filename patterns, group chapters, and order footage chronologically.
 - `media.probe`: convert ffprobe JSON into typed source metadata.
 - `media.capabilities`: detect installed FFmpeg encoders and host resources.
 - `media.proxies`: generate bounded analysis media with explicit timestamp mappings.
@@ -100,7 +102,7 @@ video-editor status JOB_ID
 video-editor resume JOB_ID
 ```
 
-- `inspect` discovers files, records source identity, probes streams, checks storage, and emits an inventory with warnings.
+- `inspect` discovers files, recognizes GoPro filenames, groups and orders footage chronologically, records source identity, probes streams, checks storage, and emits an inventory with warnings and ordering decisions.
 - `plan` validates inspected sources and writes deterministic sample horizontal and vertical plans.
 - `render-from-plan` validates a reusable plan, renders outputs, validates artifacts, and writes a report.
 - `run` performs inspect, proxy, plan, render, validate, and report stages under one persistent job.
@@ -136,7 +138,29 @@ Discovery recursively checks configured extensions and records rejected or unrea
 
 A source identity combines stable content evidence and media facts. The initial implementation uses file size, a bounded content fingerprint, and relevant probe metadata; absolute path is stored as a location but is not the sole identity. This allows moved media to be recognized while avoiding a mandatory full-file hash over hours of footage. Identity algorithm and version are stored so cache invalidation remains explicit.
 
-Embedded creation metadata may contribute to chronological ordering when present and trustworthy. Otherwise Phase 1 preserves discovery order and reports chronology uncertainty. GoPro split recordings remain separate source records; grouping them automatically is deferred until camera metadata behavior is verified against real fixtures.
+Embedded creation metadata may contribute to chronological ordering when present and trustworthy. Otherwise Phase 1 preserves discovery order and reports chronology uncertainty.
+
+### GoPro Filename Sequencing
+
+Phase 1 targets GoPro as the primary source, so it detects GoPro naming automatically:
+
+- Recognize camera filename patterns without hardcoding a single model's prefix.
+- Parse file number, session identifier, and chapter number from recognized names.
+- Group files recorded in the same session into ordered chronology groups.
+- Order files inside a group by chapter number.
+- Order groups using the strongest available evidence: embedded creation metadata, then session and file-number continuity, then discovery order.
+- Present groups in chronological order so long-form and shorts planning consume time-ordered footage without manual sequencing.
+- Record every ordering decision, source pattern, parsed fields, and confidence in job state.
+
+Detection is evidence-based and conservative:
+
+- Each path is also probed directly, so detection failure never fails the job; it downgrades to chronology uncertainty.
+- Prefixes and numbering rules are learned from the observed batch and reported, not assumed from documentation. The official GoPro naming-convention page could not be retrieved during design, so rules are verified against real footage by an explicit fixture and benchmark procedure.
+- Chapter files from one recording remain separate source records. A group records that they continue one recording so long-form planning can preserve continuous events.
+- Raw filename text is untrusted data. It contributes parsed numeric fields only, and never becomes a command or path fragment.
+- Files whose numbering resets, repeats, or conflicts with embedded metadata are reported as conflicts rather than silently reordered.
+
+When the batch contains non-GoPro footage, discovery still works and ordering falls back to available metadata with an explicit uncertainty note.
 
 ## Inspection
 
@@ -220,6 +244,8 @@ SQLite tables cover:
 - job stages;
 - sources;
 - source probes;
+- chronology groups and their ordered membership;
+- parsed filename sequences and ordering evidence;
 - proxy mappings;
 - artifacts;
 - cache entries;
@@ -260,6 +286,11 @@ Batch inspection isolates source-level failures. Required stage failures stop de
 
 Unit tests cover:
 
+- GoPro filename parsing across observed patterns;
+- chapter grouping and in-group ordering;
+- group ordering by embedded metadata, then session and file-number continuity, then discovery order;
+- conflicting, reset, or duplicate file numbering reported as conflicts;
+- filename text treated as untrusted input;
 - source interval and identity validation;
 - timeline duration with speed changes;
 - transition overlap calculations;
@@ -287,5 +318,7 @@ Hardware encoder tests are capability-gated. Software rendering remains the port
 ## Acceptance Boundary
 
 Phase 1 is accepted when one local command processes authorized fixture media through persistent stages and produces validated horizontal and vertical MP4 files, edit plans, and a useful report; interruption can resume without repeating valid completed stages; external storage is supported without silent internal fallback; and originals remain unchanged.
+
+GoPro chronology is accepted when a batch of GoPro-named files, including chapter splits and multiple sessions, is grouped and ordered chronologically without manual sequencing, with ordering evidence recorded, and when misnamed or conflicting inputs are reported rather than silently reordered. Fixture names cover observed patterns. Confirmation against real HERO12 footage is a required benchmark step before claiming real-world GoPro support, because the official naming-convention documentation was not retrievable during design.
 
 Real-world storytelling quality, automatic moment selection, captions, and content-aware reframing remain unimplemented and are reported as such.
