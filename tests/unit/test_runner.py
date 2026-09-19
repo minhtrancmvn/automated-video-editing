@@ -1,3 +1,4 @@
+import os
 import signal
 import subprocess
 import sys
@@ -311,6 +312,39 @@ def test_runner_blocks_signals_through_publication_and_artifact_commit(
     assert calls[0].startswith("mask:")
     assert calls[1] == "publish:short.mp4"
     assert calls[-1].startswith("mask:")
+
+
+def test_real_sigterm_during_publish_is_raised_after_publication(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    command = _command(tmp_path)
+
+    class Process:
+        def wait(self, timeout: float | None = None) -> int:
+            command.partial_path.write_bytes(b"partial")
+            return 0
+
+        def poll(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "video_editor.rendering.runner.subprocess.Popen",
+        lambda *_args, **_kwargs: Process(),
+    )
+    monkeypatch.setattr(
+        "video_editor.rendering.runner.validate_output", lambda *_args: None
+    )
+
+    def publish(_path: Path) -> None:
+        os.kill(os.getpid(), signal.SIGTERM)
+        time.sleep(0.05)
+
+    with pytest.raises(VideoEditorError, match="render interrupted") as caught:
+        run_render(command, lambda: None, publish)
+
+    assert caught.value.interrupted
+    assert command.final_path.exists()
+    assert not command.partial_path.exists()
 
 
 def test_runner_skips_signal_registration_outside_main_thread(

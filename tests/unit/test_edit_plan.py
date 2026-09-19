@@ -211,6 +211,38 @@ def test_checked_in_json_schema_rejects_negative_decimal_strings(
         EditPlan.model_validate(data)
 
 
+@pytest.mark.parametrize(
+    ("location", "value"),
+    [
+        (("sources", 0, "duration"), "0"),
+        (("clips", 0, "source_end"), "0"),
+        (("clips", 0, "speed"), "0"),
+        (("output", "frame_rate"), "0"),
+        (("clips", 0, "confidence"), "1.1"),
+        (("clips", 0, "confidence"), "-0.1"),
+        (("sources", 0, "duration"), "1e1"),
+    ],
+)
+def test_schema_and_model_reject_same_numeric_values(
+    location: tuple[str | int, ...], value: str
+) -> None:
+    data = valid_plan_data()
+    target: object = data
+    for key in location[:-1]:
+        target = target[key]  # type: ignore[index]
+    target[location[-1]] = value  # type: ignore[index]
+
+    schema_result = list(
+        Draft202012Validator(json.loads(SCHEMA_PATH.read_text())).iter_errors(data)
+    )
+    model_result = True
+    try:
+        EditPlan.model_validate(data)
+    except ValidationError:
+        model_result = False
+    assert bool(schema_result) is (not model_result)
+
+
 def test_load_and_write_plan_round_trip(tmp_path: Path) -> None:
     plan = EditPlan.model_validate(valid_plan_data())
     path = tmp_path / "plan.json"

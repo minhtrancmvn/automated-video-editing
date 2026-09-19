@@ -23,6 +23,8 @@ _MAX_LONG = Decimal(3600)
 
 
 def _decimal(value: Any) -> Decimal:
+    if isinstance(value, str) and "e" in value.lower():
+        raise ValueError("exponent notation is not supported")
     try:
         result = Decimal(str(value))
     except (InvalidOperation, TypeError, ValueError) as exc:
@@ -51,7 +53,32 @@ class _PlanModel(BaseModel):
                 for child in value:
                     tighten_decimal_strings(child)
 
+        def tighten_positive_decimal_strings(value: Any, field_name: str = "") -> None:
+            if isinstance(value, dict):
+                if (
+                    field_name in {"duration", "source_end", "speed", "frame_rate"}
+                    and value.get("type") == "string"
+                    and "pattern" in value
+                ):
+                    value["pattern"] = r"^(?!^[-+.]*$)\+?(?=.*[1-9])\d*\.?\d*$"
+                if (
+                    field_name == "confidence"
+                    and value.get("type") == "string"
+                    and "pattern" in value
+                ):
+                    value["pattern"] = r"^(?:\+?(?:0+(?:\.\d+)?|\.\d+|1(?:\.0*)?))$"
+                properties = value.get("properties", {})
+                for name, child in properties.items():
+                    tighten_positive_decimal_strings(child, name)
+                for child in value.values():
+                    if child is not properties:
+                        tighten_positive_decimal_strings(child, field_name)
+            elif isinstance(value, list):
+                for child in value:
+                    tighten_positive_decimal_strings(child, field_name)
+
         tighten_decimal_strings(schema)
+        tighten_positive_decimal_strings(schema)
         return cast(dict[str, Any], schema)
 
 

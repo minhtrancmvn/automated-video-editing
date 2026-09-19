@@ -1,5 +1,6 @@
 import importlib.util
 import shutil
+from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -57,10 +58,13 @@ def test_proxy_args_are_bounded_and_muted(tmp_path: Path) -> None:
 
 
 def test_full_proxy_mapping_is_explicit() -> None:
-    mapping = identity_mapping("source-1", Decimal("12.5"), "hash", "ffmpeg-8")
+    mapping = identity_mapping(
+        "source-1", "bounded-v1:digest", Decimal("12.5"), "hash", "ffmpeg-8"
+    )
     assert (mapping.source_start, mapping.source_end) == (Decimal(0), Decimal("12.5"))
     assert (mapping.proxy_start, mapping.proxy_end) == (Decimal(0), Decimal("12.5"))
     assert mapping.source_id == "source-1"
+    assert mapping.source_identity == "bounded-v1:digest"
     assert mapping.settings_hash == "hash"
     assert mapping.tool_version == "ffmpeg-8"
 
@@ -77,7 +81,8 @@ def test_no_audio_returns_none_and_outputs_stay_in_cache(
     from video_editor.media.probe import MediaProbe
     from video_editor.media.proxies import create_analysis_media
 
-    source = tmp_path / "source.mp4"
+    source = tmp_path / "sources" / "source.mp4"
+    source.parent.mkdir()
     source.write_bytes(b"source")
     cache = tmp_path / "cache"
     monkeypatch.setattr(
@@ -115,13 +120,40 @@ def test_no_audio_returns_none_and_outputs_stay_in_cache(
     assert all(kwargs.get("shell") is False for _, kwargs in calls)
 
 
+@pytest.mark.parametrize(
+    "cache_factory",
+    [
+        lambda source: source,
+        lambda source: source.parent,
+        lambda source: source.parent.parent,
+    ],
+)
+def test_analysis_media_rejects_cache_overlapping_source_parent_tree(
+    tmp_path: Path, cache_factory: Callable[[Path], Path]
+) -> None:
+    from video_editor.errors import ErrorCategory, VideoEditorError
+    from video_editor.media.proxies import create_analysis_media
+
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    source = source_dir / "clip.mp4"
+    source.write_bytes(b"source")
+    cache = cache_factory(source)
+
+    with pytest.raises(VideoEditorError, match="overlaps source parent tree") as caught:
+        create_analysis_media(source, "source-1", cache)
+
+    assert caught.value.category == ErrorCategory.STORAGE
+
+
 def test_audio_output_is_created_only_inside_cache(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     from video_editor.media.probe import MediaProbe
     from video_editor.media.proxies import create_analysis_media
 
-    source = tmp_path / "source.mp4"
+    source = tmp_path / "sources" / "source.mp4"
+    source.parent.mkdir()
     source.write_bytes(b"source")
     cache = tmp_path / "cache"
 
@@ -176,7 +208,8 @@ def test_invalid_proxy_properties_are_not_renamed(
     from video_editor.media.probe import MediaProbe
     from video_editor.media.proxies import create_analysis_media
 
-    source = tmp_path / "source.mp4"
+    source = tmp_path / "sources" / "source.mp4"
+    source.parent.mkdir()
     source.write_bytes(b"source")
     cache = tmp_path / "cache"
 
@@ -217,7 +250,8 @@ def test_invalid_audio_properties_are_not_renamed(
     from video_editor.media.probe import MediaProbe
     from video_editor.media.proxies import create_analysis_media
 
-    source = tmp_path / "source.mp4"
+    source = tmp_path / "sources" / "source.mp4"
+    source.parent.mkdir()
     source.write_bytes(b"source")
     cache = tmp_path / "cache"
     proxy_video = VideoStream(
@@ -256,7 +290,7 @@ def test_invalid_audio_properties_are_not_renamed(
 def test_default_proxy_accepts_ffmpeg_stream_codec_metadata(tmp_path: Path) -> None:
     from video_editor.media.proxies import create_analysis_media
 
-    source = create_media_fixture(tmp_path / "source.mp4", with_audio=False)
+    source = create_media_fixture(tmp_path / "sources" / "source.mp4", with_audio=False)
     proxy, audio, mapping = create_analysis_media(
         source,
         "source-1",
@@ -294,7 +328,8 @@ def test_analysis_media_reuses_valid_proxy_and_audio_cache(
 ) -> None:
     from video_editor.media.proxies import _name, create_analysis_media
 
-    source = tmp_path / "source.mp4"
+    source = tmp_path / "sources" / "source.mp4"
+    source.parent.mkdir()
     source.write_bytes(b"source")
     cache = tmp_path / "cache"
     settings = ProxySettings()
@@ -378,7 +413,8 @@ def test_ffprobe_failure_cleans_partial_and_preserves_error(
     from video_editor.media.probe import MediaProbe
     from video_editor.media.proxies import create_analysis_media
 
-    source = tmp_path / "source.mp4"
+    source = tmp_path / "sources" / "source.mp4"
+    source.parent.mkdir()
     source.write_bytes(b"source")
     cache = tmp_path / "cache"
     calls = 0

@@ -18,6 +18,7 @@ from video_editor.config import AppConfig
 from video_editor.errors import ErrorCategory, VideoEditorError
 from video_editor.media.capabilities import detect_capabilities
 from video_editor.media.discovery import (
+    IDENTITY_VERSION,
     SourceCandidate,
     bounded_fingerprint,
     discover_sources,
@@ -247,7 +248,8 @@ class WorkflowService:
                 raise VideoEditorError(
                     ErrorCategory.PLAN, f"cannot verify plan source: {path}: {exc}"
                 ) from exc
-            if identity != source.identity.rsplit(":", 1)[-1]:
+            expected_identity = f"{IDENTITY_VERSION}:{identity}"
+            if source.identity != expected_identity:
                 raise VideoEditorError(
                     ErrorCategory.PLAN,
                     f"plan source identity changed: {path}",
@@ -301,6 +303,8 @@ class WorkflowService:
             if not isinstance(source_id, str) or not isinstance(source_identity, str):
                 return False
             if mapping.get("source_id") != source_id:
+                return False
+            if mapping.get("source_identity") != source_identity:
                 return False
             if ":" not in source_identity:
                 return False

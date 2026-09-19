@@ -12,6 +12,8 @@ from video_editor.media.discovery import (
     bounded_fingerprint,
 )
 from video_editor.media.probe import MediaProbe
+from video_editor.media.proxies import ProxySettings
+from video_editor.media.proxies import settings_hash as proxy_settings_hash
 from video_editor.media.storage import VolumeIdentity, inspect_volume
 from video_editor.models.edit_plan import (
     EditPlan,
@@ -258,6 +260,55 @@ def test_validate_reuse_revalidates_every_recorded_output(
             service._ensure_validate(job_id, rendered)
 
     assert validate.call_count == 2
+
+
+def test_render_from_plan_requires_exact_identity_version_and_digest(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path / "roots")
+    source = tmp_path / "sources" / "source.mp4"
+    source.parent.mkdir()
+    source.write_bytes(b"source")
+    identity = f"{IDENTITY_VERSION}:{bounded_fingerprint(source)}"
+    plan = EditPlan(
+        schema_version=1,
+        planner_version="test",
+        sources=[
+            PlanSource(
+                id="source",
+                path=source,
+                identity=identity + "-stale",
+                duration=Decimal(1),
+            )
+        ],
+        clips=[
+            TimelineClip(
+                source_id="source",
+                source_start=Decimal(0),
+                source_end=Decimal(1),
+                timeline_start=Decimal(0),
+                speed=Decimal(1),
+                framing=Framing(mode="center_crop"),
+                selection_reason="test",
+            )
+        ],
+        output=OutputSpec(
+            kind="short",
+            width=320,
+            height=240,
+            frame_rate=Decimal(10),
+            codec="libx264",
+            audio="none",
+        ),
+        provenance=Provenance(planner="test"),
+    )
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(plan.model_dump_json())
+    with JobStore(tmp_path / "state.db") as store:
+        service = WorkflowService(config, store)
+        with pytest.raises(VideoEditorError, match="identity changed"):
+            service.render_from_plan(plan_path)
+        assert store.connection.execute("SELECT count(*) FROM jobs").fetchone()[0] == 0
 
 
 def test_render_from_plan_rejects_changed_second_source_before_job_creation(
@@ -561,6 +612,34 @@ def test_run_stage_persists_keyboard_interrupt_as_interrupted(
     assert caught.value.interrupted
     assert state["status"] == "interrupted"
     assert state["stages"]["inspect"]["status"] == "interrupted"
+
+
+def test_proxy_artifact_requires_exact_source_identity_in_mapping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    artifact = tmp_path / "proxy.mp4"
+    artifact.write_bytes(b"proxy")
+    metadata = {
+        "source_id": "source",
+        "source_identity": f"{IDENTITY_VERSION}:digest",
+        "settings": {"max_width": 960, "fps": 15, "video_codec": "libx264"},
+        "settings_hash": proxy_settings_hash(ProxySettings()),
+        "tool_version": "ffmpeg",
+        "kind": "proxy",
+        "mapping": {
+            "source_id": "source",
+            "source_identity": f"{IDENTITY_VERSION}:other-digest",
+            "settings_hash": proxy_settings_hash(ProxySettings()),
+            "tool_version": "ffmpeg",
+        },
+    }
+    monkeypatch.setattr(
+        "video_editor.workflow.valid_cached_media", lambda *args, **kwargs: True
+    )
+    with JobStore(tmp_path / "state.db") as store:
+        service = WorkflowService(config, store)
+        assert not service._proxy_artifact_valid(artifact, metadata)
 
 
 def test_stage_reuse_requires_matching_identity_and_valid_artifact(

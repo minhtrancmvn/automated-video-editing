@@ -10,6 +10,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from video_editor.errors import ErrorCategory, VideoEditorError
+from video_editor.media.discovery import IDENTITY_VERSION, bounded_fingerprint
 from video_editor.media.probe import MediaProbe, probe_media
 
 
@@ -31,6 +32,7 @@ class ProxyMapping:
     source_end: Decimal
     proxy_start: Decimal
     proxy_end: Decimal
+    source_identity: str
     settings_hash: str
     tool_version: str
 
@@ -41,6 +43,7 @@ def _decimal(value: Decimal | float | str) -> Decimal:
 
 def identity_mapping(
     source_id: str,
+    source_identity: str,
     duration: Decimal | float | str,
     settings_hash: str,
     tool_version: str,
@@ -56,6 +59,7 @@ def identity_mapping(
         source_end=end,
         proxy_start=Decimal(0),
         proxy_end=end,
+        source_identity=source_identity,
         settings_hash=settings_hash,
         tool_version=tool_version,
     )
@@ -321,12 +325,17 @@ def create_analysis_media(
 ) -> tuple[Path, Path | None, ProxyMapping]:
     """Generate validated proxy and optional Whisper audio wholly under cache root."""
 
+    source_resolved = source.resolve()
+    cache_resolved = cache_root.resolve()
+    source_parent = source_resolved.parent
     if (
-        source.resolve() == cache_root.resolve()
-        or cache_root.resolve() in source.resolve().parents
+        cache_resolved == source_resolved
+        or cache_resolved == source_parent
+        or cache_resolved in source_parent.parents
+        or source_parent in cache_resolved.parents
     ):
         raise VideoEditorError(
-            ErrorCategory.STORAGE, "source path cannot be inside cache root"
+            ErrorCategory.STORAGE, "cache root overlaps source parent tree"
         )
     cache_root.mkdir(parents=True, exist_ok=True)
     try:
@@ -374,6 +383,10 @@ def create_analysis_media(
             audio = _validated_audio_rename(partial_audio, final_audio, ffprobe=ffprobe)
 
     mapping = identity_mapping(
-        source_id, actual_duration, settings_hash(settings), tool_version
+        source_id,
+        f"{IDENTITY_VERSION}:{bounded_fingerprint(source)}",
+        actual_duration,
+        settings_hash(settings),
+        tool_version,
     )
     return proxy, audio, mapping

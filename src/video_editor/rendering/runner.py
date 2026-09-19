@@ -52,6 +52,9 @@ def _defer_publication_signals() -> Iterator[None]:
             yield
         finally:
             signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+            # Python delivers deferred signals immediately after unmasking. The
+            # installed handler only records interruption, so caller checks it
+            # after this context exits and before restoring handlers.
     else:
         yield
 
@@ -147,6 +150,10 @@ def run_render(
                     command.partial_path.replace(command.final_path)
                     if on_publish is not None:
                         on_publish(command.final_path)
+                # Unmasking delivers any deferred SIGINT/SIGTERM while our
+                # interruption handler remains installed. Persist interrupted
+                # state before outer finally restores previous handlers.
+                raise_if_interrupted()
             finally:
                 for signum, handler in previous.items():
                     signal.signal(signum, cast(signal.Handlers, handler))
