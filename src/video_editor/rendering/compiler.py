@@ -18,6 +18,17 @@ from video_editor.models.edit_plan import (
 
 
 @dataclass(frozen=True, slots=True)
+class RenderWarning:
+    """Structured warning emitted when render capability falls back."""
+
+    code: str
+    message: str
+    reason: str
+    requested_encoder: str
+    selected_encoder: str
+
+
+@dataclass(frozen=True, slots=True)
 class RenderCommand:
     """All data needed to execute and finalize one render."""
 
@@ -26,6 +37,7 @@ class RenderCommand:
     final_path: Path
     expected_duration: Decimal
     output: OutputSpec | None = None
+    warnings: tuple[RenderWarning, ...] = ()
 
 
 def _number(value: Decimal) -> str:
@@ -70,13 +82,20 @@ def _safe_color(value: str | None) -> str:
 
 
 def _video_framing(
-    clip: TimelineClip, width: int, height: int, source_index: int, index: int
+    clip: TimelineClip,
+    width: int,
+    height: int,
+    frame_rate: Decimal,
+    source_index: int,
+    index: int,
 ) -> tuple[str, list[str]]:
     label = f"vclip{index}"
     common = [
         f"[{source_index}:v]trim=start={_number(clip.source_start)}:end={_number(clip.source_end)}",
         "setpts=PTS-STARTPTS",
         f"setpts=PTS/{_number(clip.speed)}",
+        f"fps={_number(frame_rate)}",
+        "settb=AVTB",
     ]
     if clip.framing.mode == "center_crop":
         return label, [
@@ -100,130 +119,43 @@ def _video_framing(
         ",".join(common + [f"split=2[{split}][{fg}]"]),
         (
             f"[{split}]scale={width}:{height}:force_original_aspect_ratio=increase,"
-            f"crop={width}:{height},boxblur=20:2,format=yuv420p[{bg}]"
+            f"crop={width}:{height},boxblur=20:2,format=yuv420p,settb=AVTB[{bg}]"
         ),
         (
             f"[{fg}]scale={width}:{height}:force_original_aspect_ratio=decrease,"
-            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color={background}[{fg_scaled}]"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color={background},"
+            f"format=yuv420p,settb=AVTB[{fg_scaled}]"
         ),
-        f"[{bg}][{fg_scaled}]overlay=(W-w)/2:(H-h)/2,format=yuv420p[{label}]",
+        f"[{bg}][{fg_scaled}]overlay=(W-w)/2:(H-h)/2,format=yuv420p,settb=AVTB[{label}]",
     ]
 
 
-def compile_render(
-    plan: EditPlan, ffmpeg: str, encoder: str = "libx264"
-) -> RenderCommand:
-    """Compile plan into one shell-free FFmpeg command."""
-    selected_encoder = encoder
-    if encoder != "libx264" and not probe_hardware_encoder(ffmpeg, encoder):
-        selected_encoder = "libx264"
-
-    final_path = plan.sources[0].path.parent / f"{plan.output.kind}.mp4"
-    partial_path = final_path.with_name(final_path.name + ".partial")
-    args: list[str] = [ffmpeg, "-hide_banner", "-y"]
-    for source in plan.sources:
-        args.extend(["-i", str(source.path)])
-
-    source_indexes = {source.id: index for index, source in enumerate(plan.sources)}
-    graph: list[str] = []
-    video_labels: list[str] = []
-    audio_labels: list[str] = []
-    clip_durations: list[Decimal] = []
-    for index, clip in enumerate(plan.clips):
-        source_index = source_indexes[clip.source_id]
-        duration = (clip.source_end - clip.source_start) / clip.speed
-        clip_durations.append(duration)
-        video_label, video_graph = _video_framing(
-            clip, plan.output.width, plan.output.height, source_index, index
+def _audio_filter(
+    source_index: int,
+    clip: TimelineClip,
+    duration: Decimal,
+    label: str,
+    use_source: bool,
+) -> str:
+    if use_source:
+        return (
+            f"[{source_index}:a]atrim=start={_number(clip.source_start)}:"
+            f"end={_number(clip.source_end)},asetpts=PTS-STARTPTS,"
+            f"{_atempo(clip.speed)},aresample=48000,"
+            f"aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
+            f"asetpts=PTS-STARTPTS,asettb=1/48000[{label}]"
         )
-        graph.extend(video_graph)
-        video_labels.append(video_label)
-        if plan.output.audio == "none":
-            continue
-        source = plan.sources[source_index]
-        audio_label = f"aclip{index}"
-        if source.has_audio:
-            graph.append(
-                f"[{source_index}:a]atrim=start={_number(clip.source_start)}:"
-                f"end={_number(clip.source_end)},asetpts=PTS-STARTPTS,"
-                f"aresample=48000,{_atempo(clip.speed)}[{audio_label}]"
-            )
-        else:
-            graph.append(
-                f"anullsrc=r=48000:cl=stereo,atrim=duration={_number(duration)},"
-                f"asetpts=PTS-STARTPTS[{audio_label}]"
-            )
-        audio_labels.append(audio_label)
-
-    current_video = video_labels[0]
-    current_audio = audio_labels[0] if audio_labels else None
-    current_duration = clip_durations[0]
-    for index in range(1, len(video_labels)):
-        transition = _transition(plan, index - 1)
-        next_video = video_labels[index]
-        video_out = f"vjoin{index}"
-        if transition is not None and transition.kind == "dissolve" and transition.duration > 0:
-            offset = current_duration - transition.duration
-            graph.append(
-                f"[{current_video}][{next_video}]xfade=transition=fade:"
-                f"duration={_number(transition.duration)}:offset={_number(offset)}"
-                f"[{video_out}]"
-            )
-            current_duration += clip_durations[index] - transition.duration
-        else:
-            graph.append(
-                f"[{current_video}][{next_video}]concat=n=2:v=1:a=0[{video_out}]"
-            )
-            current_duration += clip_durations[index]
-        current_video = video_out
-        if current_audio is not None:
-            audio_out = f"ajoin{index}"
-            if transition is not None and transition.kind == "dissolve" and transition.duration > 0:
-                graph.append(
-                    f"[{current_audio}][{audio_labels[index]}]acrossfade="
-                    f"d={_number(transition.duration)}:c1=tri:c2=tri[{audio_out}]"
-                )
-            else:
-                graph.append(
-                    f"[{current_audio}][{audio_labels[index]}]concat=n=2:v=0:a=1"
-                    f"[{audio_out}]"
-                )
-            current_audio = audio_out
-
-    graph.append(f"[{current_video}]format=yuv420p[vout]")
-    args.extend(["-filter_complex", ";".join(graph), "-map", "[vout]"])
-    if current_audio is not None:
-        args.extend(["-map", f"[{current_audio}]"])
-    args.extend(
-        [
-            "-r",
-            _number(plan.output.frame_rate),
-            "-c:v",
-            selected_encoder,
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            "-ar",
-            "48000",
-            "-map_metadata",
-            "-1",
-            "-map_chapters",
-            "-1",
-            "-movflags",
-            "+faststart",
-            "-f",
-            "mp4",
-            str(partial_path),
-        ]
-    )
-    return RenderCommand(
-        tuple(args), partial_path, final_path, timeline_duration(plan), plan.output
+    return (
+        f"anullsrc=r=48000:cl=stereo,atrim=duration={_number(duration)},"
+        "asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:"
+        f"sample_rates=48000:channel_layouts=stereo,asettb=1/48000[{label}]"
     )
 
 
-def probe_hardware_encoder(ffmpeg: str, encoder: str) -> bool:
-    """Prove encoder can encode 16 generated frames, without source media."""
+def _hardware_probe(
+    ffmpeg: str, encoder: str
+) -> tuple[bool, str]:
+    """Probe encoder and return capability plus actionable failure reason."""
     args = [
         ffmpeg,
         "-hide_banner",
@@ -246,6 +178,145 @@ def probe_hardware_encoder(ffmpeg: str, encoder: str) -> bool:
         result = subprocess.run(
             args, capture_output=True, text=True, shell=False, check=False
         )
-    except OSError:
-        return False
-    return result.returncode == 0
+    except OSError as exc:
+        return False, f"could not run encoder probe: {exc}"
+    if result.returncode == 0:
+        return True, ""
+    detail = (result.stderr or result.stdout).strip()
+    return False, detail or f"encoder probe exited with status {result.returncode}"
+
+
+def compile_render(
+    plan: EditPlan, ffmpeg: str, encoder: str = "libx264"
+) -> RenderCommand:
+    """Compile plan into one shell-free FFmpeg command."""
+    selected_encoder = encoder
+    warnings: list[RenderWarning] = []
+    if encoder != "libx264":
+        supported, reason = _hardware_probe(ffmpeg, encoder)
+        if not supported:
+            selected_encoder = "libx264"
+            warnings.append(
+                RenderWarning(
+                    code="hardware_encoder_fallback",
+                    message=(
+                        f"encoder {encoder} unavailable; using libx264 fallback"
+                    ),
+                    reason=reason,
+                    requested_encoder=encoder,
+                    selected_encoder=selected_encoder,
+                )
+            )
+
+    final_path = plan.sources[0].path.parent / f"{plan.output.kind}.mp4"
+    partial_path = final_path.with_name(final_path.name + ".partial")
+    args: list[str] = [ffmpeg, "-hide_banner", "-y"]
+    for source in plan.sources:
+        args.extend(["-i", str(source.path)])
+
+    source_indexes = {source.id: index for index, source in enumerate(plan.sources)}
+    graph: list[str] = []
+    video_labels: list[str] = []
+    audio_labels: list[str] = []
+    clip_durations: list[Decimal] = []
+    for index, clip in enumerate(plan.clips):
+        source_index = source_indexes[clip.source_id]
+        duration = (clip.source_end - clip.source_start) / clip.speed
+        clip_durations.append(duration)
+        video_label, video_graph = _video_framing(
+            clip,
+            plan.output.width,
+            plan.output.height,
+            plan.output.frame_rate,
+            source_index,
+            index,
+        )
+        graph.extend(video_graph)
+        video_labels.append(video_label)
+        if plan.output.audio == "none":
+            continue
+        audio_label = f"aclip{index}"
+        # Silence policy is explicit and must never inspect or map source audio.
+        use_source_audio = plan.output.audio == "source" and plan.sources[source_index].has_audio
+        graph.append(
+            _audio_filter(
+                source_index,
+                clip,
+                duration,
+                audio_label,
+                use_source=use_source_audio,
+            )
+        )
+        audio_labels.append(audio_label)
+
+    current_video = video_labels[0]
+    current_audio = audio_labels[0] if audio_labels else None
+    current_duration = clip_durations[0]
+    for index in range(1, len(video_labels)):
+        transition = _transition(plan, index - 1)
+        next_video = video_labels[index]
+        video_out = f"vjoin{index}"
+        if transition is not None and transition.kind == "dissolve" and transition.duration > 0:
+            offset = current_duration - transition.duration
+            graph.append(
+                f"[{current_video}][{next_video}]xfade=transition=fade:"
+                f"duration={_number(transition.duration)}:offset={_number(offset)}"
+                f":eof_action=pass[{video_out}]"
+            )
+            current_duration += clip_durations[index] - transition.duration
+        else:
+            graph.append(
+                f"[{current_video}][{next_video}]concat=n=2:v=1:a=0[{video_out}]"
+            )
+            current_duration += clip_durations[index]
+        current_video = video_out
+        if current_audio is not None:
+            audio_out = f"ajoin{index}"
+            if transition is not None and transition.kind == "dissolve" and transition.duration > 0:
+                graph.append(
+                    f"[{current_audio}][{audio_labels[index]}]acrossfade="
+                    f"d={_number(transition.duration)}:c1=tri:c2=tri[{audio_out}]"
+                )
+            else:
+                graph.append(
+                    f"[{current_audio}][{audio_labels[index]}]concat=n=2:v=0:a=1"
+                    f"[{audio_out}]"
+                )
+            current_audio = audio_out
+
+    graph.append(f"[{current_video}]format=yuv420p,settb=AVTB[vout]")
+    args.extend(["-filter_complex", ";".join(graph), "-map", "[vout]"])
+    if current_audio is not None:
+        args.extend(["-map", f"[{current_audio}]"])
+    args.extend(
+        [
+            "-r",
+            _number(plan.output.frame_rate),
+            "-c:v",
+            selected_encoder,
+            "-pix_fmt",
+            "yuv420p",
+            "-map_metadata",
+            "-1",
+            "-map_chapters",
+            "-1",
+            "-movflags",
+            "+faststart",
+        ]
+    )
+    if current_audio is not None:
+        args.extend(["-c:a", "aac", "-ar", "48000"])
+    args.extend(["-f", "mp4", str(partial_path)])
+    return RenderCommand(
+        tuple(args),
+        partial_path,
+        final_path,
+        timeline_duration(plan),
+        plan.output,
+        tuple(warnings),
+    )
+
+
+def probe_hardware_encoder(ffmpeg: str, encoder: str) -> bool:
+    """Prove encoder can encode 16 generated frames, without source media."""
+    return _hardware_probe(ffmpeg, encoder)[0]

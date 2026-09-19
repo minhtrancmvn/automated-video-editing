@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import signal
 import subprocess
+import threading
 from collections.abc import Callable
-from typing import cast
 from pathlib import Path
+from typing import cast
 
 from video_editor.errors import ErrorCategory, VideoEditorError
 from video_editor.rendering.compiler import RenderCommand
@@ -27,9 +28,13 @@ def run_render(command: RenderCommand, on_interrupt: Callable[[], None]) -> None
             process.terminate()
 
     try:
-        for signum in (signal.SIGINT, signal.SIGTERM):
-            previous[signum] = signal.getsignal(signum)
-            signal.signal(signum, handle_signal)
+        # Python only permits signal handlers in main thread. Worker-thread callers
+        # still execute shell-free and retain partial artifacts, without mutating
+        # process-global signal state.
+        if threading.current_thread() is threading.main_thread():
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                previous[signum] = signal.getsignal(signum)
+                signal.signal(signum, handle_signal)
         try:
             process = subprocess.Popen(command.args, shell=False)
         except OSError as exc:

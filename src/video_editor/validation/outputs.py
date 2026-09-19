@@ -36,8 +36,11 @@ def validate_output(
             ErrorCategory.OUTPUT,
             f"output duration is {probe.duration}; expected {expected_duration} ± {tolerance}",
         )
-    if output.audio == "source" and probe.audio is None:
-        raise VideoEditorError(ErrorCategory.OUTPUT, "output must contain source audio")
+    if output.audio in {"source", "silence"} and probe.audio is None:
+        raise VideoEditorError(
+            ErrorCategory.OUTPUT,
+            f"output must contain audio for {output.audio} policy",
+        )
     if output.audio == "none" and probe.audio is not None:
         raise VideoEditorError(ErrorCategory.OUTPUT, "output must not contain audio")
     return probe
