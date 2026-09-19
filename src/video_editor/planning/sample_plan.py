@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from video_editor.media.probe import MediaProbe
@@ -22,12 +22,11 @@ _PLANNER_VERSION = "phase1-sample-v1"
 _FRAME_RATE = Decimal(30)
 _CODEC = "libx264"
 
-type ProbeKey = str | Path
-type ProbeMapping = Mapping[ProbeKey, MediaProbe]
-type PathMapping = Mapping[ProbeKey, Path]
+type ProbeMapping = Mapping[object, MediaProbe]
+type PathMapping = Mapping[object, Path]
 
 
-def _lookup[T](values: Mapping[ProbeKey, T], path: Path, source_id: str) -> T | None:
+def _lookup[T](values: Mapping[object, T], path: Path, source_id: str) -> T | None:
     """Resolve mappings accepting path spellings, basename, or source ID."""
 
     for key in (path, str(path), path.as_posix(), path.name, source_id):
@@ -147,9 +146,13 @@ def create_sample_plans(
     never invents padding. Clean cuts keep timeline intervals contiguous.
     """
 
-    interval = Decimal(str(sample_seconds))
-    if interval <= 0:
-        raise ValueError("sample_seconds must be greater than zero")
+    try:
+        interval = Decimal(str(sample_seconds))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError("sample_seconds must be a finite positive number") from exc
+    if not interval.is_finite() or interval <= 0:
+        raise ValueError("sample_seconds must be a finite positive number")
+    interval = min(interval, _SAMPLE_SECONDS)
     if max_sources is not None and max_sources <= 0:
         raise ValueError("max_sources must be greater than zero")
 
@@ -160,7 +163,7 @@ def create_sample_plans(
         paths,
         width=1920,
         height=1080,
-        framing=Framing(mode="center_crop"),
+        framing=Framing(mode="fit_background", background="black"),
         sample_seconds=interval,
         max_sources=max_sources,
     )
