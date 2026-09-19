@@ -1,11 +1,16 @@
+# External SSD paths are examples. Missing mounts fail; no internal fallback exists.
 [paths]
 input_dir = "/Volumes/TravelSSD/footage"
 workspace_dir = "/Volumes/TravelSSD/video-editor/workspace"
 cache_dir = "/Volumes/TravelSSD/video-editor/cache"
 output_dir = "/Volumes/TravelSSD/video-editor/output"
+# Small persistent SQLite job state may stay on internal storage.
 state_dir = "~/Library/Application Support/video-editor"
 
 [settings]
+# Keep 10 GiB free beyond each write-stage estimate.
 storage_reserve_bytes = 10737418240
+# Phase 1 forbids cloud calls and rejects true.
 cloud_enabled = false
+# Phase 1 renders serially.
 render_concurrency = 1

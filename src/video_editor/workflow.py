@@ -158,7 +158,11 @@ class WorkflowService:
             ("output", self.config.paths.output_dir),
         ):
             destination = configured.resolve()
-            if destination == source_root or destination.is_relative_to(source_root) or source_root.is_relative_to(destination):
+            if (
+                destination == source_root
+                or destination.is_relative_to(source_root)
+                or source_root.is_relative_to(destination)
+            ):
                 raise VideoEditorError(
                     ErrorCategory.STORAGE,
                     f"configured {name} root overlaps input/source root: {configured} and {input_path}",
@@ -355,7 +359,11 @@ class WorkflowService:
                 _candidate_data(source, probes[source.fingerprint]) for source in usable
             ],
             "skipped_inputs": skipped,
-            "warnings": [warning.model_dump(mode="json") for probe in probes.values() for warning in probe.warnings],
+            "warnings": [
+                warning.model_dump(mode="json")
+                for probe in probes.values()
+                for warning in probe.warnings
+            ],
             "chronology": chronology,
         }
         self.store.complete_stage(job_id, "inspect", result)
@@ -515,7 +523,12 @@ class WorkflowService:
                             path,
                             {
                                 "source_id": source["source_id"],
-                                "mapping": mapping.__dict__,
+                                "mapping": {
+                                    key: str(value)
+                                    if hasattr(value, "as_tuple")
+                                    else value
+                                    for key, value in mapping.__dict__.items()
+                                },
                             },
                         )
                 artifacts.append(
@@ -523,7 +536,10 @@ class WorkflowService:
                         "source_id": source["source_id"],
                         "proxy": str(proxy),
                         "audio": str(audio) if audio else None,
-                        "mapping": mapping.__dict__,
+                        "mapping": {
+                            key: str(value) if hasattr(value, "as_tuple") else value
+                            for key, value in mapping.__dict__.items()
+                        },
                     }
                 )
             result = {"artifacts": artifacts}
@@ -558,11 +574,16 @@ class WorkflowService:
     def _render_plan(self, job_id: str, path: Path) -> dict[str, Any]:
         plan = load_plan(path)
         output_root = self._configured_destination(self.config.paths.output_dir, job_id)
+        output_name = (
+            "long.mp4"
+            if plan.output.width == 1920 and plan.output.height == 1080
+            else "short-01.mp4"
+        )
         command = compile_render(
             plan,
             "ffmpeg",
             output_dir=output_root,
-            output_name=f"{path.stem}.mp4",
+            output_name=output_name,
         )
         source_paths = [source.path for source in plan.sources]
         self._protect_sources(command.final_path, source_paths)
@@ -628,8 +649,17 @@ class WorkflowService:
         try:
             for item in rendered.get("outputs", []):
                 plan = load_plan(Path(item["plan"]))
-                validate_output(Path(item["output"]), plan.output, timeline_duration(plan))
-        except (KeyError, OSError, VideoEditorError, ValidationError, TypeError, ValueError):
+                validate_output(
+                    Path(item["output"]), plan.output, timeline_duration(plan)
+                )
+        except (
+            KeyError,
+            OSError,
+            VideoEditorError,
+            ValidationError,
+            TypeError,
+            ValueError,
+        ):
             return False
         return True
 
