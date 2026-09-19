@@ -1,0 +1,347 @@
+{
+  "$defs": {
+    "Framing": {
+      "additionalProperties": false,
+      "description": "Output framing primitive supported by Phase 1.",
+      "properties": {
+        "background": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Background"
+        },
+        "mode": {
+          "enum": [
+            "center_crop",
+            "fit_background"
+          ],
+          "title": "Mode",
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "title": "Framing",
+      "type": "object"
+    },
+    "OutputSpec": {
+      "additionalProperties": false,
+      "description": "Requested output properties.",
+      "properties": {
+        "audio": {
+          "default": "source",
+          "enum": [
+            "source",
+            "silence",
+            "none"
+          ],
+          "title": "Audio",
+          "type": "string"
+        },
+        "codec": {
+          "minLength": 1,
+          "title": "Codec",
+          "type": "string"
+        },
+        "color": {
+          "default": "passthrough",
+          "title": "Color",
+          "type": "string"
+        },
+        "frame_rate": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "title": "Frame Rate"
+        },
+        "height": {
+          "exclusiveMinimum": 0,
+          "title": "Height",
+          "type": "integer"
+        },
+        "kind": {
+          "enum": [
+            "short",
+            "long"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "width": {
+          "exclusiveMinimum": 0,
+          "title": "Width",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "width",
+        "height",
+        "frame_rate",
+        "codec"
+      ],
+      "title": "OutputSpec",
+      "type": "object"
+    },
+    "PlanSource": {
+      "additionalProperties": false,
+      "description": "Source identity and media facts referenced by an edit plan.",
+      "properties": {
+        "duration": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "title": "Duration"
+        },
+        "has_audio": {
+          "default": true,
+          "title": "Has Audio",
+          "type": "boolean"
+        },
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "identity": {
+          "minLength": 1,
+          "title": "Identity",
+          "type": "string"
+        },
+        "path": {
+          "format": "path",
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "path",
+        "identity",
+        "duration"
+      ],
+      "title": "PlanSource",
+      "type": "object"
+    },
+    "TimelineClip": {
+      "additionalProperties": false,
+      "description": "One source interval placed consecutively on timeline.",
+      "properties": {
+        "confidence": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confidence"
+        },
+        "framing": {
+          "$ref": "#/$defs/Framing"
+        },
+        "selection_reason": {
+          "minLength": 1,
+          "title": "Selection Reason",
+          "type": "string"
+        },
+        "source_end": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "title": "Source End"
+        },
+        "source_id": {
+          "minLength": 1,
+          "title": "Source Id",
+          "type": "string"
+        },
+        "source_start": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "title": "Source Start"
+        },
+        "speed": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "title": "Speed"
+        },
+        "timeline_start": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "title": "Timeline Start"
+        }
+      },
+      "required": [
+        "source_id",
+        "source_start",
+        "source_end",
+        "timeline_start",
+        "speed",
+        "framing",
+        "selection_reason"
+      ],
+      "title": "TimelineClip",
+      "type": "object"
+    },
+    "Transition": {
+      "additionalProperties": false,
+      "description": "Transition between adjacent clips.",
+      "properties": {
+        "duration": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "title": "Duration"
+        },
+        "from_clip": {
+          "minimum": 0,
+          "title": "From Clip",
+          "type": "integer"
+        },
+        "kind": {
+          "enum": [
+            "cut",
+            "dissolve"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "to_clip": {
+          "minimum": 0,
+          "title": "To Clip",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "from_clip",
+        "to_clip",
+        "kind",
+        "duration"
+      ],
+      "title": "Transition",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Version 1 edit plan containing data, never shell commands.",
+  "properties": {
+    "clips": {
+      "items": {
+        "$ref": "#/$defs/TimelineClip"
+      },
+      "minItems": 1,
+      "title": "Clips",
+      "type": "array"
+    },
+    "output": {
+      "$ref": "#/$defs/OutputSpec"
+    },
+    "planner_version": {
+      "minLength": 1,
+      "title": "Planner Version",
+      "type": "string"
+    },
+    "provenance": {
+      "additionalProperties": true,
+      "title": "Provenance",
+      "type": "object"
+    },
+    "schema_version": {
+      "const": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "sources": {
+      "items": {
+        "$ref": "#/$defs/PlanSource"
+      },
+      "minItems": 1,
+      "title": "Sources",
+      "type": "array"
+    },
+    "transitions": {
+      "items": {
+        "$ref": "#/$defs/Transition"
+      },
+      "title": "Transitions",
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "planner_version",
+    "sources",
+    "clips",
+    "output"
+  ],
+  "title": "EditPlan",
+  "type": "object"
+}
