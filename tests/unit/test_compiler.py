@@ -134,6 +134,7 @@ def test_dissolve_uses_transition_duration_for_video_and_audio(tmp_path: Path) -
     graph = _graph(plan)
 
     assert "xfade=transition=fade:duration=1.5:offset=2.5" in graph
+    assert "eof_action=pass" not in graph
     assert "acrossfade=d=1.5:c1=tri:c2=tri" in graph
 
 

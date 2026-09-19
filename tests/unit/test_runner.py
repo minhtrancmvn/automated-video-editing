@@ -28,7 +28,9 @@ def _command(tmp_path: Path) -> RenderCommand:
     )
 
 
-def test_runner_uses_shell_free_argv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_runner_uses_shell_free_argv(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     command = _command(tmp_path)
     captured: dict[str, object] = {}
 
@@ -46,7 +48,9 @@ def test_runner_uses_shell_free_argv(monkeypatch: pytest.MonkeyPatch, tmp_path: 
         return Process()
 
     monkeypatch.setattr("video_editor.rendering.runner.subprocess.Popen", popen)
-    monkeypatch.setattr("video_editor.rendering.runner.validate_output", lambda *_args: None)
+    monkeypatch.setattr(
+        "video_editor.rendering.runner.validate_output", lambda *_args: None
+    )
 
     run_render(command, lambda: None)
 
@@ -81,6 +85,57 @@ def test_runner_keeps_partial_when_ffmpeg_fails(
     assert not command.final_path.exists()
 
 
+def test_runner_terminates_on_main_thread_interrupt_and_keeps_partial(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    command = _command(tmp_path)
+    handlers: dict[signal.Signals, object] = {}
+    callback_called = False
+
+    class Process:
+        def __init__(self) -> None:
+            self.terminated = False
+
+        def wait(self, timeout: float | None = None) -> int:
+            handlers[signal.SIGINT](signal.SIGINT, None)
+            return 0
+
+        def poll(self) -> int | None:
+            return None if not self.terminated else 0
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+    process = Process()
+
+    def popen(*_args: object, **_kwargs: object) -> Process:
+        command.partial_path.write_bytes(b"partial")
+        return process
+
+    def install(signum: signal.Signals, handler: object) -> object:
+        previous = handlers.get(signum)
+        handlers[signum] = handler
+        return previous
+
+    def on_interrupt() -> None:
+        nonlocal callback_called
+        callback_called = True
+
+    monkeypatch.setattr("video_editor.rendering.runner.subprocess.Popen", popen)
+    monkeypatch.setattr("video_editor.rendering.runner.signal.signal", install)
+    monkeypatch.setattr(
+        "video_editor.rendering.runner.signal.getsignal", lambda _signum: None
+    )
+
+    with pytest.raises(VideoEditorError, match="partial output retained"):
+        run_render(command, on_interrupt)
+
+    assert callback_called
+    assert process.terminated
+    assert command.partial_path.exists()
+    assert not command.final_path.exists()
+
+
 def test_runner_skips_signal_registration_outside_main_thread(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -99,7 +154,9 @@ def test_runner_skips_signal_registration_outside_main_thread(
         return Process()
 
     monkeypatch.setattr("video_editor.rendering.runner.subprocess.Popen", popen)
-    monkeypatch.setattr("video_editor.rendering.runner.validate_output", lambda *_args: None)
+    monkeypatch.setattr(
+        "video_editor.rendering.runner.validate_output", lambda *_args: None
+    )
     monkeypatch.setattr(
         "video_editor.rendering.runner.signal.signal",
         lambda signum, _handler: signal_calls.append(signum),

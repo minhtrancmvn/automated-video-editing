@@ -261,7 +261,7 @@ def compile_render(
             graph.append(
                 f"[{current_video}][{next_video}]xfade=transition=fade:"
                 f"duration={_number(transition.duration)}:offset={_number(offset)}"
-                f":eof_action=pass[{video_out}]"
+                f"[{video_out}]"
             )
             current_duration += clip_durations[index] - transition.duration
         else:
