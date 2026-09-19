@@ -109,8 +109,89 @@ def test_ambiguous_repeated_sessions_preserve_chunks_and_warn() -> None:
 def test_duplicate_chapter_emits_warning() -> None:
     groups = sequence_sources(_candidates(["GP020123.MP4", "GH020123.MP4"]), {})
     assert any("duplicate chapter" in warning for warning in groups[0].warnings)
+    assert not any("session ambiguity" in warning for warning in groups[0].warnings)
     assert any(
         "duplicate chapter" in warning for warning in groups[0].members[0].warnings
+    )
+
+
+def test_late_chapter_one_with_conflicting_path_starts_new_session() -> None:
+    sources = _candidates(
+        [
+            "session-a/GOPR0002.MP4",
+            "session-a/GP020002.MP4",
+            "session-b/GOPR0002.MP4",
+        ]
+    )
+    groups = sequence_sources(sources, {})
+    assert [
+        [member.source.path.as_posix() for member in group.members] for group in groups
+    ] == [
+        ["session-a/GOPR0002.MP4", "session-a/GP020002.MP4"],
+        ["session-b/GOPR0002.MP4"],
+    ]
+
+
+def test_late_chapter_one_with_conflicting_creation_time_starts_new_session() -> None:
+    sources = _candidates(["GOPR0002.MP4", "GP020002.MP4", "gopr0002.mp4"])
+    times = {
+        "GOPR0002.MP4": datetime(2026, 1, 2, tzinfo=UTC),
+        "GP020002.MP4": datetime(2026, 1, 2, 0, 0, 1, tzinfo=UTC),
+        "gopr0002.mp4": datetime(2026, 1, 3, tzinfo=UTC),
+    }
+    groups = sequence_sources(sources, times)
+    assert [len(group.members) for group in groups] == [2, 1]
+    assert groups[1].group_id == "2-session-1"
+
+
+def test_same_directory_sessions_assign_chapters_by_creation_time() -> None:
+    sources = _candidates(
+        [
+            "same/GOPR0002.MP4",
+            "same/gopr0002.mp4",
+            "same/GP020002.MP4",
+            "same/gp020002.mp4",
+        ]
+    )
+    times = {
+        "same/GOPR0002.MP4": datetime(2026, 1, 1, tzinfo=UTC),
+        "same/gopr0002.mp4": datetime(2026, 1, 1, 0, 1, tzinfo=UTC),
+        "same/GP020002.MP4": datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC),
+        "same/gp020002.mp4": datetime(2026, 1, 1, 0, 1, 1, tzinfo=UTC),
+    }
+    groups = sequence_sources(sources, times)
+    assert [
+        [member.source.path.name for member in group.members] for group in groups
+    ] == [["GOPR0002.MP4", "GP020002.MP4"], ["gopr0002.mp4", "gp020002.mp4"]]
+    assert all(
+        "session ambiguity" not in warning
+        for group in groups
+        for warning in group.warnings
+    )
+
+
+def test_tied_same_directory_timestamps_warn_before_discovery_fallback() -> None:
+    sources = _candidates(
+        [
+            "same/GOPR0002.MP4",
+            "same/gopr0002.mp4",
+            "same/GP020002.MP4",
+            "same/gp020002.mp4",
+        ]
+    )
+    time = datetime(2026, 1, 1, tzinfo=UTC)
+    groups = sequence_sources(
+        sources,
+        {
+            "same/GOPR0002.MP4": time,
+            "same/gopr0002.mp4": time,
+            "same/GP020002.MP4": time,
+            "same/gp020002.mp4": time,
+        },
+    )
+    assert all(
+        any("session ambiguity" in warning for warning in group.warnings)
+        for group in groups
     )
 
 

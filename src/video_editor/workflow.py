@@ -380,7 +380,13 @@ class WorkflowService:
         chronology = [
             {
                 "group_id": group.group_id,
-                "members": [member.source.fingerprint for member in group.members],
+                "members": [
+                    {
+                        "source_id": member.source.fingerprint,
+                        "warnings": list(member.warnings),
+                    }
+                    for member in group.members
+                ],
                 "warnings": list(group.warnings),
             }
             for group in groups
@@ -878,6 +884,24 @@ class WorkflowService:
                 "duration_seconds": duration,
             }
         probe_warnings = inspected.get("warnings", [])
+        chronology_warnings: list[dict[str, Any]] = []
+        for group in inspected.get("chronology", job.get("chronology", [])):
+            group_id = group.get("group_id")
+            for warning in group.get("warnings", []):
+                chronology_warnings.append(
+                    {"group_id": group_id, "source_id": None, "warning": warning}
+                )
+            for member in group.get("members", []):
+                if not isinstance(member, dict):
+                    continue
+                for warning in member.get("warnings", []):
+                    chronology_warnings.append(
+                        {
+                            "group_id": group_id,
+                            "source_id": member.get("source_id"),
+                            "warning": warning,
+                        }
+                    )
         fallback_warnings = [
             warning
             for output in rendered.get("outputs", [])
@@ -889,8 +913,9 @@ class WorkflowService:
             "selected_moments": selected,
             "output": {"outputs": validated.get("outputs", [])},
             "skipped_inputs": inspected.get("skipped_inputs", []),
-            "warnings": probe_warnings,
+            "warnings": [*probe_warnings, *chronology_warnings],
             "fallbacks": fallback_warnings,
+            "chronology_warnings": chronology_warnings,
             "stage_times": stage_times,
             "storage_roots": {
                 key: str(value) for key, value in vars(self.config.paths).items()

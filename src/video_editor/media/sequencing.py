@@ -102,12 +102,55 @@ def _same_session_path(left: SequencedSource, right: SequencedSource) -> bool:
     return left_parent != Path() and left_parent == right_parent
 
 
+def _conflicting_session_path(
+    item: SequencedSource, members: Sequence[SequencedSource]
+) -> bool:
+    """Identify explicit parent-path evidence that a late chapter starts anew."""
+
+    item_parent = item.source.path.parent
+    return item_parent != Path() and any(
+        member.source.path.parent != Path() and member.source.path.parent != item_parent
+        for member in members
+    )
+
+
 def _time_key(value: datetime) -> datetime:
     """Make naive and aware metadata comparable without changing returned data."""
 
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+def _timestamp_match(
+    item: SequencedSource,
+    candidates: Sequence[str],
+    grouped: Mapping[str, Sequence[SequencedSource]],
+) -> str | None:
+    """Pick one session by nearest known creation time, or return no match."""
+
+    if item.creation_time is None:
+        return None
+    scores: list[tuple[float, str]] = []
+    for candidate in candidates:
+        member_times = [
+            member.creation_time
+            for member in grouped.get(candidate, [])
+            if member.creation_time is not None
+        ]
+        if not member_times:
+            continue
+        item_time = _time_key(item.creation_time)
+        score = min(
+            abs((item_time - _time_key(member_time)).total_seconds())
+            for member_time in member_times
+        )
+        scores.append((score, candidate))
+    if not scores:
+        return None
+    best_score = min(score for score, _ in scores)
+    matches = [candidate for score, candidate in scores if score == best_score]
+    return matches[0] if len(matches) == 1 else None
 
 
 def _first_index(group: ChronologyGroup) -> int:
@@ -221,14 +264,40 @@ def sequence_sources(
         else:
             number = item.parsed.file_number
             number_sessions = sessions.setdefault(number, [str(number)])
-            if item.parsed.chapter == 1 and any(
+            current_group = grouped.get(number_sessions[-1], [])
+            has_current_chapter_one = any(
                 member.parsed is not None and member.parsed.chapter == 1
-                for member in grouped.get(number_sessions[-1], [])
-            ):
+                for member in current_group
+            )
+            if item.parsed.chapter == 1 and has_current_chapter_one:
                 group_id = f"{number}-session-{len(number_sessions)}"
                 number_sessions.append(group_id)
             elif item.parsed.chapter == 1:
-                group_id = number_sessions[-1]
+                # A late GOPR chapter starts a new session when path or timestamp
+                # evidence conflicts with already-seen chapter files. Without that
+                # evidence, retain existing session grouping.
+                conflicting_path = _conflicting_session_path(item, current_group)
+                member_times = [
+                    member.creation_time
+                    for member in current_group
+                    if member.creation_time is not None
+                ]
+                earliest_time = min(member_times, key=_time_key, default=None)
+                latest_time = max(member_times, key=_time_key, default=None)
+                timestamp_conflict = (
+                    item.creation_time is not None
+                    and earliest_time is not None
+                    and latest_time is not None
+                    and (
+                        _time_key(item.creation_time) < _time_key(earliest_time)
+                        or _time_key(item.creation_time) > _time_key(latest_time)
+                    )
+                )
+                if current_group and (conflicting_path or timestamp_conflict):
+                    group_id = f"{number}-session-{len(number_sessions)}"
+                    number_sessions.append(group_id)
+                else:
+                    group_id = number_sessions[-1]
             else:
                 compatible = [
                     candidate
@@ -247,10 +316,17 @@ def sequence_sources(
                         for member in grouped.get(candidate, [])
                     )
                 ]
+                timestamp_match = _timestamp_match(item, compatible, grouped)
                 if len(path_matches) == 1:
                     group_id = path_matches[0]
+                elif timestamp_match is not None:
+                    group_id = timestamp_match
                 elif len(compatible) == 1:
                     group_id = compatible[0]
+                elif len(number_sessions) == 1:
+                    # One candidate cannot be session-ambiguous. Keep duplicate
+                    # chapters together so duplicate-chapter warning wins.
+                    group_id = number_sessions[0]
                 else:
                     # Discovery order is safest when metadata cannot distinguish
                     # interleaved sessions. Never reverse-assign to newest session.

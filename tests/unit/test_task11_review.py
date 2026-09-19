@@ -314,6 +314,47 @@ def test_report_aggregates_probe_warnings_without_render_fallbacks(
     assert state["estimated_peak_space_bytes"] == 1
 
 
+def test_report_aggregates_chronology_warnings_with_source_context(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    chronology = [
+        {
+            "group_id": "12-session-1",
+            "warnings": ["session ambiguity: timestamps tied"],
+            "members": [
+                {
+                    "source_id": "source-2",
+                    "warnings": ["duplicate chapter: file 12 chapter 2"],
+                }
+            ],
+        }
+    ]
+    with JobStore(config.paths.state_dir / "jobs.sqlite") as store:
+        job_id = store.create_job({}, {})
+        service = WorkflowService(config, store)
+        state = service._report_state(
+            job_id,
+            {"warnings": [], "chronology": chronology},
+            {"plans": []},
+            {"outputs": []},
+            {"outputs": []},
+        )
+    assert state["chronology_warnings"] == [
+        {
+            "group_id": "12-session-1",
+            "source_id": None,
+            "warning": "session ambiguity: timestamps tied",
+        },
+        {
+            "group_id": "12-session-1",
+            "source_id": "source-2",
+            "warning": "duplicate chapter: file 12 chapter 2",
+        },
+    ]
+    assert state["warnings"] == state["chronology_warnings"]
+
+
 def test_interrupted_render_preserves_valid_output_on_resume(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

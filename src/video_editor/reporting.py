@@ -15,6 +15,7 @@ def _payload(job_state: dict[str, Any]) -> dict[str, Any]:
     payload.setdefault("skipped_inputs", [])
     payload.setdefault("warnings", [])
     payload.setdefault("fallbacks", [])
+    payload.setdefault("chronology_warnings", [])
     payload.setdefault("stage_times", {})
     payload.setdefault("storage_roots", {})
     payload.setdefault("estimated_peak_space_bytes", 0)
@@ -64,6 +65,7 @@ def write_markdown_report(job_state: dict[str, Any], path: Path) -> Path:
     for title, key in (
         ("Skipped inputs", "skipped_inputs"),
         ("Warnings", "warnings"),
+        ("Chronology warnings", "chronology_warnings"),
         ("Fallbacks", "fallbacks"),
         ("Stage times", "stage_times"),
         ("Resolved storage roots", "storage_roots"),
