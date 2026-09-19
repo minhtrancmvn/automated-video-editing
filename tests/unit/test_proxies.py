@@ -124,6 +124,7 @@ def test_audio_output_is_created_only_inside_cache(
     source = tmp_path / "source.mp4"
     source.write_bytes(b"source")
     cache = tmp_path / "cache"
+
     def probe(path: Path, ffprobe: str = "ffprobe") -> MediaProbe:
         if path.name.endswith(".audio.wav.partial"):
             return MediaProbe(
@@ -267,6 +268,79 @@ def test_default_proxy_accepts_ffmpeg_stream_codec_metadata(tmp_path: Path) -> N
     assert inspected.video.codec_name == "h264"
     assert audio is None
     assert mapping.source_end > 0
+
+
+def test_cached_media_validation_rejects_truncated_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from video_editor.errors import ErrorCategory, VideoEditorError
+    from video_editor.media.proxies import valid_cached_media
+
+    cached = tmp_path / "cached.proxy.mp4"
+    cached.write_bytes(b"truncated")
+    monkeypatch.setattr(
+        "video_editor.media.proxies.probe_media",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            VideoEditorError(ErrorCategory.INSPECTION, "invalid media")
+        ),
+    )
+    assert not valid_cached_media(
+        cached, ProxySettings(), kind="proxy", ffprobe="ffprobe"
+    )
+
+
+def test_analysis_media_reuses_valid_proxy_and_audio_cache(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from video_editor.media.proxies import _name, create_analysis_media
+
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    cache = tmp_path / "cache"
+    settings = ProxySettings()
+    proxy = cache / _name(source, "source-1", ".proxy.mp4", settings, "ffmpeg")
+    audio = cache / _name(source, "source-1", ".audio.wav", settings, "ffmpeg")
+    cache.mkdir()
+    proxy.write_bytes(b"cached proxy")
+    audio.write_bytes(b"cached audio")
+
+    def probe(path: Path, ffprobe: str = "ffprobe") -> MediaProbe:
+        if path == source:
+            return MediaProbe(
+                path=path,
+                duration=12.5,
+                video=VideoStream(codec_name="h264", width=960, avg_frame_rate=15),
+                audio=AudioStream(codec_name="aac", channels=2, sample_rate=44100),
+            )
+        if path == proxy:
+            return MediaProbe(
+                path=path,
+                format_name="mov,mp4",
+                video=VideoStream(codec_name="h264", width=960, avg_frame_rate=15),
+            )
+        return MediaProbe(
+            path=path,
+            format_name="wav",
+            audio=AudioStream(codec_name="pcm_s16le", channels=1, sample_rate=16000),
+        )
+
+    monkeypatch.setattr("video_editor.media.proxies.probe_media", probe)
+    monkeypatch.setattr(
+        "video_editor.media.proxies.subprocess.run",
+        lambda *_args, **_kwargs: pytest.fail("valid cache must not regenerate"),
+    )
+
+    reused_proxy, reused_audio, mapping = create_analysis_media(
+        source,
+        "source-1",
+        cache,
+        settings=settings,
+        tool_version="ffmpeg",
+    )
+
+    assert reused_proxy == proxy
+    assert reused_audio == audio
+    assert mapping.source_id == "source-1"
 
 
 def test_proxy_replace_failure_cleans_partial(

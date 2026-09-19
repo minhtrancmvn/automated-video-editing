@@ -79,7 +79,7 @@ def _plan(
             width=1920,
             height=1080,
             frame_rate=frame_rate,
-            codec="h264",
+            codec="libx264",
             audio="source",
         ),
         provenance=Provenance(planner="test"),

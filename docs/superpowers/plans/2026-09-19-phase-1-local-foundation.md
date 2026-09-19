@@ -94,6 +94,7 @@ Expected: FAIL because package and `app` do not exist.
 # errors.py
 from enum import StrEnum
 
+
 class ErrorCategory(StrEnum):
     CONFIGURATION = "configuration"
     STORAGE = "storage"
@@ -102,6 +103,7 @@ class ErrorCategory(StrEnum):
     RENDER = "rendering"
     OUTPUT = "output_validation"
     STATE = "state"
+
 
 class VideoEditorError(Exception):
     def __init__(self, category: ErrorCategory, message: str) -> None:
@@ -144,9 +146,13 @@ git commit -m "chore: scaffold video editor CLI"
 - [ ] **Step 1: Write failing path and volume tests**
 
 ```python
-def test_config_expands_paths_without_redirecting_missing_volume(tmp_path: Path) -> None:
+def test_config_expands_paths_without_redirecting_missing_volume(
+    tmp_path: Path,
+) -> None:
     config_file = tmp_path / "config.toml"
-    config_file.write_text('[paths]\ninput_dir="/Volumes/Missing/footage"\nworkspace_dir="/Volumes/Missing/work"\ncache_dir="/Volumes/Missing/cache"\noutput_dir="/Volumes/Missing/out"\nstate_dir="~/Library/Application Support/video-editor"\n')
+    config_file.write_text(
+        '[paths]\ninput_dir="/Volumes/Missing/footage"\nworkspace_dir="/Volumes/Missing/work"\ncache_dir="/Volumes/Missing/cache"\noutput_dir="/Volumes/Missing/out"\nstate_dir="~/Library/Application Support/video-editor"\n'
+    )
     config = resolve_config(config_file)
     assert config.paths.input_dir == Path("/Volumes/Missing/footage")
     with pytest.raises(VideoEditorError, match="not mounted"):
@@ -201,7 +207,9 @@ git commit -m "feat: validate external storage configuration"
 - [ ] **Step 1: Write failing discovery tests**
 
 ```python
-def test_discovery_is_recursive_case_insensitive_and_deterministic(tmp_path: Path) -> None:
+def test_discovery_is_recursive_case_insensitive_and_deterministic(
+    tmp_path: Path,
+) -> None:
     (tmp_path / "b").mkdir()
     (tmp_path / "b" / "GH020001.MP4").write_bytes(b"second")
     (tmp_path / "GOPR0001.mp4").write_bytes(b"first")
@@ -254,12 +262,15 @@ git commit -m "feat: discover media with stable fingerprints"
 - [ ] **Step 1: Write failing parser and ordering tests**
 
 ```python
-@pytest.mark.parametrize(("name", "file_number", "chapter"), [
-    ("GOPR0123.MP4", 123, 1),
-    ("GP020123.MP4", 123, 2),
-    ("GH010456.MP4", 456, 1),
-    ("GX030456.MP4", 456, 3),
-])
+@pytest.mark.parametrize(
+    ("name", "file_number", "chapter"),
+    [
+        ("GOPR0123.MP4", 123, 1),
+        ("GP020123.MP4", 123, 2),
+        ("GH010456.MP4", 456, 1),
+        ("GX030456.MP4", 456, 3),
+    ],
+)
 def test_parse_observed_gopro_shapes(name: str, file_number: int, chapter: int) -> None:
     parsed = parse_gopro_name(name)
     assert parsed is not None
@@ -267,8 +278,12 @@ def test_parse_observed_gopro_shapes(name: str, file_number: int, chapter: int) 
 
 
 def test_chapters_group_by_file_number_and_order_numerically(candidates) -> None:
-    groups = sequence_sources(candidates(["GP030123.MP4", "GOPR0123.MP4", "GP020123.MP4"]), {})
-    assert [[m.source.path.name for m in g.members] for g in groups] == [["GOPR0123.MP4", "GP020123.MP4", "GP030123.MP4"]]
+    groups = sequence_sources(
+        candidates(["GP030123.MP4", "GOPR0123.MP4", "GP020123.MP4"]), {}
+    )
+    assert [[m.source.path.name for m in g.members] for g in groups] == [
+        ["GOPR0123.MP4", "GP020123.MP4", "GP030123.MP4"]
+    ]
 ```
 
 Add tests for names containing shell metacharacters returning `None`, duplicate chapters warning, numbering reset warning, metadata-first group order, filename/metadata conflict warning, and non-GoPro fallback to discovery order with low confidence.
@@ -319,7 +334,11 @@ Mock `subprocess.run` with ffprobe JSON containing HEVC Main 10, `yuv420p10le`, 
 ```python
 def test_probe_uses_argument_vector_without_shell(monkeypatch, tmp_path: Path) -> None:
     calls = []
-    monkeypatch.setattr(subprocess, "run", lambda args, **kwargs: calls.append((args, kwargs)) or completed_probe())
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda args, **kwargs: calls.append((args, kwargs)) or completed_probe(),
+    )
     probe_media(tmp_path / "clip;touch owned.mp4")
     assert calls[0][0][-1].endswith("clip;touch owned.mp4")
     assert calls[0][1].get("shell", False) is False
@@ -370,7 +389,9 @@ def test_failed_stage_retains_prior_completed_stage(tmp_path: Path) -> None:
         store.start_stage(job, "inspect", "a", "b", "v1")
         store.complete_stage(job, "inspect", "{}")
         store.start_stage(job, "render", "c", "d", "v1")
-        store.fail_stage(job, "render", "rendering", "encoder failed", interrupted=False)
+        store.fail_stage(
+            job, "render", "rendering", "encoder failed", interrupted=False
+        )
         state = store.get_job(job)
     assert state["stages"]["inspect"]["status"] == "completed"
     assert state["stages"]["render"]["status"] == "failed"
@@ -419,7 +440,9 @@ git commit -m "feat: persist resumable video jobs"
 ```python
 def test_speed_and_transition_control_duration(valid_plan_data: dict) -> None:
     valid_plan_data["clips"] = [clip("a", 0, 10, speed=2), clip("a", 10, 20, speed=1)]
-    valid_plan_data["transitions"] = [{"from_clip": 0, "to_clip": 1, "kind": "dissolve", "duration": 1}]
+    valid_plan_data["transitions"] = [
+        {"from_clip": 0, "to_clip": 1, "kind": "dissolve", "duration": 1}
+    ]
     plan = EditPlan.model_validate(valid_plan_data)
     assert timeline_duration(plan) == Decimal("14")
 
@@ -475,7 +498,14 @@ git commit -m "feat: validate versioned edit plans"
 ```python
 def test_audio_is_whisper_compatible(tmp_path: Path) -> None:
     args = build_audio_args(tmp_path / "in.mp4", tmp_path / "out.wav")
-    assert args[-6:] == ["-vn", "-acodec", "pcm_s16le", "-ar", "16000", str(tmp_path / "out.wav")]
+    assert args[-6:] == [
+        "-vn",
+        "-acodec",
+        "pcm_s16le",
+        "-ar",
+        "16000",
+        str(tmp_path / "out.wav"),
+    ]
 
 
 def test_full_proxy_mapping_is_explicit() -> None:
@@ -529,7 +559,10 @@ def test_sample_plans_have_required_outputs(ordered_sources, probes, paths) -> N
     assert (horizontal.output.width, horizontal.output.height) == (1920, 1080)
     assert (vertical.output.width, vertical.output.height) == (1080, 1920)
     assert vertical.clips[0].framing.mode == "fit_background"
-    assert all(c.selection_reason == "phase1_sample" and c.confidence is None for c in horizontal.clips)
+    assert all(
+        c.selection_reason == "phase1_sample" and c.confidence is None
+        for c in horizontal.clips
+    )
 ```
 
 Add tests that planner follows chronology groups, caps requested interval to source duration, preserves audio availability, produces no gaps, and never pads weak/absent material.
@@ -579,7 +612,9 @@ git commit -m "feat: create deterministic sample edit plans"
 - [ ] **Step 1: Write failing compiler security and timing tests**
 
 ```python
-def test_compiler_never_returns_shell_text(plan_with_hostile_filename: EditPlan) -> None:
+def test_compiler_never_returns_shell_text(
+    plan_with_hostile_filename: EditPlan,
+) -> None:
     command = compile_render(plan_with_hostile_filename, "ffmpeg")
     assert isinstance(command.args, tuple)
     assert command.args[0] == "ffmpeg"
@@ -694,9 +729,13 @@ git commit -m "feat: orchestrate resumable video editing jobs"
 - [ ] **Step 1: Write failing end-to-end acceptance test**
 
 ```python
-def test_run_produces_validated_outputs_without_changing_originals(media_batch, cli, config_file) -> None:
+def test_run_produces_validated_outputs_without_changing_originals(
+    media_batch, cli, config_file
+) -> None:
     before = hash_tree(media_batch.input_dir)
-    result = cli.invoke(app, ["run", str(media_batch.input_dir), "--config", str(config_file)])
+    result = cli.invoke(
+        app, ["run", str(media_batch.input_dir), "--config", str(config_file)]
+    )
     assert result.exit_code == 0, result.stdout
     assert ffprobe_size(media_batch.output_dir / "long.mp4") == (1920, 1080)
     assert ffprobe_size(media_batch.output_dir / "short-01.mp4") == (1080, 1920)

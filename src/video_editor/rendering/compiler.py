@@ -194,6 +194,8 @@ def compile_render(
     """Compile plan into one shell-free FFmpeg command."""
     selected_encoder = encoder
     warnings: list[RenderWarning] = []
+    if plan.output.codec != "libx264":
+        raise ValueError(f"unsupported output codec: {plan.output.codec}")
     if encoder != "libx264":
         supported, reason = _hardware_probe(ffmpeg, encoder)
         if not supported:
@@ -209,9 +211,13 @@ def compile_render(
             )
 
     source_paths = [source.path.resolve() for source in plan.sources]
+    source_parents = {source.parent for source in source_paths}
     root = (output_dir or Path.cwd() / ".video-editor-output").resolve()
-    if any(root == source or root in source.parents for source in source_paths):
-        raise ValueError("render output root cannot contain source media")
+    if any(
+        root == parent or root in parent.parents or parent in root.parents
+        for parent in source_parents
+    ):
+        raise ValueError("render output root cannot overlap source tree")
     root.mkdir(parents=True, exist_ok=True)
     name = output_name or f"{plan.output.kind}.mp4"
     if Path(name).name != name or name in {"", ".", ".."}:

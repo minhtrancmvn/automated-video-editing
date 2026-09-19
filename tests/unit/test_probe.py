@@ -29,7 +29,9 @@ def completed_probe(payload: dict | None = None) -> subprocess.CompletedProcess[
                     "color_space": "bt2020nc",
                     "color_range": "tv",
                     "tags": {"rotate": "90"},
-                    "side_data_list": [{"side_data_type": "Display Matrix", "rotation": -90}],
+                    "side_data_list": [
+                        {"side_data_type": "Display Matrix", "rotation": -90}
+                    ],
                 }
             ],
             "format": {
@@ -58,7 +60,12 @@ def test_probe_parses_stream_metadata_and_warnings(monkeypatch, tmp_path: Path) 
     assert result.video.rotation == -90
     assert result.audio is None
     assert {warning.code for warning in result.warnings} == {
-        "hevc", "ten_bit", "rotation", "hdr", "possible_vfr", "missing_audio"
+        "hevc",
+        "ten_bit",
+        "rotation",
+        "hdr",
+        "possible_vfr",
+        "missing_audio",
     }
 
 
@@ -75,7 +82,13 @@ def test_probe_uses_argument_vector_without_shell(monkeypatch, tmp_path: Path) -
     assert calls[0][0][-1].endswith("clip;touch owned.mp4")
     assert calls[0][1].get("shell", False) is False
     assert calls[0][0][0] == "ffprobe"
-    assert calls[0][0][1:6] == ["-v", "error", "-show_format", "-show_streams", "-print_format"]
+    assert calls[0][0][1:6] == [
+        "-v",
+        "error",
+        "-show_format",
+        "-show_streams",
+        "-print_format",
+    ]
 
 
 @pytest.mark.parametrize("color_value", ["unknown", "unspecified", "reserved"])
@@ -97,13 +110,18 @@ def test_probe_warns_for_uninformative_color_values(
         ],
         "format": {},
     }
-    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: completed_probe(payload))
+    monkeypatch.setattr(
+        subprocess, "run", lambda *args, **kwargs: completed_probe(payload)
+    )
 
     result = probe_media(tmp_path / "clip.mp4")
 
     assert result.video is not None
     assert result.video.color_transfer == color_value
-    assert {warning.code for warning in result.warnings} == {"missing_audio", "unknown_color"}
+    assert {warning.code for warning in result.warnings} == {
+        "missing_audio",
+        "unknown_color",
+    }
 
 
 def test_probe_preserves_unknown_color_as_warning(monkeypatch, tmp_path: Path) -> None:
@@ -120,13 +138,18 @@ def test_probe_preserves_unknown_color_as_warning(monkeypatch, tmp_path: Path) -
         ],
         "format": {},
     }
-    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: completed_probe(payload))
+    monkeypatch.setattr(
+        subprocess, "run", lambda *args, **kwargs: completed_probe(payload)
+    )
 
     result = probe_media(tmp_path / "clip.mp4")
 
     assert result.video is not None
     assert result.video.color_transfer == "mystery"
-    assert {warning.code for warning in result.warnings} == {"missing_audio", "unknown_color"}
+    assert {warning.code for warning in result.warnings} == {
+        "missing_audio",
+        "unknown_color",
+    }
 
 
 @pytest.mark.parametrize(
@@ -166,7 +189,9 @@ def test_probe_warns_for_incomplete_media_payloads(
     payload: dict,
     expected_codes: set[str],
 ) -> None:
-    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: completed_probe(payload))
+    monkeypatch.setattr(
+        subprocess, "run", lambda *args, **kwargs: completed_probe(payload)
+    )
 
     result = probe_media(tmp_path / "clip.mp4")
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import Literal
 
 from video_editor.media.probe import MediaProbe
 from video_editor.media.sequencing import ChronologyGroup, SequencedSource
@@ -20,7 +21,7 @@ from video_editor.models.edit_plan import (
 _SAMPLE_SECONDS = Decimal(8)
 _PLANNER_VERSION = "phase1-sample-v1"
 _FRAME_RATE = Decimal(30)
-_CODEC = "libx264"
+_CODEC: Literal["libx264"] = "libx264"
 
 type ProbeMapping = Mapping[object, MediaProbe]
 type PathMapping = Mapping[object, Path]

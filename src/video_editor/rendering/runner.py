@@ -38,9 +38,29 @@ def _render_lease(path: Path) -> Iterator[None]:
 
 _POLL_INTERVAL_SECONDS = 0.1
 _INTERRUPT_GRACE_SECONDS = 10.0
+_PUBLICATION_SIGNALS = {signal.SIGINT, signal.SIGTERM}
 
 
-def run_render(command: RenderCommand, on_interrupt: Callable[[], None]) -> None:
+@contextmanager
+def _defer_publication_signals() -> Iterator[None]:
+    """Defer process interruption through rename and artifact persistence."""
+    if threading.current_thread() is threading.main_thread() and hasattr(
+        signal, "pthread_sigmask"
+    ):
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, _PUBLICATION_SIGNALS)
+        try:
+            yield
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+    else:
+        yield
+
+
+def run_render(
+    command: RenderCommand,
+    on_interrupt: Callable[[], None],
+    on_publish: Callable[[Path], None] | None = None,
+) -> None:
     """Execute render, preserving partial output when interrupted or failed."""
     command.partial_path.parent.mkdir(parents=True, exist_ok=True)
     process: subprocess.Popen[bytes] | None = None
@@ -122,11 +142,11 @@ def run_render(command: RenderCommand, on_interrupt: Callable[[], None]) -> None
                         command.output,
                         command.expected_duration,
                     )
-                raise_if_interrupted()
-                # Keep this check adjacent to replace: interruption here must never
-                # publish final output after validation has completed.
-                raise_if_interrupted()
-                command.partial_path.replace(command.final_path)
+                with _defer_publication_signals():
+                    raise_if_interrupted()
+                    command.partial_path.replace(command.final_path)
+                    if on_publish is not None:
+                        on_publish(command.final_path)
             finally:
                 for signum, handler in previous.items():
                     signal.signal(signum, cast(signal.Handlers, handler))

@@ -81,7 +81,7 @@ def _plan(
             width=1920,
             height=1080,
             frame_rate=Decimal(30),
-            codec="h264",
+            codec="libx264",
             audio=audio,
         ),
         provenance=Provenance(planner="test"),
@@ -129,7 +129,9 @@ def test_trim_and_speed_apply_to_video_and_audio(tmp_path: Path) -> None:
 def test_dissolve_uses_transition_duration_for_video_and_audio(tmp_path: Path) -> None:
     plan = _plan(
         tmp_path,
-        transition=Transition(from_clip=0, to_clip=1, kind="dissolve", duration=Decimal("1.5")),
+        transition=Transition(
+            from_clip=0, to_clip=1, kind="dissolve", duration=Decimal("1.5")
+        ),
     )
     graph = _graph(plan)
 
@@ -160,7 +162,7 @@ def test_vertical_fit_uses_blurred_background(tmp_path: Path) -> None:
                 width=1080,
                 height=1920,
                 frame_rate=Decimal(30),
-                codec="h264",
+                codec="libx264",
                 audio="source",
             )
         }

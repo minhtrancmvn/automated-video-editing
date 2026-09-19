@@ -6,7 +6,11 @@ import pytest
 
 from video_editor.config import AppConfig, PathSettings
 from video_editor.errors import ErrorCategory, VideoEditorError
-from video_editor.media.discovery import IDENTITY_VERSION, SourceCandidate
+from video_editor.media.discovery import (
+    IDENTITY_VERSION,
+    SourceCandidate,
+    bounded_fingerprint,
+)
 from video_editor.media.probe import MediaProbe
 from video_editor.media.storage import VolumeIdentity, inspect_volume
 from video_editor.models.edit_plan import (
@@ -129,9 +133,9 @@ def test_compile_render_never_places_output_beside_source(tmp_path: Path) -> Non
         provenance=Provenance(planner="test"),
     )
 
-    command = compile_render(plan, "ffmpeg", output_dir=tmp_path / "output")
+    command = compile_render(plan, "ffmpeg", output_dir=tmp_path.parent / "output")
 
-    assert command.final_path.parent == (tmp_path / "output").resolve()
+    assert command.final_path.parent == (tmp_path.parent / "output").resolve()
     assert command.final_path != source
     assert source.read_bytes() == b"source"
 
@@ -256,6 +260,64 @@ def test_validate_reuse_revalidates_every_recorded_output(
     assert validate.call_count == 2
 
 
+def test_render_from_plan_rejects_changed_second_source_before_job_creation(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    first = tmp_path / "sources-a" / "first.mp4"
+    second = tmp_path / "sources-b" / "second.mp4"
+    first.parent.mkdir()
+    second.parent.mkdir()
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    plan = EditPlan(
+        schema_version=1,
+        planner_version="test",
+        sources=[
+            PlanSource(
+                id="first",
+                path=first,
+                identity=f"{IDENTITY_VERSION}:{bounded_fingerprint(first)}",
+                duration=Decimal(1),
+            ),
+            PlanSource(
+                id="second",
+                path=second,
+                identity=f"{IDENTITY_VERSION}:{bounded_fingerprint(second)}",
+                duration=Decimal(1),
+            ),
+        ],
+        clips=[
+            TimelineClip(
+                source_id="first",
+                source_start=Decimal(0),
+                source_end=Decimal(1),
+                timeline_start=Decimal(0),
+                speed=Decimal(1),
+                framing=Framing(mode="center_crop"),
+                selection_reason="test",
+            )
+        ],
+        output=OutputSpec(
+            kind="short",
+            width=320,
+            height=240,
+            frame_rate=Decimal(10),
+            codec="libx264",
+            audio="none",
+        ),
+        provenance=Provenance(planner="test"),
+    )
+    second.write_bytes(b"changed")
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(plan.model_dump_json())
+    with JobStore(tmp_path / "state.db") as store:
+        service = WorkflowService(config, store)
+        with pytest.raises(VideoEditorError, match="identity changed"):
+            service.render_from_plan(plan_path)
+        assert store.connection.execute("SELECT count(*) FROM jobs").fetchone()[0] == 0
+
+
 def test_new_job_rejects_roots_overlapping_input_root(tmp_path: Path) -> None:
     input_path = tmp_path / "input"
     input_path.mkdir()
@@ -273,6 +335,29 @@ def test_new_job_rejects_roots_overlapping_input_root(tmp_path: Path) -> None:
         service = WorkflowService(config, store)
         with pytest.raises(VideoEditorError, match="overlaps input/source root"):
             service._new_job(input_path)
+
+
+def test_plan_source_parents_each_protect_configured_roots(tmp_path: Path) -> None:
+    source_a = tmp_path / "source-a" / "a.mp4"
+    source_b = tmp_path / "source-b" / "b.mp4"
+    source_a.parent.mkdir()
+    source_b.parent.mkdir()
+    source_a.write_bytes(b"a")
+    source_b.write_bytes(b"b")
+    config = AppConfig(
+        PathSettings(
+            tmp_path / "unused-input",
+            tmp_path / "source-b" / "workspace",
+            tmp_path / "cache",
+            tmp_path / "output",
+            tmp_path / "state",
+        ),
+        1,
+    )
+    with JobStore(tmp_path / "state.db") as store:
+        service = WorkflowService(config, store)
+        with pytest.raises(VideoEditorError, match="workspace root overlaps"):
+            service._validate_roots(source_a.parent, [source_a, source_b])
 
 
 def test_destination_volume_rejects_mount_point_change(

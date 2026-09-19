@@ -25,7 +25,7 @@ def _command(tmp_path: Path) -> RenderCommand:
             width=16,
             height=16,
             frame_rate=Decimal(16),
-            codec="h264",
+            codec="libx264",
             audio="none",
         ),
     )
@@ -203,11 +203,12 @@ def test_runner_rejects_second_process_for_same_output(
 ) -> None:
     script = """
 import time
+import sys
 from pathlib import Path
 from video_editor.rendering.compiler import RenderCommand
 from video_editor.rendering.runner import run_render
 from decimal import Decimal
-command = RenderCommand(("python", "-c", "import time; time.sleep(0.4)"), Path(r"{}"), Path(r"{}"), Decimal(1), None)
+command = RenderCommand((sys.executable, "-c", "import time; time.sleep(0.4)"), Path(r"{}"), Path(r"{}"), Decimal(1), None)
 try:
     run_render(command, lambda: None)
 except Exception as exc:
@@ -267,6 +268,49 @@ def test_runner_interrupt_after_validation_keeps_partial(
     assert interrupted
     assert command.partial_path.exists()
     assert not command.final_path.exists()
+
+
+def test_runner_blocks_signals_through_publication_and_artifact_commit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    command = _command(tmp_path)
+    calls: list[str] = []
+
+    class Process:
+        def wait(self, timeout: float | None = None) -> int:
+            command.partial_path.write_bytes(b"partial")
+            return 0
+
+        def poll(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "video_editor.rendering.runner.subprocess.Popen",
+        lambda *_args, **_kwargs: Process(),
+    )
+    monkeypatch.setattr(
+        "video_editor.rendering.runner.validate_output", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        "video_editor.rendering.runner.signal.getsignal", lambda _signum: None
+    )
+    monkeypatch.setattr(
+        "video_editor.rendering.runner.signal.signal", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        "video_editor.rendering.runner.signal.pthread_sigmask",
+        lambda how, signals: calls.append(f"mask:{how}") or set(),
+    )
+
+    def publish(path: Path) -> None:
+        calls.append(f"publish:{path.name}")
+
+    run_render(command, lambda: None, publish)
+
+    assert command.final_path.exists()
+    assert calls[0].startswith("mask:")
+    assert calls[1] == "publish:short.mp4"
+    assert calls[-1].startswith("mask:")
 
 
 def test_runner_skips_signal_registration_outside_main_thread(

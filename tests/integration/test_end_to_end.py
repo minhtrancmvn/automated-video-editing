@@ -6,8 +6,12 @@ import hashlib
 import json
 import re
 import shutil
+import signal
 import socket
+import sqlite3
 import subprocess
+import sys
+import time
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -229,6 +233,80 @@ def test_missing_configured_output_volume_during_write_resumes_after_restore(
         rendered = service.resume(job_id)
         assert len(rendered["outputs"]) == 2
         assert service.status(job_id)["stages"]["render"]["status"] == "completed"
+
+
+def test_real_ffmpeg_interruption_persists_and_resumes_without_rerendering_valid_output(
+    tmp_path: Path, media_batch: MediaBatch, config_file: Path
+) -> None:
+    config = resolve_config(config_file)
+    with JobStore(config.paths.state_dir / "jobs.sqlite3") as store:
+        service = WorkflowService(config, store)
+        job_id = service._new_job(media_batch.input_dir)
+        service._ensure_inspect(job_id, media_batch.input_dir)
+        service._ensure_proxy(job_id)
+        planned = service._ensure_plan(job_id)
+        plan_paths = [Path(value) for value in planned["plans"]]
+        first = service._render_plan(job_id, plan_paths[0])
+        first_output = Path(first["output"])
+        first_digest = hashlib.sha256(first_output.read_bytes()).hexdigest()
+        config_json = json.dumps(
+            {"job_id": job_id, "config": str(config_file), "plans": planned}
+        )
+
+    script = """
+import json
+import sys
+from pathlib import Path
+from video_editor.config import resolve_config
+from video_editor.persistence.database import JobStore
+from video_editor.workflow import WorkflowService
+payload = json.loads(sys.argv[1])
+config = resolve_config(Path(payload["config"]))
+with JobStore(config.paths.state_dir / "jobs.sqlite3") as store:
+    service = WorkflowService(config, store)
+    service._ensure_render(payload["job_id"], payload["plans"])
+"""
+    process = subprocess.Popen([sys.executable, "-c", script, config_json])
+    second_output = config.paths.output_dir / job_id / "short-01.mp4"
+    partial = second_output.with_name(second_output.name + ".partial")
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        if partial.exists() and partial.stat().st_size > 0:
+            break
+        if process.poll() is not None:
+            pytest.fail(f"workflow exited before interruption: {process.returncode}")
+        time.sleep(0.05)
+    else:
+        process.kill()
+        pytest.fail("real FFmpeg render did not create partial output")
+
+    process.send_signal(signal.SIGTERM)
+    assert process.wait(timeout=20) != 0
+    with JobStore(config.paths.state_dir / "jobs.sqlite3") as store:
+        service = WorkflowService(config, store)
+        interrupted = service.status(job_id)
+        assert interrupted["status"] == "interrupted"
+        assert interrupted["stages"]["render"]["status"] == "interrupted"
+        assert partial.exists()
+        assert first_output.exists()
+        result = service.resume(job_id)
+        completed = service.status(job_id)
+
+    assert completed["status"] == "completed"
+    assert completed["stages"]["render"]["status"] == "completed"
+    assert len(result["outputs"]) == 2
+    assert first_digest == hashlib.sha256(first_output.read_bytes()).hexdigest()
+    assert not partial.exists()
+    assert second_output.exists()
+    connection = sqlite3.connect(config.paths.state_dir / "jobs.sqlite3")
+    try:
+        rows = connection.execute(
+            "SELECT path FROM artifacts WHERE job_id = ? AND stage_name = 'render'",
+            (job_id,),
+        ).fetchall()
+    finally:
+        connection.close()
+    assert {Path(row[0]).name for row in rows} == {"long.mp4", "short-01.mp4"}
 
 
 def test_run_produces_validated_outputs_without_changing_originals(

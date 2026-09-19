@@ -3,6 +3,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
 from video_editor.models.edit_plan import (
@@ -165,10 +166,47 @@ def test_unreferenced_source_without_audio_does_not_reject_plan() -> None:
     assert plan.sources[-1].has_audio is False
 
 
+def test_phase_one_rejects_unsupported_output_codec() -> None:
+    data = valid_plan_data()
+    data["output"]["codec"] = "hevc"
+    with pytest.raises(ValidationError, match="libx264"):
+        EditPlan.model_validate(data)
+
+
 def test_schema_version_and_checked_in_schema() -> None:
     assert json.loads(SCHEMA_PATH.read_text()) == EditPlan.model_json_schema()
+    Draft202012Validator.check_schema(json.loads(SCHEMA_PATH.read_text()))
     data = valid_plan_data()
     data["schema_version"] = 2
+    with pytest.raises(ValidationError):
+        EditPlan.model_validate(data)
+
+
+@pytest.mark.parametrize(
+    ("location", "value"),
+    [
+        (("sources", 0, "duration"), "-1"),
+        (("clips", 0, "speed"), "-1"),
+        (
+            ("transitions",),
+            [{"from_clip": 0, "to_clip": 1, "kind": "cut", "duration": "-1"}],
+        ),
+        (("clips", 0, "confidence"), "-0.1"),
+    ],
+)
+def test_checked_in_json_schema_rejects_negative_decimal_strings(
+    location: tuple[object, ...], value: object
+) -> None:
+    data = valid_plan_data()
+    if location == ("transitions",):
+        data["transitions"] = value
+    else:
+        target: object = data
+        for key in location[:-1]:
+            target = target[key]  # type: ignore[index]
+        target[location[-1]] = value  # type: ignore[index]
+    validator = Draft202012Validator(json.loads(SCHEMA_PATH.read_text()))
+    assert list(validator.iter_errors(data))
     with pytest.raises(ValidationError):
         EditPlan.model_validate(data)
 

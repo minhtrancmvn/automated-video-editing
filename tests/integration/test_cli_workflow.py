@@ -5,6 +5,15 @@ import pytest
 from typer.testing import CliRunner
 
 from video_editor.cli import app
+from video_editor.models.edit_plan import (
+    EditPlan,
+    Framing,
+    OutputSpec,
+    PlanSource,
+    Provenance,
+    TimelineClip,
+    write_plan,
+)
 
 
 def test_service_rejects_missing_external_state_volume_before_store_open(
@@ -21,6 +30,82 @@ def test_service_rejects_missing_external_state_volume_before_store_open(
     assert result.exit_code == 11
     assert "not mounted" in result.output
     assert not missing.exists()
+
+
+def test_state_overlap_is_rejected_before_database_parent_creation(
+    tmp_path: Path,
+) -> None:
+    input_dir = tmp_path / "input"
+    state_dir = input_dir / "state"
+    config = tmp_path / "config.toml"
+    config.write_text(
+        f"""[paths]\ninput_dir = \"{input_dir}\"\nworkspace_dir = \"{tmp_path}/workspace\"\ncache_dir = \"{tmp_path}/cache\"\noutput_dir = \"{tmp_path}/output\"\nstate_dir = \"{state_dir}\"\n[settings]\nstorage_reserve_bytes = 0\n"""
+    )
+
+    result = CliRunner().invoke(app, ["status", "missing", "--config", str(config)])
+
+    assert result.exit_code == 11
+    assert "state root overlaps input/source root" in result.output
+    assert not state_dir.exists()
+
+
+def test_render_from_plan_source_overlap_rejected_before_database_parent_creation(
+    tmp_path: Path,
+) -> None:
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    source = source_dir / "clip.mp4"
+    source.write_bytes(b"source")
+    plan = tmp_path / "plan.json"
+    write_plan(
+        EditPlan(
+            schema_version=1,
+            planner_version="test",
+            sources=[
+                PlanSource(
+                    id="source",
+                    path=source,
+                    identity="identity",
+                    duration=1,
+                    has_audio=False,
+                )
+            ],
+            clips=[
+                TimelineClip(
+                    source_id="source",
+                    source_start=0,
+                    source_end=1,
+                    timeline_start=0,
+                    speed=1,
+                    framing=Framing(mode="center_crop"),
+                    selection_reason="test",
+                )
+            ],
+            output=OutputSpec(
+                kind="short",
+                width=16,
+                height=16,
+                frame_rate=16,
+                codec="libx264",
+                audio="silence",
+            ),
+            provenance=Provenance(planner="test"),
+        ),
+        plan,
+    )
+    config = tmp_path / "config.toml"
+    state_dir = source_dir / ".state"
+    config.write_text(
+        f"""[paths]\ninput_dir = \"{tmp_path / "input"}\"\nworkspace_dir = \"{tmp_path / "workspace"}\"\ncache_dir = \"{tmp_path / "cache"}\"\noutput_dir = \"{tmp_path / "output"}\"\nstate_dir = \"{state_dir}\"\n[settings]\nstorage_reserve_bytes = 0\n"""
+    )
+
+    result = CliRunner().invoke(
+        app, ["render-from-plan", str(plan), "--config", str(config)]
+    )
+
+    assert result.exit_code == 11
+    assert "state root overlaps input/source root" in result.output
+    assert not state_dir.exists()
 
 
 def test_cli_commands_require_config_and_expose_workflow(tmp_path: Path) -> None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from pydantic import (
     BaseModel,
@@ -34,6 +34,25 @@ def _decimal(value: Any) -> Decimal:
 
 class _PlanModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, core_schema: Any, handler: Any
+    ) -> dict[str, Any]:
+        schema = handler(core_schema)
+
+        def tighten_decimal_strings(value: Any) -> None:
+            if isinstance(value, dict):
+                if value.get("type") == "string" and "pattern" in value:
+                    value["pattern"] = value["pattern"].replace("[+-]?", r"\+?")
+                for child in value.values():
+                    tighten_decimal_strings(child)
+            elif isinstance(value, list):
+                for child in value:
+                    tighten_decimal_strings(child)
+
+        tighten_decimal_strings(schema)
+        return cast(dict[str, Any], schema)
 
 
 class PlanSource(_PlanModel):
@@ -113,7 +132,7 @@ class OutputSpec(_PlanModel):
     width: int = Field(gt=0)
     height: int = Field(gt=0)
     frame_rate: Decimal = Field(gt=0)
-    codec: str = Field(min_length=1)
+    codec: Literal["libx264"]
     audio: Literal["source", "silence", "none"] = "source"
     color: str = "passthrough"
 

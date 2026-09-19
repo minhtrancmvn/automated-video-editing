@@ -1,32 +1,33 @@
-# Task Plan: Fix Task 12 Findings
+# Task Plan: Close Verified Whole-Branch Findings
 
 ## Goal
-Fix four remaining Task 12 findings without regressing prior recovery/storage fixes, add required regressions, pass all requested quality gates, and commit changes.
+Fix all ten verified findings, add regressions including real FFmpeg interruption recovery, pass every requested quality gate, and commit focused changes.
 
 ## Phases
-- [x] Phase 1: Read current code, tests, and repository state
-- [x] Phase 2: Implement interruption, disk-scope, GoPro grouping, and formatting fixes
-- [x] Phase 3: Run targeted and full verification commands
-- [ ] Phase 4: Review diff, confirm evidence, and commit
+- [x] Phase 1: Read spec, implementation, tests, and map each finding
+- [x] Phase 2: Add regression tests for safety, schema, cache, finalization, and interruption
+- [x] Phase 3: Implement source preflight, root/state safety, codec/schema, cache, and signal fixes
+- [x] Phase 4: Add and pass real FFmpeg workflow interruption/resume integration
+- [x] Phase 5: Run full quality gate, review diff, commit, and report
 
 ## Key Questions
-1. Where does render interruption polling and process termination happen, and how can bounded SIGTERM/kill waiting be tested?
-2. What exact paths are included by estimated peak storage, report wording, and benchmark sampling?
-3. How does GoPro discovery assign chapters across sessions, and where should ambiguity warnings/grouping be preserved?
-4. Which changed files fail Ruff or formatting, and what build/help/diff checks exist?
+1. Where do render-from-plan preflight, source identity, root safety, codec validation, and state initialization live?
+2. What metadata and probes define valid proxy/audio cache reuse?
+3. How do validation/finalization signals and persisted workflow recovery interact?
+4. Which checked-in schema constraints must change to match Pydantic?
+5. Can resume reuse valid outputs after real FFmpeg interruption without rerunning them?
 
 ## Decisions Made
-- Work only in current writable worktree; no agents.
-- Preserve existing recovery/storage behavior outside required fixes.
-- Use render-output-only scope consistently because current estimate models only encoded render outputs; sampling all generated workspace/cache/output bytes would falsely compare broader actual usage against a narrower estimate.
-- Use source parent path as session metadata when it uniquely identifies repeated GoPro sessions; otherwise retain discovery-order session chunks and warn explicitly.
+- Restrict Phase 1 `OutputSpec.codec` to `libx264`; unsupported values fail plan validation with stable plan category.
+- Preflight every plan source as readable regular file and recompute `bounded-v1` identity before job/artifact creation.
+- Compare every configured generated/state root against all source parents before opening SQLite or creating directories.
+- Validate reusable proxy/audio artifacts through ffprobe and persisted source/settings/tool/mapping identity; regenerate invalid cache entries.
+- Block SIGINT/SIGTERM around final rename and persistence callback so publication and artifact commit form one deferred-signal section.
+- Preserve no-cloud behavior, external SSD checks, and pending real HERO12 validation.
 
 ## Errors Encountered
-- Initial worktree branch pointed at pre-implementation commit `bf52e01`; reset current isolated worktree to requested Task 12 baseline `df7f470` before edits.
-- Initial broad `rg` command used unmatched zsh glob `README*`; reran searches against explicit project paths.
-- Direct `pytest` and `python3 -m pytest` lacked installed test tooling; used locked `uv run` environment.
-- First targeted test run exposed missing fake `terminate()` and one incorrect wait-call assertion; fixed test double and assertion, then reran successfully.
-- Full-project `ruff format .` touched unrelated pre-existing unformatted files; restored those paths and retained formatting only on requested changed files.
+- Initial worktree started before implementation history; reset isolated branch to current implementation commit `9bb4d26` before edits.
+- Baseline tests created untracked bytecode/render output because repository lacks ignore rules; removed generated files without editing `.gitignore`.
 
 ## Status
-**Currently in Phase 4** - Final evidence complete; commit pending
+**Currently in Phase 5** - Quality gates passed; reviewing final diff before commit.

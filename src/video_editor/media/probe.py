@@ -75,9 +75,22 @@ class MediaProbe(BaseModel):
 
 
 _KNOWN_COLOR_VALUES = {
-    "bt709", "bt2020", "bt2020nc", "bt2020ncl", "bt2020cl", "smpte170m",
-    "smpte240m", "smpte2084", "arib-std-b67", "iec61966-2-1", "rgb",
-    "gbr", "smpte428", "log", "tv", "full",
+    "bt709",
+    "bt2020",
+    "bt2020nc",
+    "bt2020ncl",
+    "bt2020cl",
+    "smpte170m",
+    "smpte240m",
+    "smpte2084",
+    "arib-std-b67",
+    "iec61966-2-1",
+    "rgb",
+    "gbr",
+    "smpte428",
+    "log",
+    "tv",
+    "full",
 }
 _UNINFORMATIVE_COLOR_VALUES = {"unknown", "unspecified", "reserved"}
 
@@ -152,7 +165,11 @@ def _inspect_warnings(
 ) -> list[InspectionWarning]:
     warnings: list[InspectionWarning] = []
     if not has_format:
-        warnings.append(_warning("missing_format", "ffprobe payload has no container format metadata"))
+        warnings.append(
+            _warning(
+                "missing_format", "ffprobe payload has no container format metadata"
+            )
+        )
     if video is None:
         warnings.append(_warning("no_video", "source has no video stream"))
     else:
@@ -165,12 +182,15 @@ def _inspect_warnings(
             warnings.append(
                 _warning(
                     "missing_video_metadata",
-                    "video stream is missing core metadata: " + ", ".join(missing_fields),
+                    "video stream is missing core metadata: "
+                    + ", ".join(missing_fields),
                 )
             )
         if video.codec_name == "hevc":
             warnings.append(_warning("hevc", "source uses HEVC video"))
-        if video.pix_fmt is not None and re.search(r"(?:10|12|14|16)le?$", video.pix_fmt):
+        if video.pix_fmt is not None and re.search(
+            r"(?:10|12|14|16)le?$", video.pix_fmt
+        ):
             warnings.append(_warning("ten_bit", "source uses high bit-depth video"))
         if video.rotation not in (None, 0):
             warnings.append(_warning("rotation", "source contains rotation metadata"))
@@ -181,13 +201,22 @@ def _inspect_warnings(
             and video.r_frame_rate is not None
             and abs(video.avg_frame_rate - video.r_frame_rate) > 1e-6
         ):
-            warnings.append(_warning("possible_vfr", "average and nominal frame rates differ"))
-        for value in (video.color_primaries, video.color_transfer, video.color_space, video.color_range):
+            warnings.append(
+                _warning("possible_vfr", "average and nominal frame rates differ")
+            )
+        for value in (
+            video.color_primaries,
+            video.color_transfer,
+            video.color_space,
+            video.color_range,
+        ):
             if value is not None and (
                 value.lower() not in _KNOWN_COLOR_VALUES
                 or value.lower() in _UNINFORMATIVE_COLOR_VALUES
             ):
-                warnings.append(_warning("unknown_color", f"unknown color metadata: {value}"))
+                warnings.append(
+                    _warning("unknown_color", f"unknown color metadata: {value}")
+                )
                 break
     if audio is None:
         warnings.append(_warning("missing_audio", "source has no audio stream"))
@@ -230,29 +259,49 @@ def _stream_metadata(stream: dict[str, Any]) -> VideoStream | AudioStream:
 def probe_media(path: Path, ffprobe: str = "ffprobe") -> MediaProbe:
     """Run ffprobe without a shell and parse its JSON output."""
 
-    args = [ffprobe, "-v", "error", "-show_format", "-show_streams", "-print_format", "json", str(path)]
+    args = [
+        ffprobe,
+        "-v",
+        "error",
+        "-show_format",
+        "-show_streams",
+        "-print_format",
+        "json",
+        str(path),
+    ]
     try:
         completed = subprocess.run(
             args, capture_output=True, text=True, shell=False, check=False
         )
     except OSError as exc:
-        raise VideoEditorError(ErrorCategory.INSPECTION, f"ffprobe failed for {path}: {exc}") from exc
+        raise VideoEditorError(
+            ErrorCategory.INSPECTION, f"ffprobe failed for {path}: {exc}"
+        ) from exc
     if completed.returncode != 0:
         detail = completed.stderr.strip() or "unknown ffprobe error"
-        raise VideoEditorError(ErrorCategory.INSPECTION, f"ffprobe failed for {path}: {detail}")
+        raise VideoEditorError(
+            ErrorCategory.INSPECTION, f"ffprobe failed for {path}: {detail}"
+        )
     try:
         payload = json.loads(completed.stdout)
     except (TypeError, json.JSONDecodeError) as exc:
-        raise VideoEditorError(ErrorCategory.INSPECTION, f"ffprobe returned invalid JSON for {path}") from exc
+        raise VideoEditorError(
+            ErrorCategory.INSPECTION, f"ffprobe returned invalid JSON for {path}"
+        ) from exc
     if not isinstance(payload, dict):
-        raise VideoEditorError(ErrorCategory.INSPECTION, f"ffprobe returned invalid data for {path}")
+        raise VideoEditorError(
+            ErrorCategory.INSPECTION, f"ffprobe returned invalid data for {path}"
+        )
 
     streams = payload.get("streams")
     video: VideoStream | None = None
     audio: AudioStream | None = None
     if isinstance(streams, list):
         for raw_stream in streams:
-            if not isinstance(raw_stream, dict) or raw_stream.get("codec_type") not in {"video", "audio"}:
+            if not isinstance(raw_stream, dict) or raw_stream.get("codec_type") not in {
+                "video",
+                "audio",
+            }:
                 continue
             parsed = _stream_metadata(raw_stream)
             if isinstance(parsed, VideoStream) and video is None:

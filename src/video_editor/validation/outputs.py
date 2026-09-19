@@ -24,14 +24,24 @@ def validate_output(
     except VideoEditorError as exc:
         raise VideoEditorError(ErrorCategory.OUTPUT, str(exc)) from exc
     if probe.video is None:
-        raise VideoEditorError(ErrorCategory.OUTPUT, f"output has no video stream: {path}")
+        raise VideoEditorError(
+            ErrorCategory.OUTPUT, f"output has no video stream: {path}"
+        )
+    if output.codec == "libx264" and probe.video.codec_name != "h264":
+        raise VideoEditorError(
+            ErrorCategory.OUTPUT,
+            f"output codec is {probe.video.codec_name}; expected h264 for libx264",
+        )
     if (probe.video.width, probe.video.height) != (output.width, output.height):
         raise VideoEditorError(
             ErrorCategory.OUTPUT,
             f"output dimensions are {probe.video.width}x{probe.video.height}; "
             f"expected {output.width}x{output.height}",
         )
-    if probe.duration is None or abs(Decimal(str(probe.duration)) - expected_duration) > tolerance:
+    if (
+        probe.duration is None
+        or abs(Decimal(str(probe.duration)) - expected_duration) > tolerance
+    ):
         raise VideoEditorError(
             ErrorCategory.OUTPUT,
             f"output duration is {probe.duration}; expected {expected_duration} ± {tolerance}",

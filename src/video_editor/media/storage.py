@@ -52,10 +52,14 @@ def _filesystem(mount_point: Path) -> str | None:
         )
         info = plistlib.loads(result.stdout)
     except (OSError, subprocess.SubprocessError, plistlib.InvalidFileException) as exc:
-        raise _storage_error(f"cannot inspect filesystem for {mount_point}: {exc}") from exc
+        raise _storage_error(
+            f"cannot inspect filesystem for {mount_point}: {exc}"
+        ) from exc
     value = info.get("FilesystemName")
     if not isinstance(value, str):
-        raise _storage_error(f"cannot inspect filesystem for {mount_point}: missing FilesystemName")
+        raise _storage_error(
+            f"cannot inspect filesystem for {mount_point}: missing FilesystemName"
+        )
     return value.lower()
 
 

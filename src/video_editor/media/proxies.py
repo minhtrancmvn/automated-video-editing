@@ -252,9 +252,60 @@ def _run_and_cleanup(args: list[str], partial: Path) -> None:
         raise
 
 
-def _name(source: Path, source_id: str, suffix: str) -> str:
-    digest = hashlib.sha256(f"{source_id}:{source.name}".encode()).hexdigest()[:16]
+def _name(
+    source: Path,
+    source_id: str,
+    suffix: str,
+    settings: ProxySettings,
+    tool_version: str,
+) -> str:
+    cache_key = json.dumps(
+        {
+            "source_id": source_id,
+            "source_name": source.name,
+            "settings_hash": settings_hash(settings),
+            "tool_version": tool_version,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(cache_key.encode()).hexdigest()[:16]
     return f"{digest}{suffix}"
+
+
+def valid_cached_media(
+    path: Path,
+    settings: ProxySettings,
+    *,
+    kind: str,
+    ffprobe: str,
+) -> bool:
+    """Validate reusable derived media, rejecting missing and truncated files."""
+    if not path.is_file() or path.stat().st_size <= 0:
+        return False
+    try:
+        inspected = probe_media(path, ffprobe=ffprobe)
+    except VideoEditorError:
+        return False
+    if kind == "proxy":
+        video = inspected.video
+        return bool(
+            video is not None
+            and video.width is not None
+            and video.width <= settings.max_width
+            and video.codec_name == _expected_stream_codec(settings.video_codec)
+            and video.avg_frame_rate is not None
+            and abs(video.avg_frame_rate - settings.fps) <= 1e-6
+            and inspected.audio is None
+        )
+    audio = inspected.audio
+    return bool(
+        inspected.format_name == "wav"
+        and audio is not None
+        and audio.codec_name == "pcm_s16le"
+        and audio.channels == 1
+        and audio.sample_rate == 16000
+    )
 
 
 def create_analysis_media(
@@ -291,26 +342,36 @@ def create_analysis_media(
         raise VideoEditorError(
             ErrorCategory.INSPECTION, f"source duration unavailable: {source}"
         )
-    final_proxy = cache_root / _name(source, source_id, ".proxy.mp4")
+    final_proxy = cache_root / _name(
+        source, source_id, ".proxy.mp4", settings, tool_version
+    )
     partial_proxy = final_proxy.with_name(final_proxy.name + ".partial")
     _ensure_cache_output(cache_root, final_proxy)
     _ensure_cache_output(cache_root, partial_proxy)
-
-    _run_and_cleanup(
-        build_proxy_args(source, partial_proxy, settings, ffmpeg=ffmpeg), partial_proxy
-    )
-    proxy = _validated_rename(partial_proxy, final_proxy, settings, ffprobe=ffprobe)
+    if valid_cached_media(final_proxy, settings, kind="proxy", ffprobe=ffprobe):
+        proxy = final_proxy
+    else:
+        _run_and_cleanup(
+            build_proxy_args(source, partial_proxy, settings, ffmpeg=ffmpeg),
+            partial_proxy,
+        )
+        proxy = _validated_rename(partial_proxy, final_proxy, settings, ffprobe=ffprobe)
 
     audio: Path | None = None
     if source_probe.audio is not None:
-        final_audio = cache_root / _name(source, source_id, ".audio.wav")
+        final_audio = cache_root / _name(
+            source, source_id, ".audio.wav", settings, tool_version
+        )
         partial_audio = final_audio.with_name(final_audio.name + ".partial")
         _ensure_cache_output(cache_root, final_audio)
         _ensure_cache_output(cache_root, partial_audio)
-        _run_and_cleanup(
-            build_audio_args(source, partial_audio, ffmpeg=ffmpeg), partial_audio
-        )
-        audio = _validated_audio_rename(partial_audio, final_audio, ffprobe=ffprobe)
+        if valid_cached_media(final_audio, settings, kind="audio", ffprobe=ffprobe):
+            audio = final_audio
+        else:
+            _run_and_cleanup(
+                build_audio_args(source, partial_audio, ffmpeg=ffmpeg), partial_audio
+            )
+            audio = _validated_audio_rename(partial_audio, final_audio, ffprobe=ffprobe)
 
     mapping = identity_mapping(
         source_id, actual_duration, settings_hash(settings), tool_version

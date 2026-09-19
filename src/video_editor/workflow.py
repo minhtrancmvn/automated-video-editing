@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat as stat_module
 import threading
 from collections.abc import Callable
 from datetime import datetime
@@ -15,9 +17,20 @@ from pydantic import ValidationError
 from video_editor.config import AppConfig
 from video_editor.errors import ErrorCategory, VideoEditorError
 from video_editor.media.capabilities import detect_capabilities
-from video_editor.media.discovery import SourceCandidate, discover_sources
+from video_editor.media.discovery import (
+    SourceCandidate,
+    bounded_fingerprint,
+    discover_sources,
+)
 from video_editor.media.probe import MediaProbe, probe_media
-from video_editor.media.proxies import create_analysis_media
+from video_editor.media.proxies import (
+    ProxySettings,
+    create_analysis_media,
+    valid_cached_media,
+)
+from video_editor.media.proxies import (
+    settings_hash as proxy_settings_hash,
+)
 from video_editor.media.sequencing import sequence_sources
 from video_editor.media.storage import (
     VolumeIdentity,
@@ -161,22 +174,83 @@ class WorkflowService:
                     f"generated destination equals source media: {source}",
                 )
 
-    def _validate_roots(self, input_path: Path) -> None:
-        source_root = input_path.resolve()
-        for name, configured in (
-            ("workspace", self.config.paths.workspace_dir),
-            ("cache", self.config.paths.cache_dir),
-            ("output", self.config.paths.output_dir),
+    @staticmethod
+    def validate_configured_roots(
+        config: AppConfig, input_path: Path, source_paths: list[Path] | None = None
+    ) -> None:
+        roots = [input_path.resolve()]
+        roots.extend(path.resolve().parent for path in source_paths or [])
+        state_root = config.paths.state_dir.resolve()
+        for name, generated in (
+            ("workspace", config.paths.workspace_dir),
+            ("cache", config.paths.cache_dir),
+            ("output", config.paths.output_dir),
         ):
-            destination = configured.resolve()
+            generated_root = generated.resolve()
             if (
-                destination == source_root
-                or destination.is_relative_to(source_root)
-                or source_root.is_relative_to(destination)
+                state_root == generated_root
+                or state_root.is_relative_to(generated_root)
+                or generated_root.is_relative_to(state_root)
             ):
                 raise VideoEditorError(
                     ErrorCategory.STORAGE,
-                    f"configured {name} root overlaps input/source root: {configured} and {input_path}",
+                    f"configured state root overlaps {name} root: "
+                    f"{config.paths.state_dir} and {generated}",
+                )
+        for name, configured in (
+            ("workspace", config.paths.workspace_dir),
+            ("cache", config.paths.cache_dir),
+            ("output", config.paths.output_dir),
+            ("state", config.paths.state_dir),
+        ):
+            destination = configured.resolve()
+            for source_root in roots:
+                if (
+                    destination == source_root
+                    or destination.is_relative_to(source_root)
+                    or source_root.is_relative_to(destination)
+                ):
+                    raise VideoEditorError(
+                        ErrorCategory.STORAGE,
+                        f"configured {name} root overlaps input/source root: "
+                        f"{configured} and {source_root}",
+                    )
+
+    def _validate_roots(
+        self, input_path: Path, source_paths: list[Path] | None = None
+    ) -> None:
+        self.validate_configured_roots(self.config, input_path, source_paths)
+
+    def _preflight_plan_sources(self, plan: EditPlan) -> None:
+        source_paths = [source.path for source in plan.sources]
+        self._validate_roots(source_paths[0].parent, source_paths)
+        for source in plan.sources:
+            path = source.path
+            try:
+                stat = path.stat()
+            except OSError as exc:
+                raise VideoEditorError(
+                    ErrorCategory.PLAN,
+                    f"plan source is not readable: {path}: {exc}",
+                ) from exc
+            if not stat_module.S_ISREG(stat.st_mode):
+                raise VideoEditorError(
+                    ErrorCategory.PLAN, f"plan source is not a regular file: {path}"
+                )
+            if not os.access(path, os.R_OK):
+                raise VideoEditorError(
+                    ErrorCategory.PLAN, f"plan source is not readable: {path}"
+                )
+            try:
+                identity = bounded_fingerprint(path)
+            except VideoEditorError as exc:
+                raise VideoEditorError(
+                    ErrorCategory.PLAN, f"cannot verify plan source: {path}: {exc}"
+                ) from exc
+            if identity != source.identity.rsplit(":", 1)[-1]:
+                raise VideoEditorError(
+                    ErrorCategory.PLAN,
+                    f"plan source identity changed: {path}",
                 )
 
     def _stage_keys(self, fingerprint: Any, settings: Any) -> tuple[str, str]:
@@ -201,6 +275,48 @@ class WorkflowService:
             preserve_artifacts=preserve_artifacts,
         )
 
+    def _proxy_artifact_valid(
+        self, path: Path, metadata: dict[str, Any] | None
+    ) -> bool:
+        if not metadata:
+            return False
+        settings_data = metadata.get("settings")
+        if not isinstance(settings_data, dict):
+            return False
+        try:
+            settings = ProxySettings(
+                max_width=int(settings_data["max_width"]),
+                fps=int(settings_data["fps"]),
+                video_codec=str(settings_data["video_codec"]),
+            )
+            expected_kind = str(metadata["kind"])
+            expected_settings_hash = proxy_settings_hash(settings)
+            if metadata.get("settings_hash") != expected_settings_hash:
+                return False
+            mapping = metadata["mapping"]
+            if not isinstance(mapping, dict):
+                return False
+            source_id = metadata.get("source_id")
+            source_identity = metadata.get("source_identity")
+            if not isinstance(source_id, str) or not isinstance(source_identity, str):
+                return False
+            if mapping.get("source_id") != source_id:
+                return False
+            if ":" not in source_identity:
+                return False
+            if mapping.get("settings_hash") != metadata.get("settings_hash"):
+                return False
+            if mapping.get("tool_version") != metadata.get("tool_version"):
+                return False
+        except (KeyError, TypeError, ValueError):
+            return False
+        return valid_cached_media(
+            path,
+            settings,
+            kind=expected_kind,
+            ffprobe="ffprobe",
+        )
+
     def _artifact_valid(
         self, name: str, path: Path, metadata: dict[str, Any] | None = None
     ) -> bool:
@@ -209,6 +325,10 @@ class WorkflowService:
                 return False
             if name == "plan":
                 load_plan(path)
+            elif name == "proxy":
+                if not self._proxy_artifact_valid(path, metadata):
+                    path.unlink(missing_ok=True)
+                    return False
             elif name == "render":
                 if not metadata or not isinstance(metadata.get("plan"), str):
                     return False
@@ -346,6 +466,7 @@ class WorkflowService:
 
     def _inspect_stage(self, job_id: str, input_path: Path) -> dict[str, Any]:
         sources = self._discover(input_path)
+        self._validate_roots(input_path, [source.path for source in sources])
         workspace = self._configured_destination(
             self.config.paths.workspace_dir, job_id
         )
@@ -544,8 +665,23 @@ class WorkflowService:
 
     def _ensure_proxy(self, job_id: str) -> dict[str, Any]:
         job = self.store.get_job(job_id)
-        fingerprint = [item["source_id"] for item in job.get("sources", [])]
-        settings = {"cache": str(self.config.paths.cache_dir)}
+        fingerprint = [
+            {
+                "source_id": item["source_id"],
+                "identity": item.get("fingerprint", item["source_id"]),
+            }
+            for item in job.get("sources", [])
+        ]
+        proxy_settings = ProxySettings()
+        settings = {
+            "cache": str(self.config.paths.cache_dir),
+            "proxy_settings": {
+                "max_width": proxy_settings.max_width,
+                "fps": proxy_settings.fps,
+                "video_codec": proxy_settings.video_codec,
+            },
+            "tool_version": "ffmpeg",
+        }
         if self._stage_reusable(job, "proxy", fingerprint, settings):
             return cast(dict[str, Any], job["stages"]["proxy"]["result"])
 
@@ -570,12 +706,35 @@ class WorkflowService:
                 source_path = Path(source["path"])
                 self._protect_sources(cache, [source_path])
                 probe = probes[str(source["source_id"])]
+                source_id = str(source["source_id"])
+                source_identity = (
+                    f"{source['identity_version']}:{source['fingerprint']}"
+                )
+                tool_version = "ffmpeg"
                 proxy, audio, mapping = create_analysis_media(
                     source_path,
-                    str(source["source_id"]),
+                    source_id,
                     cache,
                     probe.duration,
+                    settings=proxy_settings,
+                    tool_version=tool_version,
                 )
+                mapping_data = {
+                    key: str(value) if hasattr(value, "as_tuple") else value
+                    for key, value in mapping.__dict__.items()
+                }
+                media_metadata = {
+                    "source_id": source_id,
+                    "source_identity": source_identity,
+                    "settings": {
+                        "max_width": proxy_settings.max_width,
+                        "fps": proxy_settings.fps,
+                        "video_codec": proxy_settings.video_codec,
+                    },
+                    "settings_hash": mapping.settings_hash,
+                    "tool_version": mapping.tool_version,
+                    "mapping": mapping_data,
+                }
                 for path in (proxy, audio):
                     if path is not None:
                         self.store.save_artifact(
@@ -583,13 +742,8 @@ class WorkflowService:
                             "proxy",
                             path,
                             {
-                                "source_id": source["source_id"],
-                                "mapping": {
-                                    key: str(value)
-                                    if hasattr(value, "as_tuple")
-                                    else value
-                                    for key, value in mapping.__dict__.items()
-                                },
+                                **media_metadata,
+                                "kind": "audio" if path == audio else "proxy",
                             },
                         )
                 artifacts.append(
@@ -648,20 +802,28 @@ class WorkflowService:
         )
         source_paths = [source.path for source in plan.sources]
         self._protect_sources(command.final_path, source_paths)
+        metadata: dict[str, Any] = {
+            "plan": str(path),
+            "warnings": [warning.message for warning in command.warnings],
+        }
+
+        def persist_published(final_path: Path) -> None:
+            self.store.save_artifact(job_id, "render", final_path, metadata)
+
         with self._render_lock:
-            run_render(command, lambda: None)
+            run_render(command, lambda: None, persist_published)
         validated = validate_output(
             command.final_path, plan.output, timeline_duration(plan)
         )
-        metadata = {
-            "plan": str(path),
-            "warnings": [warning.message for warning in command.warnings],
-            "width": validated.video.width if validated.video else None,
-            "height": validated.video.height if validated.video else None,
-            "duration": validated.duration,
-            "video_codec": validated.video.codec_name if validated.video else None,
-            "audio_codec": validated.audio.codec_name if validated.audio else None,
-        }
+        metadata.update(
+            {
+                "width": validated.video.width if validated.video else None,
+                "height": validated.video.height if validated.video else None,
+                "duration": validated.duration,
+                "video_codec": validated.video.codec_name if validated.video else None,
+                "audio_codec": validated.audio.codec_name if validated.audio else None,
+            }
+        )
         self.store.save_artifact(job_id, "render", command.final_path, metadata)
         return {
             "plan": str(path),
@@ -1020,7 +1182,8 @@ class WorkflowService:
         self._require_open_store()
         plan_path = Path(plan_path)
         plan = load_plan(plan_path)
-        job_id = self._new_job(plan.sources[0].path)
+        self._preflight_plan_sources(plan)
+        job_id = self._new_job(plan.sources[0].path.parent)
         output = self._configured_destination(self.config.paths.output_dir, job_id)
         fingerprint = {
             "path": str(plan_path),

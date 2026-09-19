@@ -25,7 +25,9 @@ class HostCapabilities(BaseModel):
 
 def _run(args: list[str]) -> subprocess.CompletedProcess[str] | None:
     try:
-        return subprocess.run(args, capture_output=True, text=True, shell=False, check=False)
+        return subprocess.run(
+            args, capture_output=True, text=True, shell=False, check=False
+        )
     except OSError:
         return None
 
@@ -62,21 +64,33 @@ def _memory_bytes() -> int | None:
         return None
 
 
-def detect_capabilities(ffmpeg: str = "ffmpeg", ffprobe: str = "ffprobe") -> HostCapabilities:
+def detect_capabilities(
+    ffmpeg: str = "ffmpeg", ffprobe: str = "ffprobe"
+) -> HostCapabilities:
     """Inspect installed binaries and host facts using argument vectors only."""
 
     ffmpeg_version_run = _run([ffmpeg, "-version"])
     ffprobe_version_run = _run([ffprobe, "-version"])
     encoder_run = _run([ffmpeg, "-hide_banner", "-encoders"])
-    encoders = _encoders((encoder_run.stdout + encoder_run.stderr) if encoder_run else "")
+    encoders = _encoders(
+        (encoder_run.stdout + encoder_run.stderr) if encoder_run else ""
+    )
     hardware = [
         encoder
         for encoder in encoders
         if "videotoolbox" in encoder or encoder.endswith(("_nvenc", "_qsv", "_vaapi"))
     ]
     return HostCapabilities(
-        ffmpeg_version=_version((ffmpeg_version_run.stdout + ffmpeg_version_run.stderr) if ffmpeg_version_run else ""),
-        ffprobe_version=_version((ffprobe_version_run.stdout + ffprobe_version_run.stderr) if ffprobe_version_run else ""),
+        ffmpeg_version=_version(
+            (ffmpeg_version_run.stdout + ffmpeg_version_run.stderr)
+            if ffmpeg_version_run
+            else ""
+        ),
+        ffprobe_version=_version(
+            (ffprobe_version_run.stdout + ffprobe_version_run.stderr)
+            if ffprobe_version_run
+            else ""
+        ),
         architecture=platform.machine() or "unknown",
         memory_bytes=_memory_bytes(),
         encoders=encoders,

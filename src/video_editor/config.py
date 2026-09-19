@@ -33,7 +33,9 @@ class AppConfig:
 
 def _path(value: Any, name: str) -> Path:
     if not isinstance(value, str) or not value:
-        raise VideoEditorError(ErrorCategory.CONFIGURATION, f"paths.{name} must be a non-empty string")
+        raise VideoEditorError(
+            ErrorCategory.CONFIGURATION, f"paths.{name} must be a non-empty string"
+        )
     return Path(value).expanduser()
 
 
@@ -44,11 +46,15 @@ def resolve_config(path: Path) -> AppConfig:
         with path.open("rb") as config_file:
             raw = tomllib.load(config_file)
     except (OSError, tomllib.TOMLDecodeError) as exc:
-        raise VideoEditorError(ErrorCategory.CONFIGURATION, f"cannot read configuration: {exc}") from exc
+        raise VideoEditorError(
+            ErrorCategory.CONFIGURATION, f"cannot read configuration: {exc}"
+        ) from exc
 
     paths = raw.get("paths")
     if not isinstance(paths, dict):
-        raise VideoEditorError(ErrorCategory.CONFIGURATION, "missing [paths] configuration")
+        raise VideoEditorError(
+            ErrorCategory.CONFIGURATION, "missing [paths] configuration"
+        )
     path_settings = PathSettings(
         input_dir=_path(paths.get("input_dir"), "input_dir"),
         workspace_dir=_path(paths.get("workspace_dir"), "workspace_dir"),
@@ -59,7 +65,9 @@ def resolve_config(path: Path) -> AppConfig:
 
     settings = raw.get("settings", {})
     if not isinstance(settings, dict):
-        raise VideoEditorError(ErrorCategory.CONFIGURATION, "[settings] must be a table")
+        raise VideoEditorError(
+            ErrorCategory.CONFIGURATION, "[settings] must be a table"
+        )
     reserve = settings.get("storage_reserve_bytes", raw.get("storage_reserve_bytes", 0))
     cloud_enabled = settings.get("cloud_enabled", raw.get("cloud_enabled", False))
     concurrency = settings.get("render_concurrency", raw.get("render_concurrency", 1))
@@ -69,9 +77,15 @@ def resolve_config(path: Path) -> AppConfig:
             "storage_reserve_bytes must be a non-negative integer",
         )
     if not isinstance(cloud_enabled, bool):
-        raise VideoEditorError(ErrorCategory.CONFIGURATION, "cloud_enabled must be boolean")
+        raise VideoEditorError(
+            ErrorCategory.CONFIGURATION, "cloud_enabled must be boolean"
+        )
     if cloud_enabled:
-        raise VideoEditorError(ErrorCategory.CONFIGURATION, "cloud_enabled is not supported in Phase 1")
+        raise VideoEditorError(
+            ErrorCategory.CONFIGURATION, "cloud_enabled is not supported in Phase 1"
+        )
     if type(concurrency) is not int or concurrency < 1:
-        raise VideoEditorError(ErrorCategory.CONFIGURATION, "render_concurrency must be positive")
+        raise VideoEditorError(
+            ErrorCategory.CONFIGURATION, "render_concurrency must be positive"
+        )
     return AppConfig(path_settings, reserve, cloud_enabled, concurrency)

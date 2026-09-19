@@ -28,7 +28,9 @@ def test_missing_volume_is_not_created(tmp_path: Path) -> None:
 
 
 def test_free_space_reserve(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr("video_editor.media.storage.shutil.disk_usage", lambda _: (100, 50, 10))
+    monkeypatch.setattr(
+        "video_editor.media.storage.shutil.disk_usage", lambda _: (100, 50, 10)
+    )
     with pytest.raises(VideoEditorError, match="insufficient free space"):
         assert_free_space(tmp_path, required_bytes=1, reserve_bytes=10)
     assert_free_space(tmp_path, required_bytes=0, reserve_bytes=10)
@@ -41,14 +43,18 @@ def test_cleanup_containment(tmp_path: Path) -> None:
     assert not is_within(root, tmp_path / "outside.mp4")
 
 
-def test_diskutil_failure_is_storage_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_diskutil_failure_is_storage_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setattr(storage.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(storage.shutil, "which", lambda _: None)
     with pytest.raises(VideoEditorError, match="diskutil is unavailable"):
         inspect_volume(tmp_path)
 
 
-def test_filesystem_policy_accepts_apfs_and_exfat(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_filesystem_policy_accepts_apfs_and_exfat(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setattr("video_editor.media.storage._filesystem", lambda _: "apfs")
     assert inspect_volume(tmp_path).filesystem == "apfs"
     monkeypatch.setattr("video_editor.media.storage._filesystem", lambda _: "exfat")
