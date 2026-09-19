@@ -1,0 +1,11 @@
+[paths]
+input_dir = "/Volumes/TravelSSD/footage"
+workspace_dir = "/Volumes/TravelSSD/video-editor/workspace"
+cache_dir = "/Volumes/TravelSSD/video-editor/cache"
+output_dir = "/Volumes/TravelSSD/video-editor/output"
+state_dir = "~/Library/Application Support/video-editor"
+
+[settings]
+storage_reserve_bytes = 10737418240
+cloud_enabled = false
+render_concurrency = 1
