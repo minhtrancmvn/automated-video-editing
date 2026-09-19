@@ -77,8 +77,9 @@ class MediaProbe(BaseModel):
 _KNOWN_COLOR_VALUES = {
     "bt709", "bt2020", "bt2020nc", "bt2020ncl", "bt2020cl", "smpte170m",
     "smpte240m", "smpte2084", "arib-std-b67", "iec61966-2-1", "rgb",
-    "unknown", "unspecified", "reserved", "gbr", "smpte428", "log", "tv", "full",
+    "gbr", "smpte428", "log", "tv", "full",
 }
+_UNINFORMATIVE_COLOR_VALUES = {"unknown", "unspecified", "reserved"}
 
 
 def _text(value: Any) -> str | None:
@@ -143,9 +144,30 @@ def _warning(code: str, message: str) -> InspectionWarning:
     return InspectionWarning(code=code, message=message)
 
 
-def _inspect_warnings(video: VideoStream | None, audio: AudioStream | None) -> list[InspectionWarning]:
+def _inspect_warnings(
+    video: VideoStream | None,
+    audio: AudioStream | None,
+    *,
+    has_format: bool,
+) -> list[InspectionWarning]:
     warnings: list[InspectionWarning] = []
-    if video is not None:
+    if not has_format:
+        warnings.append(_warning("missing_format", "ffprobe payload has no container format metadata"))
+    if video is None:
+        warnings.append(_warning("no_video", "source has no video stream"))
+    else:
+        missing_fields = [
+            field
+            for field in ("codec_name", "pix_fmt", "width", "height")
+            if getattr(video, field) is None
+        ]
+        if missing_fields:
+            warnings.append(
+                _warning(
+                    "missing_video_metadata",
+                    "video stream is missing core metadata: " + ", ".join(missing_fields),
+                )
+            )
         if video.codec_name == "hevc":
             warnings.append(_warning("hevc", "source uses HEVC video"))
         if video.pix_fmt is not None and re.search(r"(?:10|12|14|16)le?$", video.pix_fmt):
@@ -161,7 +183,10 @@ def _inspect_warnings(video: VideoStream | None, audio: AudioStream | None) -> l
         ):
             warnings.append(_warning("possible_vfr", "average and nominal frame rates differ"))
         for value in (video.color_primaries, video.color_transfer, video.color_space, video.color_range):
-            if value is not None and value.lower() not in _KNOWN_COLOR_VALUES:
+            if value is not None and (
+                value.lower() not in _KNOWN_COLOR_VALUES
+                or value.lower() in _UNINFORMATIVE_COLOR_VALUES
+            ):
                 warnings.append(_warning("unknown_color", f"unknown color metadata: {value}"))
                 break
     if audio is None:
@@ -234,8 +259,13 @@ def probe_media(path: Path, ffprobe: str = "ffprobe") -> MediaProbe:
                 video = parsed
             elif isinstance(parsed, AudioStream) and audio is None:
                 audio = parsed
-    fmt = payload.get("format")
-    fmt = fmt if isinstance(fmt, dict) else {}
+    raw_format = payload.get("format")
+    if isinstance(raw_format, dict):
+        has_format = True
+        fmt: dict[str, Any] = raw_format
+    else:
+        has_format = False
+        fmt = {}
     tags = fmt.get("tags")
     tags = tags if isinstance(tags, dict) else {}
     return MediaProbe(
@@ -245,7 +275,7 @@ def probe_media(path: Path, ffprobe: str = "ffprobe") -> MediaProbe:
         creation_time=_creation_time(tags.get("creation_time")),
         video=video,
         audio=audio,
-        warnings=_inspect_warnings(video, audio),
+        warnings=_inspect_warnings(video, audio, has_format=has_format),
     )
 
 

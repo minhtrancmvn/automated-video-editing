@@ -38,9 +38,11 @@ def _version(output: str) -> str | None:
 def _encoders(output: str) -> list[str]:
     result: list[str] = []
     for line in output.splitlines():
-        match = re.match(r"\s*[VASFS\.]{6}\s+(\S+)", line)
-        if match:
-            result.append(match.group(1))
+        # FFmpeg prints six capability flags, whose first character identifies
+        # stream type. Keep rows such as ``V....D libx264`` and ignore headers.
+        match = re.match(r"\s*([A-Z\.]{6})\s+(\S+)", line)
+        if match and match.group(1)[0] in "VAS":
+            result.append(match.group(2))
     return result
 
 

@@ -78,15 +78,99 @@ def test_probe_uses_argument_vector_without_shell(monkeypatch, tmp_path: Path) -
     assert calls[0][0][1:6] == ["-v", "error", "-show_format", "-show_streams", "-print_format"]
 
 
+@pytest.mark.parametrize("color_value", ["unknown", "unspecified", "reserved"])
+def test_probe_warns_for_uninformative_color_values(
+    monkeypatch,
+    tmp_path: Path,
+    color_value: str,
+) -> None:
+    payload = {
+        "streams": [
+            {
+                "codec_type": "video",
+                "codec_name": "h264",
+                "pix_fmt": "yuv420p",
+                "width": 1920,
+                "height": 1080,
+                "color_transfer": color_value,
+            }
+        ],
+        "format": {},
+    }
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: completed_probe(payload))
+
+    result = probe_media(tmp_path / "clip.mp4")
+
+    assert result.video is not None
+    assert result.video.color_transfer == color_value
+    assert {warning.code for warning in result.warnings} == {"missing_audio", "unknown_color"}
+
+
 def test_probe_preserves_unknown_color_as_warning(monkeypatch, tmp_path: Path) -> None:
-    payload = {"streams": [{"codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv420p", "color_transfer": "mystery"}], "format": {}}
+    payload = {
+        "streams": [
+            {
+                "codec_type": "video",
+                "codec_name": "h264",
+                "pix_fmt": "yuv420p",
+                "width": 1920,
+                "height": 1080,
+                "color_transfer": "mystery",
+            }
+        ],
+        "format": {},
+    }
     monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: completed_probe(payload))
 
     result = probe_media(tmp_path / "clip.mp4")
 
     assert result.video is not None
     assert result.video.color_transfer == "mystery"
-    assert any(w.code == "unknown_color" for w in result.warnings)
+    assert {warning.code for warning in result.warnings} == {"missing_audio", "unknown_color"}
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_codes"),
+    [
+        ({"streams": [], "format": {}}, {"missing_audio", "no_video"}),
+        (
+            {
+                "streams": [{"codec_type": "audio", "codec_name": "aac"}],
+                "format": {},
+            },
+            {"no_video"},
+        ),
+        (
+            {
+                "streams": [
+                    {
+                        "codec_type": "video",
+                        "codec_name": "h264",
+                        "pix_fmt": "yuv420p",
+                        "width": 1920,
+                        "height": 1080,
+                    }
+                ]
+            },
+            {"missing_audio", "missing_format"},
+        ),
+        (
+            {"streams": [{"codec_type": "video", "codec_name": "h264"}], "format": {}},
+            {"missing_audio", "missing_video_metadata"},
+        ),
+    ],
+)
+def test_probe_warns_for_incomplete_media_payloads(
+    monkeypatch,
+    tmp_path: Path,
+    payload: dict,
+    expected_codes: set[str],
+) -> None:
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: completed_probe(payload))
+
+    result = probe_media(tmp_path / "clip.mp4")
+
+    assert {warning.code for warning in result.warnings} == expected_codes
 
 
 def test_batch_warning_summary_deduplicates_codes() -> None:

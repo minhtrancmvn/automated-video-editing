@@ -17,7 +17,7 @@ def test_detect_capabilities_parses_versions_architecture_memory_and_encoders(mo
         return subprocess.CompletedProcess(
             args,
             0,
-            "Encoders:\n V..... h264_videotoolbox Apple VideoToolbox\n V..... libx264 H.264 / AVC / MPEG-4 AVC / part 10\n A..... aac AAC (Advanced Audio Coding)\n",
+            "Encoders:\n V....D h264_videotoolbox Apple VideoToolbox\n V....D libx264 H.264 / AVC / MPEG-4 AVC / part 10\n A..... aac AAC (Advanced Audio Coding)\n",
             "",
         )
 
