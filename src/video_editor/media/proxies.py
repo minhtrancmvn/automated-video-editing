@@ -168,13 +168,35 @@ def _ensure_cache_output(cache_root: Path, path: Path) -> None:
         )
 
 
-def _validated_rename(partial: Path, final: Path, *, ffprobe: str) -> Path:
+def _validated_rename(
+    partial: Path,
+    final: Path,
+    settings: ProxySettings,
+    *,
+    ffprobe: str,
+) -> Path:
     try:
         inspected = probe_media(partial, ffprobe=ffprobe)
     except VideoEditorError:
         partial.unlink(missing_ok=True)
         raise
-    if partial.stat().st_size <= 0 or inspected.video is None:
+    video = inspected.video
+    valid_frame_rate = (
+        video is not None
+        and video.avg_frame_rate is not None
+        and abs(video.avg_frame_rate - settings.fps) <= 1e-6
+    )
+    valid = (
+        partial.is_file()
+        and partial.stat().st_size > 0
+        and video is not None
+        and video.width is not None
+        and video.width <= settings.max_width
+        and video.codec_name == settings.video_codec
+        and valid_frame_rate
+        and inspected.audio is None
+    )
+    if not valid:
         partial.unlink(missing_ok=True)
         raise VideoEditorError(
             ErrorCategory.OUTPUT, f"invalid generated proxy: {partial}"
@@ -189,13 +211,31 @@ def _validated_audio_rename(partial: Path, final: Path, *, ffprobe: str) -> Path
     except VideoEditorError:
         partial.unlink(missing_ok=True)
         raise
-    if partial.stat().st_size <= 0 or inspected.audio is None:
+    audio = inspected.audio
+    valid = (
+        partial.is_file()
+        and partial.stat().st_size > 0
+        and inspected.format_name == "wav"
+        and audio is not None
+        and audio.codec_name == "pcm_s16le"
+        and audio.channels == 1
+        and audio.sample_rate == 16000
+    )
+    if not valid:
         partial.unlink(missing_ok=True)
         raise VideoEditorError(
             ErrorCategory.OUTPUT, f"invalid generated audio: {partial}"
         )
     partial.replace(final)
     return final
+
+
+def _run_and_cleanup(args: list[str], partial: Path) -> None:
+    try:
+        _run(args)
+    except BaseException:
+        partial.unlink(missing_ok=True)
+        raise
 
 
 def _name(source: Path, source_id: str, suffix: str) -> str:
@@ -235,8 +275,12 @@ def create_analysis_media(
     _ensure_cache_output(cache_root, final_proxy)
     _ensure_cache_output(cache_root, partial_proxy)
 
-    _run(build_proxy_args(source, partial_proxy, settings, ffmpeg=ffmpeg))
-    proxy = _validated_rename(partial_proxy, final_proxy, ffprobe=ffprobe)
+    _run_and_cleanup(
+        build_proxy_args(source, partial_proxy, settings, ffmpeg=ffmpeg), partial_proxy
+    )
+    proxy = _validated_rename(
+        partial_proxy, final_proxy, settings, ffprobe=ffprobe
+    )
 
     audio: Path | None = None
     if source_probe.audio is not None:
@@ -244,7 +288,9 @@ def create_analysis_media(
         partial_audio = final_audio.with_name(final_audio.name + ".partial")
         _ensure_cache_output(cache_root, final_audio)
         _ensure_cache_output(cache_root, partial_audio)
-        _run(build_audio_args(source, partial_audio, ffmpeg=ffmpeg))
+        _run_and_cleanup(
+            build_audio_args(source, partial_audio, ffmpeg=ffmpeg), partial_audio
+        )
         audio = _validated_audio_rename(partial_audio, final_audio, ffprobe=ffprobe)
 
     mapping = identity_mapping(

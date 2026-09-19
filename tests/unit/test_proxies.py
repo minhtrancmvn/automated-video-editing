@@ -3,12 +3,18 @@ from pathlib import Path
 
 import pytest
 
+from video_editor.media.probe import AudioStream, VideoStream
 from video_editor.media.proxies import (
     ProxySettings,
     build_audio_args,
     build_proxy_args,
     identity_mapping,
 )
+
+
+def write_derived(args: list[str], **kwargs: object) -> object:
+    Path(args[-1]).write_bytes(b"derived")
+    return type("Result", (), {"returncode": 0, "stderr": ""})()
 
 
 def test_audio_is_whisper_compatible(tmp_path: Path) -> None:
@@ -58,7 +64,7 @@ def test_default_proxy_settings() -> None:
 def test_no_audio_returns_none_and_outputs_stay_in_cache(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    from video_editor.media.probe import MediaProbe, VideoStream
+    from video_editor.media.probe import MediaProbe
     from video_editor.media.proxies import create_analysis_media
 
     source = tmp_path / "source.mp4"
@@ -67,7 +73,11 @@ def test_no_audio_returns_none_and_outputs_stay_in_cache(
     monkeypatch.setattr(
         "video_editor.media.proxies.probe_media",
         lambda path, ffprobe="ffprobe": MediaProbe(
-            path=path, duration=12.5, video=VideoStream(width=1920, height=1080)
+            path=path,
+            duration=12.5,
+            video=VideoStream(
+                codec_name="libx264", width=960, height=540, avg_frame_rate=15
+            ),
         ),
     )
     calls: list[tuple[list[str], dict]] = []
@@ -98,21 +108,33 @@ def test_no_audio_returns_none_and_outputs_stay_in_cache(
 def test_audio_output_is_created_only_inside_cache(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    from video_editor.media.probe import AudioStream, MediaProbe, VideoStream
+    from video_editor.media.probe import MediaProbe
     from video_editor.media.proxies import create_analysis_media
 
     source = tmp_path / "source.mp4"
     source.write_bytes(b"source")
     cache = tmp_path / "cache"
-    monkeypatch.setattr(
-        "video_editor.media.proxies.probe_media",
-        lambda path, ffprobe="ffprobe": MediaProbe(
+    def probe(path: Path, ffprobe: str = "ffprobe") -> MediaProbe:
+        if path.name.endswith(".audio.wav.partial"):
+            return MediaProbe(
+                path=path,
+                format_name="wav",
+                audio=AudioStream(
+                    codec_name="pcm_s16le", channels=1, sample_rate=16000
+                ),
+            )
+        return MediaProbe(
             path=path,
             duration=12.5,
-            video=VideoStream(width=1920, height=1080),
-            audio=AudioStream(channels=2),
-        ),
-    )
+            video=VideoStream(
+                codec_name="libx264", width=960, height=540, avg_frame_rate=15
+            ),
+            audio=None
+            if path.name.endswith(".proxy.mp4.partial")
+            else AudioStream(channels=2),
+        )
+
+    monkeypatch.setattr("video_editor.media.proxies.probe_media", probe)
 
     def run(args, **kwargs):
         Path(args[-1]).write_bytes(b"derived")
@@ -125,3 +147,123 @@ def test_audio_output_is_created_only_inside_cache(
     assert audio is not None and audio.parent == cache
     assert proxy.exists() and audio.exists()
     assert all(path.suffix != ".partial" for path in cache.iterdir())
+
+
+@pytest.mark.parametrize(
+    "video",
+    [
+        None,
+        VideoStream(codec_name="libx264", width=961, avg_frame_rate=15),
+        VideoStream(codec_name="h264", width=960, avg_frame_rate=15),
+        VideoStream(codec_name="libx264", width=960, avg_frame_rate=30),
+    ],
+)
+def test_invalid_proxy_properties_are_not_renamed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, video: VideoStream | None
+) -> None:
+    from video_editor.errors import ErrorCategory, VideoEditorError
+    from video_editor.media.probe import MediaProbe
+    from video_editor.media.proxies import create_analysis_media
+
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    cache = tmp_path / "cache"
+
+    def probe(path: Path, ffprobe: str = "ffprobe") -> MediaProbe:
+        if path.name.endswith(".partial"):
+            return MediaProbe(path=path, video=video)
+        return MediaProbe(path=path, duration=12.5, video=VideoStream())
+
+    monkeypatch.setattr("video_editor.media.proxies.probe_media", probe)
+    monkeypatch.setattr("video_editor.media.proxies.subprocess.run", write_derived)
+
+    with pytest.raises(VideoEditorError) as raised:
+        create_analysis_media(source, "source-1", cache)
+
+    assert raised.value.category == ErrorCategory.OUTPUT
+    assert not list(cache.glob("*.proxy.mp4"))
+    assert not list(cache.glob("*.partial"))
+    assert source.read_bytes() == b"source"
+
+
+@pytest.mark.parametrize(
+    "format_name,audio",
+    [
+        ("mov,mp4", AudioStream(codec_name="pcm_s16le", channels=1, sample_rate=16000)),
+        ("wav", None),
+        ("wav", AudioStream(codec_name="aac", channels=1, sample_rate=16000)),
+        ("wav", AudioStream(codec_name="pcm_s16le", channels=2, sample_rate=16000)),
+        ("wav", AudioStream(codec_name="pcm_s16le", channels=1, sample_rate=44100)),
+    ],
+)
+def test_invalid_audio_properties_are_not_renamed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    format_name: str,
+    audio: AudioStream | None,
+) -> None:
+    from video_editor.errors import ErrorCategory, VideoEditorError
+    from video_editor.media.probe import MediaProbe
+    from video_editor.media.proxies import create_analysis_media
+
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    cache = tmp_path / "cache"
+    proxy_video = VideoStream(
+        codec_name="libx264", width=960, height=540, avg_frame_rate=15
+    )
+
+    def probe(path: Path, ffprobe: str = "ffprobe") -> MediaProbe:
+        if path.name.endswith(".proxy.mp4.partial"):
+            return MediaProbe(path=path, video=proxy_video)
+        if path.name.endswith(".audio.wav.partial"):
+            return MediaProbe(path=path, format_name=format_name, audio=audio)
+        return MediaProbe(
+            path=path,
+            duration=12.5,
+            video=VideoStream(),
+            audio=AudioStream(),
+        )
+
+    monkeypatch.setattr("video_editor.media.proxies.probe_media", probe)
+    monkeypatch.setattr("video_editor.media.proxies.subprocess.run", write_derived)
+
+    with pytest.raises(VideoEditorError) as raised:
+        create_analysis_media(source, "source-1", cache)
+
+    assert raised.value.category == ErrorCategory.OUTPUT
+    assert len(list(cache.glob("*.proxy.mp4"))) == 1
+    assert not list(cache.glob("*.audio.wav"))
+    assert not list(cache.glob("*.partial"))
+    assert source.read_bytes() == b"source"
+
+
+def test_ffprobe_failure_cleans_partial_and_preserves_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from video_editor.errors import ErrorCategory, VideoEditorError
+    from video_editor.media.probe import MediaProbe
+    from video_editor.media.proxies import create_analysis_media
+
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    cache = tmp_path / "cache"
+    calls = 0
+
+    def probe(path: Path, ffprobe: str = "ffprobe") -> MediaProbe:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return MediaProbe(path=path, duration=12.5, video=VideoStream())
+        raise VideoEditorError(ErrorCategory.INSPECTION, "ffprobe failed")
+
+    monkeypatch.setattr("video_editor.media.proxies.probe_media", probe)
+    monkeypatch.setattr("video_editor.media.proxies.subprocess.run", write_derived)
+
+    with pytest.raises(VideoEditorError, match="ffprobe failed") as raised:
+        create_analysis_media(source, "source-1", cache)
+
+    assert raised.value.category == ErrorCategory.INSPECTION
+    assert not list(cache.glob("*.partial"))
+    assert not list(cache.glob("*.proxy.mp4"))
+    assert source.read_bytes() == b"source"
