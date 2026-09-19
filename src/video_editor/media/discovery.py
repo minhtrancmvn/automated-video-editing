@@ -3,23 +3,27 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
 from video_editor.errors import ErrorCategory, VideoEditorError
 
 IDENTITY_VERSION = "bounded-v1"
-VIDEO_EXTENSIONS = frozenset({
-    ".3gp",
-    ".avi",
-    ".m2ts",
-    ".m4v",
-    ".mkv",
-    ".mov",
-    ".mp4",
-    ".mts",
-    ".webm",
-})
+VIDEO_EXTENSIONS = frozenset(
+    {
+        ".3gp",
+        ".avi",
+        ".m2ts",
+        ".m4v",
+        ".mkv",
+        ".mov",
+        ".mp4",
+        ".mts",
+        ".webm",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -87,31 +91,46 @@ def discover_sources(
     try:
         root_stat = root.stat()
     except OSError as exc:
-        raise _inspection_error(f"cannot inspect discovery root {root}: {exc}", exc) from exc
-    if not root.is_dir():
+        raise _inspection_error(
+            f"cannot inspect discovery root {root}: {exc}", exc
+        ) from exc
+    if not stat.S_ISDIR(root_stat.st_mode):
         raise VideoEditorError(
             ErrorCategory.INSPECTION, f"discovery root {root} is not a directory"
         )
-    if not root_stat:
-        raise AssertionError("unreachable")
 
     normalized = _normalized_extensions(extensions)
+    candidates: list[Path] = []
+    pending = [root]
     try:
-        candidates = [
-            path
-            for path in root.rglob("*")
-            if path.is_file() and path.suffix.lower() in normalized
-        ]
+        while pending:
+            directory = pending.pop()
+            with os.scandir(directory) as handle:
+                entries = sorted(handle, key=lambda entry: entry.name)
+                for entry in entries:
+                    entry_stat = entry.stat(follow_symlinks=False)
+                    entry_path = Path(entry.path)
+                    if stat.S_ISDIR(entry_stat.st_mode):
+                        pending.append(entry_path)
+                    elif (
+                        stat.S_ISREG(entry_stat.st_mode)
+                        and entry_path.suffix.lower() in normalized
+                    ):
+                        candidates.append(entry_path)
         candidates.sort(key=lambda path: path.relative_to(root).as_posix())
     except OSError as exc:
-        raise _inspection_error(f"cannot inspect discovery root {root}: {exc}", exc) from exc
+        raise _inspection_error(
+            f"cannot inspect discovery root {root}: {exc}", exc
+        ) from exc
 
     sources: list[SourceCandidate] = []
     for discovery_index, path in enumerate(candidates):
         try:
             size_bytes = path.stat().st_size
         except OSError as exc:
-            raise _inspection_error(f"cannot inspect source {path}: {exc}", exc) from exc
+            raise _inspection_error(
+                f"cannot inspect source {path}: {exc}", exc
+            ) from exc
         sources.append(
             SourceCandidate(
                 path=path,

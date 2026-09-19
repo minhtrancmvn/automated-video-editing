@@ -1,12 +1,19 @@
+import os
 from pathlib import Path
 
 import pytest
 
 from video_editor.errors import ErrorCategory, VideoEditorError
-from video_editor.media.discovery import VIDEO_EXTENSIONS, bounded_fingerprint, discover_sources
+from video_editor.media.discovery import (
+    VIDEO_EXTENSIONS,
+    bounded_fingerprint,
+    discover_sources,
+)
 
 
-def test_discovery_is_recursive_case_insensitive_and_deterministic(tmp_path: Path) -> None:
+def test_discovery_is_recursive_case_insensitive_and_deterministic(
+    tmp_path: Path,
+) -> None:
     (tmp_path / "b").mkdir()
     (tmp_path / "b" / "GH020001.MP4").write_bytes(b"second")
     (tmp_path / "GOPR0001.mp4").write_bytes(b"first")
@@ -21,9 +28,46 @@ def test_discovery_returns_empty_list_for_empty_readable_folder(tmp_path: Path) 
     assert discover_sources(tmp_path) == []
 
 
-def test_discovery_rejects_nonexistent_root_with_inspection_error(tmp_path: Path) -> None:
+def test_discovery_rejects_nonexistent_root_with_inspection_error(
+    tmp_path: Path,
+) -> None:
     with pytest.raises(VideoEditorError) as raised:
         discover_sources(tmp_path / "missing")
+    assert raised.value.category is ErrorCategory.INSPECTION
+
+
+def test_discovery_rejects_unreadable_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_scandir = os.scandir
+
+    def failing_scandir(path: str | bytes | os.PathLike[str] | os.PathLike[bytes]):
+        if Path(path) == tmp_path:
+            raise PermissionError("permission denied")
+        return original_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", failing_scandir)
+    with pytest.raises(VideoEditorError) as raised:
+        discover_sources(tmp_path)
+    assert raised.value.category is ErrorCategory.INSPECTION
+
+
+def test_discovery_rejects_unreadable_nested_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / "clip.mp4").write_bytes(b"video")
+    original_scandir = os.scandir
+
+    def failing_scandir(path: str | bytes | os.PathLike[str] | os.PathLike[bytes]):
+        if Path(path) == nested:
+            raise PermissionError("permission denied")
+        return original_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", failing_scandir)
+    with pytest.raises(VideoEditorError) as raised:
+        discover_sources(tmp_path)
     assert raised.value.category is ErrorCategory.INSPECTION
 
 
