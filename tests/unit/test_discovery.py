@@ -46,6 +46,17 @@ def test_discovery_includes_symlinked_video_without_recursing_symlink_dirs(
     assert [source.path.name for source in sources] == ["linked.mp4", "target.mp4"]
 
 
+def test_discovery_ignores_dangling_video_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "missing.mp4"
+    linked_file = tmp_path / "dangling.mp4"
+    try:
+        linked_file.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    assert discover_sources(tmp_path) == []
+
+
 def test_discovery_rejects_nonexistent_root_with_inspection_error(
     tmp_path: Path,
 ) -> None:

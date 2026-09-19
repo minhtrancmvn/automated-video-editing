@@ -113,7 +113,10 @@ def discover_sources(
                     if stat.S_ISDIR(entry_stat.st_mode):
                         pending.append(entry_path)
                         continue
-                    followed_stat = entry.stat(follow_symlinks=True)
+                    try:
+                        followed_stat = entry.stat(follow_symlinks=True)
+                    except FileNotFoundError:
+                        continue
                     if (
                         stat.S_ISREG(followed_stat.st_mode)
                         and entry_path.suffix.lower() in normalized
