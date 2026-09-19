@@ -94,6 +94,27 @@ def test_replace_sources_removes_stale_sources_and_probes(tmp_path: Path) -> Non
     assert probes[0]["data_json"] == '{"duration":3}'
 
 
+def test_replace_chronology_removes_stale_groups_and_members(tmp_path: Path) -> None:
+    with JobStore(tmp_path / "state.db") as store:
+        job = store.create_job("{}", "{}")
+        store.replace_chronology(
+            job,
+            [{"group_id": "old", "members": ["old-source"], "warnings": ["old"]}],
+        )
+        store.replace_chronology(
+            job,
+            [{"group_id": "new", "members": ["new-source"], "warnings": []}],
+        )
+        state = store.get_job(job)
+        members = store.connection.execute(
+            "SELECT source_id FROM chronology_members ORDER BY id"
+        ).fetchall()
+    assert state["chronology"] == [
+        {"group_id": "new", "members": ["new-source"], "warnings": []}
+    ]
+    assert [member["source_id"] for member in members] == ["new-source"]
+
+
 def test_reuse_requires_all_cache_keys_and_valid_artifact(tmp_path: Path) -> None:
     artifact = tmp_path / "render.mp4"
     artifact.write_text("output")

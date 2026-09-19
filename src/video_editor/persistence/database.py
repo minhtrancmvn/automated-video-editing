@@ -189,7 +189,14 @@ class JobStore:
             connection.execute(
                 "INSERT INTO jobs(id, config_json, volume_json, status, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
-                (job_id, _json(config_json), _json(volume_json), JobStatus.PENDING, now, now),
+                (
+                    job_id,
+                    _json(config_json),
+                    _json(volume_json),
+                    JobStatus.PENDING,
+                    now,
+                    now,
+                ),
             )
         return job_id
 
@@ -352,15 +359,49 @@ class JobStore:
         with self._transaction() as connection:
             self._job_exists(connection, job_id)
             for group in groups:
-                data = dict(group)
-                group_id = str(data.get("group_id", data.get("id", "")))
-                if not group_id:
-                    raise ValueError("chronology group requires group_id")
-                connection.execute(
-                    "INSERT INTO chronology_groups(job_id, group_id, data_json) VALUES (?, ?, ?) "
-                    "ON CONFLICT(job_id, group_id) DO UPDATE SET data_json=excluded.data_json",
-                    (job_id, group_id, _json(data)),
-                )
+                self._insert_chronology_group(connection, job_id, group)
+
+    def replace_chronology(self, job_id: str, groups: Iterable[Mapping[str, Any]]) -> None:
+        """Atomically replace chronology groups and their ordered members."""
+        with self._transaction() as connection:
+            self._job_exists(connection, job_id)
+            connection.execute("DELETE FROM chronology_groups WHERE job_id = ?", (job_id,))
+            for group in groups:
+                self._insert_chronology_group(connection, job_id, group)
+
+    def _insert_chronology_group(
+        self,
+        connection: sqlite3.Connection,
+        job_id: str,
+        group: Mapping[str, Any],
+    ) -> None:
+        data = dict(group)
+        group_id = str(data.get("group_id", data.get("id", "")))
+        if not group_id:
+            raise ValueError("chronology group requires group_id")
+        connection.execute(
+            "INSERT INTO chronology_groups(job_id, group_id, data_json) VALUES (?, ?, ?) "
+            "ON CONFLICT(job_id, group_id) DO UPDATE SET data_json=excluded.data_json",
+            (job_id, group_id, _json(data)),
+        )
+        row = connection.execute(
+            "SELECT id FROM chronology_groups WHERE job_id = ? AND group_id = ?",
+            (job_id, group_id),
+        ).fetchone()
+        assert row is not None
+        connection.execute("DELETE FROM chronology_members WHERE group_id = ?", (row["id"],))
+        members = data.get("members", [])
+        if not isinstance(members, list):
+            raise TypeError("chronology group members must be a list")
+        for position, member in enumerate(members):
+            member_data = dict(member) if isinstance(member, Mapping) else {"source_id": str(member)}
+            source_id = str(member_data.get("source_id", member_data.get("id", "")))
+            if not source_id:
+                raise ValueError("chronology member requires source_id")
+            connection.execute(
+                "INSERT INTO chronology_members(group_id, source_id, position, data_json) VALUES (?, ?, ?, ?)",
+                (row["id"], source_id, position, _json(member_data)),
+            )
 
     def save_artifact(
         self,

@@ -6,6 +6,8 @@ import pytest
 
 from video_editor.config import AppConfig, PathSettings
 from video_editor.errors import ErrorCategory, VideoEditorError
+from video_editor.media.discovery import IDENTITY_VERSION, SourceCandidate
+from video_editor.media.probe import MediaProbe
 from video_editor.media.storage import VolumeIdentity, inspect_volume
 from video_editor.models.edit_plan import (
     EditPlan,
@@ -31,6 +33,57 @@ def _config(tmp_path: Path) -> AppConfig:
         ),
         1,
     )
+
+
+def test_inspection_rerun_replaces_old_chronology_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    input_path = tmp_path / "input"
+    input_path.mkdir()
+    source = input_path / "GOPR0001.MP4"
+    source.write_bytes(b"source")
+    candidate = SourceCandidate(
+        path=source,
+        size_bytes=source.stat().st_size,
+        discovery_index=0,
+        fingerprint="source-id",
+        identity_version=IDENTITY_VERSION,
+    )
+    probe = MediaProbe(path=source, duration=1)
+    volume = inspect_volume(input_path)
+    with JobStore(config.paths.state_dir / "jobs.sqlite") as store:
+        job_id = store.create_job(
+            {
+                "input_path": str(input_path),
+                "destination_volumes": {
+                    "workspace": {
+                        "device": volume.device,
+                        "mount_point": str(volume.mount_point),
+                        "filesystem": volume.filesystem,
+                    }
+                },
+            },
+            {
+                "device": volume.device,
+                "mount_point": str(volume.mount_point),
+                "filesystem": volume.filesystem,
+            },
+        )
+        service = WorkflowService(config, store)
+        monkeypatch.setattr(service, "_discover", lambda _path: [candidate])
+        monkeypatch.setattr("video_editor.workflow.probe_media", lambda _path: probe)
+        monkeypatch.setattr("video_editor.workflow.detect_capabilities", lambda: Mock(model_dump=lambda mode: {}))
+        monkeypatch.setattr("video_editor.workflow.inspect_volume", lambda _path: volume)
+        monkeypatch.setattr("video_editor.workflow.assert_free_space", lambda *args: None)
+        store.start_stage(job_id, "inspect", "first", "settings", IMPLEMENTATION_VERSION)
+        service._inspect_stage(job_id, input_path)
+        assert len(store.get_job(job_id)["chronology"]) == 1
+
+        monkeypatch.setattr("video_editor.workflow.sequence_sources", lambda _sources, _times: [])
+        store.start_stage(job_id, "inspect", "second", "settings", IMPLEMENTATION_VERSION)
+        service._inspect_stage(job_id, input_path)
+        assert store.get_job(job_id)["chronology"] == []
 
 
 def test_compile_render_never_places_output_beside_source(tmp_path: Path) -> None:

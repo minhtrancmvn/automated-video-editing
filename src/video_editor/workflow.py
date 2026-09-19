@@ -326,7 +326,7 @@ class WorkflowService:
             }
             for group in groups
         ]
-        self.store.save_chronology(job_id, chronology)
+        self.store.replace_chronology(job_id, chronology)
         workspace.mkdir(parents=True, exist_ok=True)
         artifact = workspace / "inventory.json"
         self._protect_sources(artifact, [source.path for source in sources])
