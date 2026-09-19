@@ -73,6 +73,7 @@ def write_markdown_report(job_state: dict[str, Any], path: Path) -> Path:
         [
             "",
             f"- Estimated peak space bytes: {state['estimated_peak_space_bytes']}",
+            f"- Estimated peak space scope: {state.get('estimated_peak_space_scope', 'unknown')}",
             "",
             "## Phase 1 limitations",
             str(state["phase_one_limitations"]),

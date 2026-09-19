@@ -6,6 +6,7 @@ import fcntl
 import signal
 import subprocess
 import threading
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -35,6 +36,10 @@ def _render_lease(path: Path) -> Iterator[None]:
             fcntl.flock(lease.fileno(), fcntl.LOCK_UN)
 
 
+_POLL_INTERVAL_SECONDS = 0.1
+_INTERRUPT_GRACE_SECONDS = 10.0
+
+
 def run_render(command: RenderCommand, on_interrupt: Callable[[], None]) -> None:
     """Execute render, preserving partial output when interrupted or failed."""
     command.partial_path.parent.mkdir(parents=True, exist_ok=True)
@@ -43,11 +48,9 @@ def run_render(command: RenderCommand, on_interrupt: Callable[[], None]) -> None
     interrupt_notified = False
     previous: dict[signal.Signals, object] = {}
 
-    def handle_signal(signum: int, _frame: object) -> None:
+    def handle_signal(_signum: int, _frame: object) -> None:
         nonlocal interrupted
         interrupted = True
-        if process is not None and process.poll() is None:
-            process.terminate()
 
     def raise_if_interrupted() -> None:
         nonlocal interrupt_notified
@@ -60,6 +63,29 @@ def run_render(command: RenderCommand, on_interrupt: Callable[[], None]) -> None
                 f"render interrupted; partial output retained at {command.partial_path}",
                 interrupted=True,
             )
+
+    def wait_for_exit() -> int:
+        assert process is not None
+        terminated = False
+        deadline: float | None = None
+        while True:
+            if interrupted and not terminated:
+                process.terminate()
+                terminated = True
+                deadline = time.monotonic() + _INTERRUPT_GRACE_SECONDS
+            try:
+                return_code = process.wait(timeout=_POLL_INTERVAL_SECONDS)
+            except subprocess.TimeoutExpired:
+                if deadline is not None and time.monotonic() >= deadline:
+                    process.kill()
+                    return process.wait()
+                continue
+            if interrupted and not terminated:
+                # Signal arrived while wait was blocked. Send SIGTERM before
+                # accepting process exit so stubborn children still get bounded
+                # shutdown handling.
+                continue
+            return return_code
 
     try:
         with _render_lease(command.final_path):
@@ -77,11 +103,7 @@ def run_render(command: RenderCommand, on_interrupt: Callable[[], None]) -> None
                     raise VideoEditorError(
                         ErrorCategory.RENDER, f"cannot start ffmpeg: {exc}"
                     ) from exc
-                try:
-                    return_code = process.wait(timeout=10 if interrupted else None)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    return_code = process.wait()
+                return_code = wait_for_exit()
                 raise_if_interrupted()
                 if return_code != 0:
                     raise VideoEditorError(

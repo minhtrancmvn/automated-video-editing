@@ -309,7 +309,7 @@ def test_report_aggregates_probe_warnings_without_render_fallbacks(
     assert state["warnings"] == [{"code": "hevc", "message": "source uses HEVC"}]
     assert state["fallbacks"] == ["software encoder fallback"]
     assert state["estimated_peak_space_scope"] == (
-        "generated-byte growth across workspace, cache, and output roots"
+        "render-output byte growth only; workspace and cache excluded"
     )
     assert state["estimated_peak_space_bytes"] == 1
 
@@ -379,12 +379,18 @@ def test_resume_persists_and_reuses_final_output_without_old_artifact_row(
         job_id = store.create_job({}, {})
         service = WorkflowService(config, store)
         monkeypatch.setattr("video_editor.workflow.load_plan", lambda _path: plan)
-        monkeypatch.setattr("video_editor.workflow.timeline_duration", lambda _plan: Decimal(1))
         monkeypatch.setattr(
-            service, "_configured_destination", lambda _root, _job_id: output_path.parent
+            "video_editor.workflow.timeline_duration", lambda _plan: Decimal(1)
+        )
+        monkeypatch.setattr(
+            service,
+            "_configured_destination",
+            lambda _root, _job_id: output_path.parent,
         )
         monkeypatch.setattr(service, "_destination_volume", lambda *args: Mock())
-        monkeypatch.setattr(service, "_expected_destination_volume", lambda *args: Mock())
+        monkeypatch.setattr(
+            service, "_expected_destination_volume", lambda *args: Mock()
+        )
         monkeypatch.setattr(
             service,
             "_artifact_valid",

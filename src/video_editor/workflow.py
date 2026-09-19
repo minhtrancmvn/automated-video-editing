@@ -320,9 +320,7 @@ class WorkflowService:
             raise
         except KeyboardInterrupt as exc:
             message = f"{name} interrupted"
-            self.store.fail_stage(
-                job_id, name, category, message, interrupted=True
-            )
+            self.store.fail_stage(job_id, name, category, message, interrupted=True)
             raise VideoEditorError(category, message, interrupted=True) from exc
         except (OSError, ValueError, TypeError, ValidationError) as exc:
             self.store.fail_stage(job_id, name, category, str(exc))
@@ -700,7 +698,11 @@ class WorkflowService:
         recovered: dict[Path, dict[str, Any]] = {}
         for plan_path in plan_paths:
             plan = load_plan(plan_path)
-            name = "long.mp4" if plan.output.width == 1920 and plan.output.height == 1080 else "short-01.mp4"
+            name = (
+                "long.mp4"
+                if plan.output.width == 1920 and plan.output.height == 1080
+                else "short-01.mp4"
+            )
             output_path = output / name
             metadata = {"plan": str(plan_path), "warnings": []}
             if self._artifact_valid("render", output_path, metadata):
@@ -733,7 +735,7 @@ class WorkflowService:
             plans = [load_plan(path) for path in plan_paths]
             estimate = max(
                 _MIN_WRITE_BYTES,
-                sum(
+                max(
                     _duration_seconds(plan)
                     * plan.output.width
                     * plan.output.height
@@ -895,7 +897,7 @@ class WorkflowService:
             },
             "estimated_peak_space_bytes": estimate,
             "estimated_peak_space_scope": (
-                "generated-byte growth across workspace, cache, and output roots"
+                "render-output byte growth only; workspace and cache excluded"
             ),
             "cloud_usage": 0,
         }
@@ -958,7 +960,9 @@ class WorkflowService:
             ("cache", self.config.paths.cache_dir),
             ("output", self.config.paths.output_dir),
         ):
-            self._destination_volume(root, _MIN_WRITE_BYTES, self._expected_destination_volume(job, name))
+            self._destination_volume(
+                root, _MIN_WRITE_BYTES, self._expected_destination_volume(job, name)
+            )
 
     def _execute(self, job_id: str) -> dict[str, Any]:
         job = self.store.get_job(job_id)
@@ -1001,8 +1005,9 @@ class WorkflowService:
 
         def operation() -> dict[str, Any]:
             job = self.store.get_job(job_id)
-            estimate = (
-                _duration_seconds(plan) * plan.output.width * plan.output.height // 8
+            estimate = max(
+                _MIN_WRITE_BYTES,
+                _duration_seconds(plan) * plan.output.width * plan.output.height // 8,
             )
             self._destination_volume(
                 output,

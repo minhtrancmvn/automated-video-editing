@@ -67,15 +67,58 @@ def test_repeated_chapter_one_starts_new_session_group() -> None:
     assert any("session boundary" in warning for warning in groups[1].warnings)
 
 
+def test_interleaved_repeated_sessions_preserve_discovery_chunks_with_warning() -> None:
+    sources = _candidates(
+        [
+            "session-a/GOPR0001.MP4",
+            "session-b/GOPR0001.MP4",
+            "session-a/GP020001.MP4",
+            "session-b/GP020001.MP4",
+        ]
+    )
+    groups = sequence_sources(sources, {})
+
+    assert [
+        [member.source.path.as_posix() for member in group.members] for group in groups
+    ] == [
+        ["session-a/GOPR0001.MP4", "session-a/GP020001.MP4"],
+        ["session-b/GOPR0001.MP4", "session-b/GP020001.MP4"],
+    ]
+    assert all(
+        "session ambiguity" not in warning
+        for group in groups
+        for warning in group.warnings
+    )
+
+
+def test_ambiguous_repeated_sessions_preserve_chunks_and_warn() -> None:
+    sources = _candidates(
+        ["GOPR0001.MP4", "GOPR0001.MP4", "GP020001.MP4", "GP020001.MP4"]
+    )
+    groups = sequence_sources(sources, {})
+
+    assert [
+        [member.source.path.name for member in group.members] for group in groups
+    ] == [["GOPR0001.MP4", "GP020001.MP4"], ["GOPR0001.MP4", "GP020001.MP4"]]
+    assert all(
+        any("session ambiguity" in warning for warning in group.warnings)
+        for group in groups
+    )
+
+
 def test_duplicate_chapter_emits_warning() -> None:
     groups = sequence_sources(_candidates(["GP020123.MP4", "GH020123.MP4"]), {})
     assert any("duplicate chapter" in warning for warning in groups[0].warnings)
-    assert any("duplicate chapter" in warning for warning in groups[0].members[0].warnings)
+    assert any(
+        "duplicate chapter" in warning for warning in groups[0].members[0].warnings
+    )
 
 
 def test_numbering_reset_emits_warning() -> None:
     groups = sequence_sources(_candidates(["GOPR0123.MP4", "GOPR0001.MP4"]), {})
-    assert any("numbering reset" in warning for group in groups for warning in group.warnings)
+    assert any(
+        "numbering reset" in warning for group in groups for warning in group.warnings
+    )
 
 
 def test_creation_metadata_orders_groups_before_numeric_fallback() -> None:
@@ -113,5 +156,11 @@ def test_non_gopro_falls_back_to_discovery_order_with_low_confidence() -> None:
         "phone.mp4",
         "camera.mov",
     ]
-    assert all(member.confidence == "low" for group in groups for member in group.members)
-    assert all(member.order_evidence == "discovery_order" for group in groups for member in group.members)
+    assert all(
+        member.confidence == "low" for group in groups for member in group.members
+    )
+    assert all(
+        member.order_evidence == "discovery_order"
+        for group in groups
+        for member in group.members
+    )

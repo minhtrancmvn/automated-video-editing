@@ -22,11 +22,14 @@ video-editor run /Volumes/TravelSSD/authorized-hero12 --config config.toml
 video-editor status JOB_ID --config config.toml
 ```
 
-Record wall time from start through report completion. Report `estimated_peak_space_bytes` means generated-byte growth across workspace, cache, and output roots. It excludes input baseline bytes and existing unrelated files. The independent measurement must use the same scope: record root baseline before start, then subtract that baseline from each sampled sum. Measure peak usage while job runs. On macOS, capture baseline and poll allocated bytes every few seconds from another terminal:
+Record wall time from start through report completion. Report `estimated_peak_space_bytes` means render-output byte growth only. It covers the bytes written to final and partial render files by one render and excludes workspace, cache, edit plans, reports, input bytes, and existing unrelated output files. Because Phase 1 renders serially, independently measure each render and retain the largest peak. For each render, record the allocated-byte baseline for its expected final and partial file before rendering, then subtract that baseline from each sampled sum. On macOS, poll one output pair every few seconds from another terminal while that render runs:
 
 ```bash
-ROOTS="/Volumes/TravelSSD/video-editor/workspace /Volumes/TravelSSD/video-editor/cache /Volumes/TravelSSD/video-editor/output"
-bytes() { du -sk $ROOTS 2>/dev/null | awk '{sum += $1} END {print sum * 1024}'; }
+RENDER="/Volumes/TravelSSD/video-editor/output/JOB_ID/long.mp4"
+bytes() {
+  du -sk "$RENDER" "$RENDER.partial" 2>/dev/null \
+    | awk '{sum += $1} END {print sum * 1024}'
+}
 BASELINE=$(bytes)
 printf 'timestamp,growth_bytes\n' > peak-disk.csv
 while kill -0 "$VIDEO_EDITOR_PID" 2>/dev/null; do
@@ -36,7 +39,7 @@ done
 sort -t, -k2,2nr peak-disk.csv | head -2
 ```
 
-Replace `VIDEO_EDITOR_PID` with running process PID. Record largest sampled value, sampling interval, paths, and whether other activity touched volumes. Compare independently measured peak bytes against report estimate; keep both values in benchmark record. Save `status` output and job report. Probe both final outputs independently:
+Replace `VIDEO_EDITOR_PID` with running process PID, repeat with `RENDER` set to `short-01.mp4`, and use the larger per-render peak. Record largest sampled value, sampling interval, paths, and whether other activity touched volumes. Compare independently measured peak bytes against report estimate; keep both values in benchmark record. Save `status` output and job report. Probe both final outputs independently:
 
 ```bash
 ffprobe -v error -show_format -show_streams \
@@ -66,7 +69,7 @@ Record these fields for each batch:
 | Report estimated peak space bytes | |
 | Independently measured peak disk bytes | |
 | Measurement interval, command, and baseline | |
-| Estimated metric scope | Generated-byte growth across workspace, cache, and output roots; input baseline excluded |
+| Estimated metric scope | Per-render final/partial output byte growth only; workspace, cache, plans, reports, input, and unrelated output files excluded; largest serial render peak reported |
 | Horizontal and vertical ffprobe result | |
 | Manual filename chronology result | |
 | Original hash comparison | |

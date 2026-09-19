@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from itertools import pairwise
+from pathlib import Path
 
 from video_editor.media.discovery import SourceCandidate
 
@@ -93,6 +94,14 @@ def _creation_time(
     return None
 
 
+def _same_session_path(left: SequencedSource, right: SequencedSource) -> bool:
+    """Treat a shared non-current parent as explicit session evidence."""
+
+    left_parent = left.source.path.parent
+    right_parent = right.source.path.parent
+    return left_parent != Path() and left_parent == right_parent
+
+
 def _time_key(value: datetime) -> datetime:
     """Make naive and aware metadata comparable without changing returned data."""
 
@@ -119,9 +128,7 @@ def _group_file_number(group: ChronologyGroup) -> int | None:
     return min(numbers) if numbers else None
 
 
-def _with_source_warning(
-    source: SequencedSource, warning: str
-) -> SequencedSource:
+def _with_source_warning(source: SequencedSource, warning: str) -> SequencedSource:
     if warning in source.warnings:
         return source
     return SequencedSource(
@@ -134,11 +141,11 @@ def _with_source_warning(
     )
 
 
-def _add_group_warning(
-    group: ChronologyGroup, warning: str
-) -> ChronologyGroup:
+def _add_group_warning(group: ChronologyGroup, warning: str) -> ChronologyGroup:
     members = tuple(_with_source_warning(member, warning) for member in group.members)
-    warnings = group.warnings if warning in group.warnings else (*group.warnings, warning)
+    warnings = (
+        group.warnings if warning in group.warnings else (*group.warnings, warning)
+    )
     return ChronologyGroup(group.group_id, members, warnings)
 
 
@@ -207,6 +214,7 @@ def sequence_sources(
 
     grouped: dict[str, list[SequencedSource]] = {}
     sessions: dict[int, list[str]] = {}
+    ambiguous_groups: set[str] = set()
     for item in parsed_sources:
         if item.parsed is None:
             group_id = f"discovery-{item.source.discovery_index}"
@@ -224,14 +232,31 @@ def sequence_sources(
             else:
                 compatible = [
                     candidate
-                    for candidate in reversed(number_sessions)
+                    for candidate in number_sessions
                     if not any(
                         member.parsed is not None
                         and member.parsed.chapter == item.parsed.chapter
                         for member in grouped.get(candidate, [])
                     )
                 ]
-                group_id = compatible[0] if compatible else number_sessions[-1]
+                path_matches = [
+                    candidate
+                    for candidate in compatible
+                    if any(
+                        member.parsed is not None and _same_session_path(item, member)
+                        for member in grouped.get(candidate, [])
+                    )
+                ]
+                if len(path_matches) == 1:
+                    group_id = path_matches[0]
+                elif len(compatible) == 1:
+                    group_id = compatible[0]
+                else:
+                    # Discovery order is safest when metadata cannot distinguish
+                    # interleaved sessions. Never reverse-assign to newest session.
+                    affected = compatible if compatible else number_sessions
+                    group_id = affected[0]
+                    ambiguous_groups.update(affected)
         grouped.setdefault(group_id, []).append(item)
 
     groups: list[ChronologyGroup] = []
@@ -259,6 +284,11 @@ def sequence_sources(
                 seen_chapters.add(item.parsed.chapter)
         if "-session-" in group_id:
             warnings.append("session boundary: repeated chapter 1/file number")
+        if group_id in ambiguous_groups:
+            warnings.append(
+                "session ambiguity: path/session metadata could not disambiguate "
+                "interleaved chapters; preserved discovery grouping"
+            )
         group = ChronologyGroup(group_id, tuple(ordered), tuple(warnings))
         for warning in warnings:
             group = _add_group_warning(group, warning)
@@ -281,7 +311,9 @@ def sequence_sources(
         ]
 
     if _metadata_conflict(groups):
-        warning = "filename/metadata conflict: creation time disagrees with file numbering"
+        warning = (
+            "filename/metadata conflict: creation time disagrees with file numbering"
+        )
         groups = [_add_group_warning(group, warning) for group in groups]
 
     for index, group in enumerate(groups):

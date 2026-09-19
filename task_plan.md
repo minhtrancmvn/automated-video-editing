@@ -1,34 +1,32 @@
-# Task Plan: Phase 1 Local Video Editor Foundation
+# Task Plan: Fix Task 12 Findings
 
 ## Goal
-Create an executable, test-first implementation plan for the approved Phase 1 design.
+Fix four remaining Task 12 findings without regressing prior recovery/storage fixes, add required regressions, pass all requested quality gates, and commit changes.
 
 ## Phases
-- [x] Phase 1: Understand approved design and repository state
-- [x] Phase 2: Decompose architecture and interfaces
-- [x] Phase 3: Write detailed implementation plan
-- [x] Phase 4: Validate plan coverage and deliver execution choices
-
-## Validation Evidence
-- Placeholder scan: no unresolved markers found.
-- Structure: 12 independently testable tasks with exact files, interfaces, red/green commands, and commit boundaries.
-- Spec coverage: configuration, external volumes, discovery, GoPro sequencing, inspection, capabilities, persistence, proxies, edit schema, planning, rendering, validation, reporting, CLI, integration fixtures, docs, and benchmark gate all mapped.
-- Formatting: `git diff --check` passed.
+- [x] Phase 1: Read current code, tests, and repository state
+- [x] Phase 2: Implement interruption, disk-scope, GoPro grouping, and formatting fixes
+- [x] Phase 3: Run targeted and full verification commands
+- [ ] Phase 4: Review diff, confirm evidence, and commit
 
 ## Key Questions
-1. Does every approved Phase 1 requirement map to a concrete task and test?
-2. Are external SSD and GoPro chronology behavior specified without unsafe assumptions?
-3. Can every task be implemented and reviewed independently?
+1. Where does render interruption polling and process termination happen, and how can bounded SIGTERM/kill waiting be tested?
+2. What exact paths are included by estimated peak storage, report wording, and benchmark sampling?
+3. How does GoPro discovery assign chapters across sessions, and where should ambiguity warnings/grouping be preserved?
+4. Which changed files fail Ruff or formatting, and what build/help/diff checks exist?
 
 ## Decisions Made
-- Use Python 3.12+, uv, Typer, Pydantic v2, SQLite, FFmpeg, and ffprobe: small local-first stack with typed contracts.
-- Split implementation into 12 vertical TDD tasks: each produces a testable capability and commit.
-- Keep hardware encoding optional: software `libx264` is required path; VideoToolbox needs runtime capability proof.
-- Treat GoPro filename parsing as evidence, not sole chronology authority: embedded metadata wins when trustworthy.
-- Leave untracked `.gitignore` unchanged: it was not created by current planning work.
+- Work only in current writable worktree; no agents.
+- Preserve existing recovery/storage behavior outside required fixes.
+- Use render-output-only scope consistently because current estimate models only encoded render outputs; sampling all generated workspace/cache/output bytes would falsely compare broader actual usage against a narrower estimate.
+- Use source parent path as session metadata when it uniquely identifies repeated GoPro sessions; otherwise retain discovery-order session chunks and warn explicitly.
 
 ## Errors Encountered
-- Previous responses ended before the plan file was written: resumed from repository state and verified plan directory was empty.
+- Initial worktree branch pointed at pre-implementation commit `bf52e01`; reset current isolated worktree to requested Task 12 baseline `df7f470` before edits.
+- Initial broad `rg` command used unmatched zsh glob `README*`; reran searches against explicit project paths.
+- Direct `pytest` and `python3 -m pytest` lacked installed test tooling; used locked `uv run` environment.
+- First targeted test run exposed missing fake `terminate()` and one incorrect wait-call assertion; fixed test double and assertion, then reran successfully.
+- Full-project `ruff format .` touched unrelated pre-existing unformatted files; restored those paths and retained formatting only on requested changed files.
 
 ## Status
-**Complete** - Implementation plan written and validated; awaiting execution approach selection.
+**Currently in Phase 4** - Final evidence complete; commit pending

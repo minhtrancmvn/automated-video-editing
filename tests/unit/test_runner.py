@@ -140,6 +140,64 @@ def test_runner_terminates_on_main_thread_interrupt_and_keeps_partial(
     assert not command.final_path.exists()
 
 
+def test_runner_kills_child_that_ignores_terminate_after_signal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    command = _command(tmp_path)
+    handlers: dict[signal.Signals, object] = {}
+    clock = iter((0.0, 0.0, 11.0))
+
+    class Process:
+        def __init__(self) -> None:
+            self.wait_calls = 0
+            self.terminate_calls = 0
+            self.kill_calls = 0
+
+        def wait(self, timeout: float | None = None) -> int:
+            self.wait_calls += 1
+            if self.kill_calls:
+                return -signal.SIGKILL
+            if self.wait_calls == 1:
+                handlers[signal.SIGTERM](signal.SIGTERM, None)
+            raise subprocess.TimeoutExpired(command.args, timeout)
+
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            self.terminate_calls += 1
+
+        def kill(self) -> None:
+            self.kill_calls += 1
+
+    process = Process()
+
+    def install(signum: signal.Signals, handler: object) -> object:
+        previous = handlers.get(signum)
+        handlers[signum] = handler
+        return previous
+
+    monkeypatch.setattr(
+        "video_editor.rendering.runner.subprocess.Popen",
+        lambda *_args, **_kwargs: process,
+    )
+    monkeypatch.setattr("video_editor.rendering.runner.signal.signal", install)
+    monkeypatch.setattr(
+        "video_editor.rendering.runner.signal.getsignal", lambda _signum: None
+    )
+    monkeypatch.setattr(
+        "video_editor.rendering.runner.time.monotonic", lambda: next(clock)
+    )
+
+    with pytest.raises(VideoEditorError, match="partial output retained") as caught:
+        run_render(command, lambda: None)
+
+    assert caught.value.interrupted
+    assert process.terminate_calls == 1
+    assert process.kill_calls == 1
+    assert process.wait_calls == 4
+
+
 def test_runner_rejects_second_process_for_same_output(
     tmp_path: Path,
 ) -> None:
@@ -149,12 +207,12 @@ from pathlib import Path
 from video_editor.rendering.compiler import RenderCommand
 from video_editor.rendering.runner import run_render
 from decimal import Decimal
-command = RenderCommand(("python", "-c", "import time; time.sleep(0.4)"), Path(r"%s"), Path(r"%s"), Decimal(1), None)
+command = RenderCommand(("python", "-c", "import time; time.sleep(0.4)"), Path(r"{}"), Path(r"{}"), Decimal(1), None)
 try:
     run_render(command, lambda: None)
 except Exception as exc:
     print(type(exc).__name__, str(exc), flush=True)
-""" % (tmp_path / "same.mp4.partial", tmp_path / "same.mp4")
+""".format(tmp_path / "same.mp4.partial", tmp_path / "same.mp4")
     first = subprocess.Popen(
         [sys.executable, "-c", script], stdout=subprocess.PIPE, text=True
     )
@@ -180,9 +238,19 @@ def test_runner_interrupt_after_validation_keeps_partial(
         def poll(self) -> None:
             return None
 
-    monkeypatch.setattr("video_editor.rendering.runner.subprocess.Popen", lambda *_args, **_kwargs: Process())
-    monkeypatch.setattr("video_editor.rendering.runner.validate_output", lambda *_args: None)
-    monkeypatch.setattr("video_editor.rendering.runner.signal.getsignal", lambda _signum: None)
+        def terminate(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "video_editor.rendering.runner.subprocess.Popen",
+        lambda *_args, **_kwargs: Process(),
+    )
+    monkeypatch.setattr(
+        "video_editor.rendering.runner.validate_output", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        "video_editor.rendering.runner.signal.getsignal", lambda _signum: None
+    )
 
     def install(signum: signal.Signals, handler: object) -> object:
         handlers[signum] = handler
