@@ -308,15 +308,45 @@ class JobStore:
         with self._transaction() as connection:
             self._job_exists(connection, job_id)
             for source in sources:
-                data = dict(source)
-                source_id = str(data.get("source_id", data.get("id", "")))
-                if not source_id:
-                    raise ValueError("source requires source_id")
-                connection.execute(
-                    "INSERT INTO sources(job_id, source_id, data_json) VALUES (?, ?, ?) "
-                    "ON CONFLICT(job_id, source_id) DO UPDATE SET data_json=excluded.data_json",
-                    (job_id, source_id, _json(data)),
-                )
+                self._insert_source(connection, job_id, source)
+
+    def _insert_source(
+        self,
+        connection: sqlite3.Connection,
+        job_id: str,
+        source: Mapping[str, Any],
+    ) -> None:
+        data = dict(source)
+        source_id = str(data.get("source_id", data.get("id", "")))
+        if not source_id:
+            raise ValueError("source requires source_id")
+        connection.execute(
+            "INSERT INTO sources(job_id, source_id, data_json) VALUES (?, ?, ?) "
+            "ON CONFLICT(job_id, source_id) DO UPDATE SET data_json=excluded.data_json",
+            (job_id, source_id, _json(data)),
+        )
+        probe = data.get("probe")
+        if probe is not None:
+            source_row = connection.execute(
+                "SELECT id FROM sources WHERE job_id = ? AND source_id = ?",
+                (job_id, source_id),
+            ).fetchone()
+            assert source_row is not None
+            connection.execute(
+                "DELETE FROM source_probes WHERE source_id = ?", (source_row["id"],)
+            )
+            connection.execute(
+                "INSERT INTO source_probes(source_id, data_json) VALUES (?, ?)",
+                (source_row["id"], _json(probe)),
+            )
+
+    def replace_sources(self, job_id: str, sources: Iterable[Mapping[str, Any]]) -> None:
+        """Atomically replace inspection sources and their persisted probes."""
+        with self._transaction() as connection:
+            self._job_exists(connection, job_id)
+            connection.execute("DELETE FROM sources WHERE job_id = ?", (job_id,))
+            for source in sources:
+                self._insert_source(connection, job_id, source)
 
     def save_chronology(self, job_id: str, groups: Iterable[Mapping[str, Any]]) -> None:
         with self._transaction() as connection:

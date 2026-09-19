@@ -120,16 +120,11 @@ class WorkflowService:
     ) -> VolumeIdentity:
         existing = _existing_parent(destination)
         actual = inspect_volume(existing)
-        if expected is not None:
-            actual = inspect_volume(existing)
-            if (
-                actual.device != expected.device
-                or actual.filesystem != expected.filesystem
-            ):
-                raise VideoEditorError(
-                    ErrorCategory.STORAGE,
-                    f"volume changed for {destination}: expected {expected}, found {actual}",
-                )
+        if expected is not None and actual != expected:
+            raise VideoEditorError(
+                ErrorCategory.STORAGE,
+                f"volume changed for {destination}: expected {expected}, found {actual}",
+            )
         assert_free_space(
             actual.mount_point,
             max(_MIN_WRITE_BYTES, required),
@@ -153,6 +148,20 @@ class WorkflowService:
                 raise VideoEditorError(
                     ErrorCategory.STORAGE,
                     f"generated destination equals source media: {source}",
+                )
+
+    def _validate_roots(self, input_path: Path) -> None:
+        source_root = input_path.resolve()
+        for name, configured in (
+            ("workspace", self.config.paths.workspace_dir),
+            ("cache", self.config.paths.cache_dir),
+            ("output", self.config.paths.output_dir),
+        ):
+            destination = configured.resolve()
+            if destination == source_root or destination.is_relative_to(source_root) or source_root.is_relative_to(destination):
+                raise VideoEditorError(
+                    ErrorCategory.STORAGE,
+                    f"configured {name} root overlaps input/source root: {configured} and {input_path}",
                 )
 
     def _stage_keys(self, fingerprint: Any, settings: Any) -> tuple[str, str]:
@@ -209,6 +218,7 @@ class WorkflowService:
         )
 
     def _new_job(self, input_path: Path) -> str:
+        self._validate_roots(input_path)
         source_volume = inspect_volume(input_path)
         destinations = {
             name: _volume_data(self._destination_volume(path, _MIN_WRITE_BYTES))
@@ -300,7 +310,7 @@ class WorkflowService:
                     }
                 )
         usable = [source for source in sources if source.fingerprint in probes]
-        self.store.save_sources(
+        self.store.replace_sources(
             job_id,
             [_candidate_data(source, probes[source.fingerprint]) for source in usable],
         )
@@ -345,6 +355,7 @@ class WorkflowService:
                 _candidate_data(source, probes[source.fingerprint]) for source in usable
             ],
             "skipped_inputs": skipped,
+            "warnings": [warning.model_dump(mode="json") for probe in probes.values() for warning in probe.warnings],
             "chronology": chronology,
         }
         self.store.complete_stage(job_id, "inspect", result)
@@ -613,6 +624,15 @@ class WorkflowService:
             job_id, "render", fingerprint, settings, ErrorCategory.RENDER, operation
         )
 
+    def _validate_recorded_outputs(self, rendered: dict[str, Any]) -> bool:
+        try:
+            for item in rendered.get("outputs", []):
+                plan = load_plan(Path(item["plan"]))
+                validate_output(Path(item["output"]), plan.output, timeline_duration(plan))
+        except (KeyError, OSError, VideoEditorError, ValidationError, TypeError, ValueError):
+            return False
+        return True
+
     def _ensure_validate(self, job_id: str, rendered: dict[str, Any]) -> dict[str, Any]:
         fingerprint = rendered.get("outputs", [])
         settings = {"tolerance": "0.20"}
@@ -625,6 +645,7 @@ class WorkflowService:
             and stage.get("input_fingerprint") == input_hash
             and stage.get("settings_hash") == settings_hash
             and stage.get("implementation_version") == IMPLEMENTATION_VERSION
+            and self._validate_recorded_outputs(rendered)
         ):
             return cast(dict[str, Any], stage["result"])
 
@@ -688,7 +709,8 @@ class WorkflowService:
                 "completed_at": stage.get("completed_at"),
                 "duration_seconds": duration,
             }
-        warnings = [
+        probe_warnings = inspected.get("warnings", [])
+        fallback_warnings = [
             warning
             for output in rendered.get("outputs", [])
             for warning in output.get("warnings", [])
@@ -703,8 +725,8 @@ class WorkflowService:
             "selected_moments": selected,
             "output": {"outputs": validated.get("outputs", [])},
             "skipped_inputs": inspected.get("skipped_inputs", []),
-            "warnings": warnings,
-            "fallbacks": warnings,
+            "warnings": probe_warnings,
+            "fallbacks": fallback_warnings,
             "stage_times": stage_times,
             "storage_roots": {
                 key: str(value) for key, value in vars(self.config.paths).items()
@@ -770,10 +792,7 @@ class WorkflowService:
         input_path = Path(job["config"]["input_path"])
         source_volume = _volume(job["volume"])
         current_source_volume = inspect_volume(input_path)
-        if (
-            current_source_volume.device != source_volume.device
-            or current_source_volume.filesystem != source_volume.filesystem
-        ):
+        if current_source_volume != source_volume:
             raise VideoEditorError(
                 ErrorCategory.STORAGE,
                 f"source volume changed for {input_path}: expected {source_volume}, found {current_source_volume}",

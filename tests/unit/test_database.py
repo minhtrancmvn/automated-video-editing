@@ -71,6 +71,29 @@ def test_sources_and_chronology_are_persisted(tmp_path: Path) -> None:
     assert state["chronology"] == [{"group_id": "g1", "members": ["s1"], "confidence": "high"}]
 
 
+def test_replace_sources_removes_stale_sources_and_probes(tmp_path: Path) -> None:
+    with JobStore(tmp_path / "state.db") as store:
+        job = store.create_job("{}", "{}")
+        store.replace_sources(
+            job,
+            [
+                {"source_id": "old", "path": "old.mp4", "probe": {"duration": 1}},
+                {"source_id": "keep", "path": "keep.mp4", "probe": {"duration": 2}},
+            ],
+        )
+        store.replace_sources(
+            job,
+            [{"source_id": "keep", "path": "keep.mp4", "probe": {"duration": 3}}],
+        )
+        state = store.get_job(job)
+        probes = store.connection.execute(
+            "SELECT data_json FROM source_probes ORDER BY id"
+        ).fetchall()
+    assert [source["source_id"] for source in state["sources"]] == ["keep"]
+    assert len(probes) == 1
+    assert probes[0]["data_json"] == '{"duration":3}'
+
+
 def test_reuse_requires_all_cache_keys_and_valid_artifact(tmp_path: Path) -> None:
     artifact = tmp_path / "render.mp4"
     artifact.write_text("output")
