@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from decimal import Decimal
+from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TypeVar, cast
+
+from pydantic import ValidationError
 
 from video_editor.config import AppConfig
 from video_editor.errors import ErrorCategory, VideoEditorError
@@ -17,11 +20,16 @@ from video_editor.media.proxies import create_analysis_media
 from video_editor.media.sequencing import sequence_sources
 from video_editor.media.storage import (
     VolumeIdentity,
-    assert_expected_volume,
     assert_free_space,
     inspect_volume,
+    is_within,
 )
-from video_editor.models.edit_plan import load_plan, write_plan
+from video_editor.models.edit_plan import (
+    EditPlan,
+    load_plan,
+    timeline_duration,
+    write_plan,
+)
 from video_editor.persistence.database import JobStore, StageStatus
 from video_editor.planning.sample_plan import create_sample_plans
 from video_editor.rendering.compiler import compile_render
@@ -30,7 +38,8 @@ from video_editor.reporting import write_json_report, write_markdown_report
 from video_editor.validation.outputs import validate_output
 
 STAGES = ("inspect", "proxy", "plan", "render", "validate", "report")
-IMPLEMENTATION_VERSION = "phase1-workflow-v1"
+IMPLEMENTATION_VERSION = "phase1-workflow-v2"
+_MIN_WRITE_BYTES = 1
 EXIT_CODES = {
     ErrorCategory.CONFIGURATION: 10,
     ErrorCategory.STORAGE: 11,
@@ -40,15 +49,16 @@ EXIT_CODES = {
     ErrorCategory.OUTPUT: 15,
     ErrorCategory.STATE: 16,
 }
+_T = TypeVar("_T")
 
 
 def _hash(value: Any) -> str:
     return hashlib.sha256(
-        json.dumps(value, sort_keys=True, default=str).encode()
+        json.dumps(value, sort_keys=True, default=str, separators=(",", ":")).encode()
     ).hexdigest()
 
 
-def _candidate_data(source: SourceCandidate) -> dict[str, Any]:
+def _candidate_data(source: SourceCandidate, probe: MediaProbe) -> dict[str, Any]:
     return {
         "source_id": source.fingerprint,
         "path": str(source.path),
@@ -56,6 +66,7 @@ def _candidate_data(source: SourceCandidate) -> dict[str, Any]:
         "discovery_index": source.discovery_index,
         "fingerprint": source.fingerprint,
         "identity_version": source.identity_version,
+        "probe": probe.model_dump(mode="json"),
     }
 
 
@@ -73,8 +84,17 @@ def _volume(value: dict[str, Any]) -> VolumeIdentity:
     )
 
 
-def _probe_data(probe: MediaProbe) -> dict[str, Any]:
-    return probe.model_dump(mode="json")
+def _existing_parent(path: Path) -> Path:
+    current = path
+    while not current.exists() and current != current.parent:
+        current = current.parent
+    return current
+
+
+def _duration_seconds(plan: EditPlan) -> int:
+    return max(
+        1, int(timeline_duration(plan).to_integral_value(rounding="ROUND_CEILING"))
+    )
 
 
 class WorkflowService:
@@ -83,7 +103,6 @@ class WorkflowService:
     def __init__(self, config: AppConfig, store: JobStore) -> None:
         self.config = config
         self.store = store
-        self._probes: dict[str, MediaProbe] = {}
 
     def _require_open_store(self) -> None:
         try:
@@ -93,90 +112,202 @@ class WorkflowService:
                 ErrorCategory.STATE, "JobStore must be opened before workflow use"
             ) from exc
 
-    def _check_volume(
-        self, path: Path, expected: VolumeIdentity | None = None, required: int = 0
+    def _destination_volume(
+        self,
+        destination: Path,
+        required: int,
+        expected: VolumeIdentity | None = None,
     ) -> VolumeIdentity:
-        actual = inspect_volume(path)
-        if expected is not None and actual != expected:
-            assert_expected_volume(path, expected)
+        existing = _existing_parent(destination)
+        actual = inspect_volume(existing)
+        if expected is not None:
+            actual = inspect_volume(existing)
+            if (
+                actual.device != expected.device
+                or actual.filesystem != expected.filesystem
+            ):
+                raise VideoEditorError(
+                    ErrorCategory.STORAGE,
+                    f"volume changed for {destination}: expected {expected}, found {actual}",
+                )
         assert_free_space(
-            actual.mount_point, required, self.config.storage_reserve_bytes
+            actual.mount_point,
+            max(_MIN_WRITE_BYTES, required),
+            self.config.storage_reserve_bytes,
         )
         return actual
 
-    def _start(
-        self, job_id: str, name: str, fingerprint: Any, settings: Any = None
-    ) -> None:
+    def _configured_destination(self, root: Path, job_id: str) -> Path:
+        destination = root / job_id
+        if destination.resolve() == root.resolve() or not is_within(root, destination):
+            raise VideoEditorError(
+                ErrorCategory.STORAGE, f"unsafe job destination: {destination}"
+            )
+        return destination
+
+    def _protect_sources(self, destination: Path, sources: list[Path]) -> None:
+        resolved = destination.resolve()
+        for source in sources:
+            source_resolved = source.resolve()
+            if resolved == source_resolved:
+                raise VideoEditorError(
+                    ErrorCategory.STORAGE,
+                    f"generated destination equals source media: {source}",
+                )
+
+    def _stage_keys(self, fingerprint: Any, settings: Any) -> tuple[str, str]:
+        return _hash(fingerprint), _hash(settings)
+
+    def _start(self, job_id: str, name: str, fingerprint: Any, settings: Any) -> None:
+        input_hash, settings_hash = self._stage_keys(fingerprint, settings)
         self.store.start_stage(
-            job_id,
-            name,
-            _hash(fingerprint),
-            _hash(settings if settings is not None else self.config),
-            IMPLEMENTATION_VERSION,
+            job_id, name, input_hash, settings_hash, IMPLEMENTATION_VERSION
         )
 
-    def _completed(self, job: dict[str, Any], name: str) -> bool:
-        stage = job["stages"].get(name)
-        if not stage or stage["status"] != StageStatus.COMPLETED:
+    def _artifact_valid(self, name: str, path: Path) -> bool:
+        try:
+            if not path.is_file() or path.stat().st_size <= 0:
+                return False
+            if name == "plan":
+                load_plan(path)
+            elif name == "inspect" or (name == "report" and path.suffix == ".json"):
+                value = json.loads(path.read_text())
+                if not isinstance(value, dict):
+                    return False
+        except (OSError, ValueError, TypeError, VideoEditorError):
             return False
-        result = stage.get("result") or {}
-        # Explicit artifact paths must remain present. This catches vanished external media.
-        paths: list[str] = []
-        if isinstance(result, dict):
-            for key in ("artifact", "path", "plan", "report"):
-                value = result.get(key)
-                if isinstance(value, str):
-                    paths.append(value)
-            paths.extend(
-                str(item.get("path"))
-                for item in result.get("artifacts", [])
-                if isinstance(item, dict) and item.get("path")
-            )
-        for artifact in job.get("artifacts", []):
-            if artifact.get("stage") == name:
-                paths.append(str(artifact.get("path", "")))
-        return not any(path and not Path(path).is_file() for path in paths)
+        return True
 
-    def _new_job(self, input_path: Path, volume: VolumeIdentity) -> str:
+    def _completed(self, job: dict[str, Any], name: str) -> bool:
+        stage = job.get("stages", {}).get(name)
+        if not stage or stage.get("status") != StageStatus.COMPLETED:
+            return False
+        artifacts = [
+            Path(item["path"])
+            for item in job.get("artifacts", [])
+            if item.get("stage") == name and isinstance(item.get("path"), str)
+        ]
+        if name in {"inspect", "proxy", "plan", "render", "report"} and not artifacts:
+            return False
+        return all(self._artifact_valid(name, path) for path in artifacts)
+
+    def _stage_reusable(
+        self,
+        job: dict[str, Any],
+        name: str,
+        fingerprint: Any,
+        settings: Any,
+    ) -> bool:
+        stage = job.get("stages", {}).get(name)
+        input_hash, settings_hash = self._stage_keys(fingerprint, settings)
+        return bool(
+            stage
+            and stage.get("input_fingerprint") == input_hash
+            and stage.get("settings_hash") == settings_hash
+            and stage.get("implementation_version") == IMPLEMENTATION_VERSION
+            and self._completed(job, name)
+        )
+
+    def _new_job(self, input_path: Path) -> str:
+        source_volume = inspect_volume(input_path)
+        destinations = {
+            name: _volume_data(self._destination_volume(path, _MIN_WRITE_BYTES))
+            for name, path in (
+                ("workspace", self.config.paths.workspace_dir),
+                ("cache", self.config.paths.cache_dir),
+                ("output", self.config.paths.output_dir),
+            )
+        }
         config = {
             "input_path": str(input_path),
             "paths": {
                 key: str(value) for key, value in vars(self.config.paths).items()
             },
+            "destination_volumes": destinations,
         }
-        return self.store.create_job(config, _volume_data(volume))
+        return self.store.create_job(config, _volume_data(source_volume))
 
-    def _inspect_stage(
-        self, job_id: str, input_path: Path, volume: VolumeIdentity
-    ) -> dict[str, Any]:
-        sources = discover_sources(input_path)
+    def _expected_destination_volume(
+        self, job: dict[str, Any], name: str
+    ) -> VolumeIdentity:
+        values = job.get("config", {}).get("destination_volumes", {})
+        value = values.get(name)
+        if not isinstance(value, dict):
+            raise VideoEditorError(
+                ErrorCategory.STATE, f"missing recorded {name} volume"
+            )
+        return _volume(value)
+
+    def _run_stage(
+        self,
+        job_id: str,
+        name: str,
+        fingerprint: Any,
+        settings: Any,
+        category: ErrorCategory,
+        operation: Callable[[], _T],
+    ) -> _T:
+        self._start(job_id, name, fingerprint, settings)
+        try:
+            return operation()
+        except VideoEditorError as exc:
+            self.store.fail_stage(job_id, name, exc.category, str(exc))
+            raise
+        except (OSError, ValueError, TypeError, ValidationError) as exc:
+            self.store.fail_stage(job_id, name, category, str(exc))
+            raise VideoEditorError(category, f"{name} failed: {exc}") from exc
+        except Exception as exc:
+            self.store.fail_stage(job_id, name, category, str(exc))
+            raise VideoEditorError(
+                category, f"{name} failed unexpectedly: {exc}"
+            ) from exc
+
+    def _discover(self, input_path: Path) -> list[SourceCandidate]:
+        return discover_sources(input_path)
+
+    def _inspect_identity(self, input_path: Path) -> list[dict[str, Any]]:
+        return [
+            {
+                "path": str(source.path),
+                "fingerprint": source.fingerprint,
+                "size_bytes": source.size_bytes,
+            }
+            for source in self._discover(input_path)
+        ]
+
+    def _inspect_stage(self, job_id: str, input_path: Path) -> dict[str, Any]:
+        sources = self._discover(input_path)
+        workspace = self._configured_destination(
+            self.config.paths.workspace_dir, job_id
+        )
+        job = self.store.get_job(job_id)
+        self._destination_volume(
+            workspace,
+            max(_MIN_WRITE_BYTES, sum(source.size_bytes for source in sources) // 1000),
+            self._expected_destination_volume(job, "workspace"),
+        )
         probes: dict[str, MediaProbe] = {}
         skipped: list[dict[str, str]] = []
         for source in sources:
             try:
                 probes[source.fingerprint] = probe_media(source.path)
             except VideoEditorError as exc:
-                skipped.append({"path": str(source.path), "reason": str(exc)})
-        self._probes = probes
+                skipped.append(
+                    {
+                        "path": str(source.path),
+                        "category": str(exc.category),
+                        "reason": str(exc),
+                    }
+                )
+        usable = [source for source in sources if source.fingerprint in probes]
         self.store.save_sources(
             job_id,
-            [
-                {
-                    **_candidate_data(source),
-                    "probe": _probe_data(probes[source.fingerprint]),
-                }
-                for source in sources
-                if source.fingerprint in probes
-            ],
+            [_candidate_data(source, probes[source.fingerprint]) for source in usable],
         )
         creation_times = {
-            str(path): probe.creation_time
-            for path, probe in ((probe.path, probe) for probe in probes.values())
+            str(probe.path): probe.creation_time for probe in probes.values()
         }
-        groups = sequence_sources(
-            [source for source in sources if source.fingerprint in probes],
-            creation_times,
-        )
+        groups = sequence_sources(usable, creation_times)
         chronology = [
             {
                 "group_id": group.group_id,
@@ -186,13 +317,17 @@ class WorkflowService:
             for group in groups
         ]
         self.store.save_chronology(job_id, chronology)
-        artifact = self.config.paths.workspace_dir / f"{job_id}-inventory.json"
-        artifact.parent.mkdir(parents=True, exist_ok=True)
+        workspace.mkdir(parents=True, exist_ok=True)
+        artifact = workspace / "inventory.json"
+        self._protect_sources(artifact, [source.path for source in sources])
         artifact.write_text(
             json.dumps(
                 {
                     "capabilities": detect_capabilities().model_dump(mode="json"),
-                    "sources": [_candidate_data(source) for source in sources],
+                    "sources": [
+                        _candidate_data(source, probes[source.fingerprint])
+                        for source in usable
+                    ],
                     "skipped_inputs": skipped,
                 },
                 indent=2,
@@ -202,138 +337,177 @@ class WorkflowService:
             + "\n"
         )
         self.store.save_artifact(
-            job_id, "inspect", artifact, {"source_count": len(sources)}
+            job_id, "inspect", artifact, {"source_count": len(usable)}
         )
-        return {
+        result = {
             "artifact": str(artifact),
             "sources": [
-                _candidate_data(source)
-                for source in sources
-                if source.fingerprint in probes
+                _candidate_data(source, probes[source.fingerprint]) for source in usable
             ],
             "skipped_inputs": skipped,
             "chronology": chronology,
         }
+        self.store.complete_stage(job_id, "inspect", result)
+        return result
 
     def inspect(self, input_path: Path) -> dict[str, Any]:
         self._require_open_store()
         input_path = Path(input_path)
-        volume = self._check_volume(input_path)
-        job_id = self._new_job(input_path, volume)
-        self._start(job_id, "inspect", str(input_path))
-        try:
-            result = self._inspect_stage(job_id, input_path, volume)
-            self.store.complete_stage(job_id, "inspect", result)
-            return {"job_id": job_id, **result}
-        except VideoEditorError as exc:
-            self.store.fail_stage(job_id, "inspect", exc.category, str(exc))
-            raise
-        except Exception as exc:
-            self.store.fail_stage(job_id, "inspect", ErrorCategory.INSPECTION, str(exc))
-            raise VideoEditorError(ErrorCategory.INSPECTION, str(exc)) from exc
+        job_id = self._new_job(input_path)
+        identity = self._inspect_identity(input_path)
+        result = self._run_stage(
+            job_id,
+            "inspect",
+            identity,
+            {"workspace": str(self.config.paths.workspace_dir)},
+            ErrorCategory.INSPECTION,
+            lambda: self._inspect_stage(job_id, input_path),
+        )
+        return {"job_id": job_id, **result}
 
-    def _load_or_inspect(self, input_path: Path) -> tuple[str, dict[str, Any]]:
-        result = self.inspect(input_path)
-        return str(result["job_id"]), result
+    def _source_probes(self, job: dict[str, Any]) -> dict[str, MediaProbe]:
+        probes: dict[str, MediaProbe] = {}
+        for source in job.get("sources", []):
+            try:
+                probes[str(source["source_id"])] = MediaProbe.model_validate(
+                    source["probe"]
+                )
+            except (KeyError, TypeError, ValidationError) as exc:
+                raise VideoEditorError(
+                    ErrorCategory.STATE,
+                    f"persisted probe is invalid for {source.get('path', 'unknown')}: {exc}",
+                ) from exc
+        return probes
+
+    def _groups(self, job: dict[str, Any]) -> Any:
+        sources = [
+            SourceCandidate(
+                path=Path(source["path"]),
+                size_bytes=int(source["size_bytes"]),
+                discovery_index=int(source["discovery_index"]),
+                fingerprint=str(source["fingerprint"]),
+                identity_version=str(source["identity_version"]),
+            )
+            for source in job.get("sources", [])
+        ]
+        probes = self._source_probes(job)
+        creation_times = {
+            str(probe.path): probe.creation_time for probe in probes.values()
+        }
+        return sequence_sources(sources, creation_times)
+
+    def _plan_stage(self, job_id: str) -> dict[str, Any]:
+        job = self.store.get_job(job_id)
+        sources = job.get("sources", [])
+        output = self._configured_destination(self.config.paths.output_dir, job_id)
+        self._destination_volume(
+            output,
+            max(
+                _MIN_WRITE_BYTES,
+                sum(int(item.get("size_bytes", 0)) for item in sources) // 10000,
+            ),
+            self._expected_destination_volume(job, "output"),
+        )
+        probes = self._source_probes(job)
+        groups = self._groups(job)
+        horizontal, vertical = create_sample_plans(
+            groups,
+            cast(Any, probes),
+            {str(source["source_id"]): Path(source["path"]) for source in sources},
+        )
+        output.mkdir(parents=True, exist_ok=True)
+        horizontal_path = output / "edit-plan-horizontal.json"
+        vertical_path = output / "edit-plan-vertical.json"
+        source_paths = [Path(item["path"]) for item in sources]
+        self._protect_sources(horizontal_path, source_paths)
+        self._protect_sources(vertical_path, source_paths)
+        write_plan(horizontal, horizontal_path)
+        write_plan(vertical, vertical_path)
+        for path in (horizontal_path, vertical_path):
+            load_plan(path)
+            self.store.save_artifact(job_id, "plan", path)
+        result = {
+            "plans": [str(horizontal_path), str(vertical_path)],
+            "output": str(output),
+        }
+        self.store.complete_stage(job_id, "plan", result)
+        return result
 
     def plan(self, input_path: Path, output_path: Path) -> dict[str, Any]:
         self._require_open_store()
-        job_id, inspected = self._load_or_inspect(Path(input_path))
-        job = self.store.get_job(job_id)
-        volume = _volume(job["volume"])
-        output_path = Path(output_path)
-        self._check_volume(volume.mount_point, volume, required=0)
-        self._start(job_id, "plan", inspected["sources"], output_path)
-        try:
-            sources = discover_sources(Path(input_path))
-            groups = sequence_sources(
-                sources,
-                {
-                    str(path): probe.creation_time
-                    for path, probe in (
-                        (probe.path, probe) for probe in self._probes.values()
-                    )
-                },
+        requested = Path(output_path)
+        if requested.resolve() != self.config.paths.output_dir.resolve():
+            raise VideoEditorError(
+                ErrorCategory.STORAGE,
+                f"plan output must use configured output root {self.config.paths.output_dir}",
             )
-            horizontal, vertical = create_sample_plans(
-                groups,
-                cast(Any, self._probes),
-                {source.fingerprint: source.path for source in sources},
-            )
-            output_path.mkdir(parents=True, exist_ok=True)
-            horizontal_path = output_path / "edit-plan-horizontal.json"
-            vertical_path = output_path / "edit-plan-vertical.json"
-            write_plan(horizontal, horizontal_path)
-            write_plan(vertical, vertical_path)
-            self.store.save_artifact(job_id, "plan", horizontal_path)
-            self.store.save_artifact(job_id, "plan", vertical_path)
-            result = {
-                "plans": [str(horizontal_path), str(vertical_path)],
-                "output": str(output_path),
-            }
-            self.store.complete_stage(job_id, "plan", result)
-            return {"job_id": job_id, **result}
-        except VideoEditorError as exc:
-            self.store.fail_stage(job_id, "plan", exc.category, str(exc))
-            raise
-        except Exception as exc:
-            self.store.fail_stage(job_id, "plan", ErrorCategory.PLAN, str(exc))
-            raise VideoEditorError(ErrorCategory.PLAN, str(exc)) from exc
+        input_path = Path(input_path)
+        job_id = self._new_job(input_path)
+        self._ensure_inspect(job_id, input_path)
+        result = self._ensure_plan(job_id)
+        return {"job_id": job_id, **result}
 
-    def render_from_plan(self, plan_path: Path) -> dict[str, Any]:
-        self._require_open_store()
-        plan_path = Path(plan_path)
-        plan = load_plan(plan_path)
-        volume = self._check_volume(plan.sources[0].path)
-        job_id = self._new_job(plan.sources[0].path.parent, volume)
-        self._start(job_id, "render", str(plan_path), plan.model_dump(mode="json"))
-        try:
-            command = compile_render(plan, "ffmpeg")
-            run_render(
-                command,
-                lambda: self.store.fail_stage(
-                    job_id,
-                    "render",
-                    ErrorCategory.RENDER,
-                    "render interrupted",
-                    interrupted=True,
-                ),
-            )
-            self.store.save_artifact(job_id, "render", command.final_path)
-            result = {
-                "output": str(command.final_path),
-                "warnings": [warning.message for warning in command.warnings],
-            }
-            self.store.complete_stage(job_id, "render", result)
-            return {"job_id": job_id, **result}
-        except VideoEditorError as exc:
-            if (
-                self.store.get_job(job_id)["stages"]["render"]["status"]
-                == StageStatus.RUNNING
-            ):
-                self.store.fail_stage(job_id, "render", exc.category, str(exc))
-            raise
-
-    def run(self, input_path: Path) -> dict[str, Any]:
-        planned = self.plan(Path(input_path), self.config.paths.output_dir)
-        job_id = str(planned["job_id"])
+    def _ensure_inspect(self, job_id: str, input_path: Path) -> dict[str, Any]:
+        identity = self._inspect_identity(input_path)
+        settings = {"workspace": str(self.config.paths.workspace_dir)}
         job = self.store.get_job(job_id)
-        volume = _volume(job["volume"])
-        self._start(job_id, "proxy", job["sources"])
-        proxy_results: list[dict[str, Any]] = []
-        try:
-            self._check_volume(volume.mount_point, volume, required=0)
-            for source in job["sources"]:
-                probe = self._probes.get(source["source_id"])
-                if probe is None:
-                    continue
+        if self._stage_reusable(job, "inspect", identity, settings):
+            return cast(dict[str, Any], job["stages"]["inspect"]["result"])
+        return self._run_stage(
+            job_id,
+            "inspect",
+            identity,
+            settings,
+            ErrorCategory.INSPECTION,
+            lambda: self._inspect_stage(job_id, input_path),
+        )
+
+    def _ensure_proxy(self, job_id: str) -> dict[str, Any]:
+        job = self.store.get_job(job_id)
+        fingerprint = [item["source_id"] for item in job.get("sources", [])]
+        settings = {"cache": str(self.config.paths.cache_dir)}
+        if self._stage_reusable(job, "proxy", fingerprint, settings):
+            return cast(dict[str, Any], job["stages"]["proxy"]["result"])
+
+        def operation() -> dict[str, Any]:
+            current = self.store.get_job(job_id)
+            cache = self._configured_destination(self.config.paths.cache_dir, job_id)
+            estimate = max(
+                _MIN_WRITE_BYTES,
+                sum(
+                    int(item.get("size_bytes", 0))
+                    for item in current.get("sources", [])
+                )
+                // 2,
+            )
+            self._destination_volume(
+                cache, estimate, self._expected_destination_volume(current, "cache")
+            )
+            cache.mkdir(parents=True, exist_ok=True)
+            probes = self._source_probes(current)
+            artifacts: list[dict[str, Any]] = []
+            for source in current.get("sources", []):
+                source_path = Path(source["path"])
+                self._protect_sources(cache, [source_path])
+                probe = probes[str(source["source_id"])]
                 proxy, audio, mapping = create_analysis_media(
-                    Path(source["path"]),
-                    source["source_id"],
-                    self.config.paths.cache_dir,
+                    source_path,
+                    str(source["source_id"]),
+                    cache,
                     probe.duration,
                 )
-                proxy_results.append(
+                for path in (proxy, audio):
+                    if path is not None:
+                        self.store.save_artifact(
+                            job_id,
+                            "proxy",
+                            path,
+                            {
+                                "source_id": source["source_id"],
+                                "mapping": mapping.__dict__,
+                            },
+                        )
+                artifacts.append(
                     {
                         "source_id": source["source_id"],
                         "proxy": str(proxy),
@@ -341,77 +515,322 @@ class WorkflowService:
                         "mapping": mapping.__dict__,
                     }
                 )
-            self.store.complete_stage(job_id, "proxy", {"artifacts": proxy_results})
-        except VideoEditorError as exc:
-            self.store.fail_stage(job_id, "proxy", exc.category, str(exc))
-            raise
-        render_results = []
-        for path in planned["plans"]:
-            render_results.append(
-                self._render_existing_plan(job_id, Path(path), volume)
-            )
-        self._start(job_id, "validate", render_results)
-        try:
-            for result in render_results:
-                plan = load_plan(Path(result["plan"]))
-                expected_duration = sum(
-                    (
-                        (clip.source_end - clip.source_start) / clip.speed
-                        for clip in plan.clips
-                    ),
-                    Decimal(0),
-                )
-                validate_output(Path(result["output"]), plan.output, expected_duration)
-            self.store.complete_stage(job_id, "validate", {"outputs": render_results})
-        except VideoEditorError as exc:
-            self.store.fail_stage(job_id, "validate", exc.category, str(exc))
-            raise
-        report_state = self.store.get_job(job_id)
-        report_state["output"] = {"outputs": render_results}
-        report_state["selected_moments"] = []
-        report_state["skipped_inputs"] = job.get("sources", [])
-        report_state["storage_roots"] = {
-            key: str(value) for key, value in vars(self.config.paths).items()
+            result = {"artifacts": artifacts}
+            self.store.complete_stage(job_id, "proxy", result)
+            return result
+
+        return self._run_stage(
+            job_id, "proxy", fingerprint, settings, ErrorCategory.RENDER, operation
+        )
+
+    def _ensure_plan(self, job_id: str) -> dict[str, Any]:
+        job = self.store.get_job(job_id)
+        fingerprint = {
+            "sources": [item["source_id"] for item in job.get("sources", [])],
+            "chronology": job.get("chronology", []),
         }
-        report_state["estimated_peak_space_bytes"] = sum(
-            item.get("size_bytes", 0) for item in job.get("sources", [])
+        settings = {
+            "output": str(self.config.paths.output_dir),
+            "planner": "phase1-sample-v1",
+        }
+        if self._stage_reusable(job, "plan", fingerprint, settings):
+            return cast(dict[str, Any], job["stages"]["plan"]["result"])
+        return self._run_stage(
+            job_id,
+            "plan",
+            fingerprint,
+            settings,
+            ErrorCategory.PLAN,
+            lambda: self._plan_stage(job_id),
         )
-        self._start(job_id, "report", render_results)
-        json_path = self.config.paths.output_dir / "report.json"
-        md_path = self.config.paths.output_dir / "report.md"
-        write_json_report(report_state, json_path)
-        write_markdown_report(report_state, md_path)
-        self.store.save_artifact(job_id, "report", json_path)
-        self.store.save_artifact(job_id, "report", md_path)
-        self.store.complete_stage(
-            job_id, "report", {"artifacts": [str(json_path), str(md_path)]}
+
+    def _render_plan(self, job_id: str, path: Path) -> dict[str, Any]:
+        plan = load_plan(path)
+        output_root = self._configured_destination(self.config.paths.output_dir, job_id)
+        command = compile_render(
+            plan,
+            "ffmpeg",
+            output_dir=output_root,
+            output_name=f"{path.stem}.mp4",
         )
+        source_paths = [source.path for source in plan.sources]
+        self._protect_sources(command.final_path, source_paths)
+        run_render(command, lambda: None)
+        validated = validate_output(
+            command.final_path, plan.output, timeline_duration(plan)
+        )
+        metadata = {
+            "plan": str(path),
+            "width": validated.video.width if validated.video else None,
+            "height": validated.video.height if validated.video else None,
+            "duration": validated.duration,
+            "video_codec": validated.video.codec_name if validated.video else None,
+            "audio_codec": validated.audio.codec_name if validated.audio else None,
+        }
+        self.store.save_artifact(job_id, "render", command.final_path, metadata)
+        return {
+            "plan": str(path),
+            "output": str(command.final_path),
+            "warnings": [warning.message for warning in command.warnings],
+            **metadata,
+        }
+
+    def _ensure_render(self, job_id: str, planned: dict[str, Any]) -> dict[str, Any]:
+        plan_paths = [Path(value) for value in planned.get("plans", [])]
+        fingerprint = [
+            {"path": str(path), "digest": hashlib.sha256(path.read_bytes()).hexdigest()}
+            for path in plan_paths
+        ]
+        settings = {"output": str(self.config.paths.output_dir), "encoder": "libx264"}
+        job = self.store.get_job(job_id)
+        if self._stage_reusable(job, "render", fingerprint, settings):
+            return cast(dict[str, Any], job["stages"]["render"]["result"])
+
+        def operation() -> dict[str, Any]:
+            current = self.store.get_job(job_id)
+            output = self._configured_destination(self.config.paths.output_dir, job_id)
+            plans = [load_plan(path) for path in plan_paths]
+            estimate = max(
+                _MIN_WRITE_BYTES,
+                sum(
+                    _duration_seconds(plan)
+                    * plan.output.width
+                    * plan.output.height
+                    // 8
+                    for plan in plans
+                ),
+            )
+            self._destination_volume(
+                output, estimate, self._expected_destination_volume(current, "output")
+            )
+            output.mkdir(parents=True, exist_ok=True)
+            results = [self._render_plan(job_id, path) for path in plan_paths]
+            result = {"outputs": results, "estimated_bytes": estimate}
+            self.store.complete_stage(job_id, "render", result)
+            return result
+
+        return self._run_stage(
+            job_id, "render", fingerprint, settings, ErrorCategory.RENDER, operation
+        )
+
+    def _ensure_validate(self, job_id: str, rendered: dict[str, Any]) -> dict[str, Any]:
+        fingerprint = rendered.get("outputs", [])
+        settings = {"tolerance": "0.20"}
+        job = self.store.get_job(job_id)
+        stage = job.get("stages", {}).get("validate")
+        input_hash, settings_hash = self._stage_keys(fingerprint, settings)
+        if (
+            stage
+            and stage.get("status") == StageStatus.COMPLETED
+            and stage.get("input_fingerprint") == input_hash
+            and stage.get("settings_hash") == settings_hash
+            and stage.get("implementation_version") == IMPLEMENTATION_VERSION
+        ):
+            return cast(dict[str, Any], stage["result"])
+
+        def operation() -> dict[str, Any]:
+            checked: list[dict[str, Any]] = []
+            for item in rendered.get("outputs", []):
+                plan = load_plan(Path(item["plan"]))
+                probe = validate_output(
+                    Path(item["output"]), plan.output, timeline_duration(plan)
+                )
+                checked.append(
+                    {
+                        "path": item["output"],
+                        "width": probe.video.width if probe.video else None,
+                        "height": probe.video.height if probe.video else None,
+                        "duration": probe.duration,
+                        "video_codec": probe.video.codec_name if probe.video else None,
+                        "audio_codec": probe.audio.codec_name if probe.audio else None,
+                    }
+                )
+            result = {"outputs": checked}
+            self.store.complete_stage(job_id, "validate", result)
+            return result
+
+        return self._run_stage(
+            job_id, "validate", fingerprint, settings, ErrorCategory.OUTPUT, operation
+        )
+
+    def _report_state(
+        self,
+        job_id: str,
+        inspected: dict[str, Any],
+        planned: dict[str, Any],
+        rendered: dict[str, Any],
+        validated: dict[str, Any],
+    ) -> dict[str, Any]:
+        job = self.store.get_job(job_id)
+        selected: list[dict[str, Any]] = []
+        for plan_path in planned.get("plans", []):
+            plan = load_plan(Path(plan_path))
+            selected.extend(
+                {
+                    "plan": str(plan_path),
+                    "source_id": clip.source_id,
+                    "source_start": str(clip.source_start),
+                    "source_end": str(clip.source_end),
+                    "selection_reason": clip.selection_reason,
+                }
+                for clip in plan.clips
+            )
+        stage_times: dict[str, dict[str, Any]] = {}
+        for name, stage in job.get("stages", {}).items():
+            duration: float | None = None
+            if stage.get("started_at") and stage.get("completed_at"):
+                duration = (
+                    datetime.fromisoformat(stage["completed_at"])
+                    - datetime.fromisoformat(stage["started_at"])
+                ).total_seconds()
+            stage_times[name] = {
+                "started_at": stage.get("started_at"),
+                "completed_at": stage.get("completed_at"),
+                "duration_seconds": duration,
+            }
+        warnings = [
+            warning
+            for output in rendered.get("outputs", [])
+            for warning in output.get("warnings", [])
+        ]
+        estimate = max(
+            _MIN_WRITE_BYTES,
+            sum(int(source.get("size_bytes", 0)) for source in job.get("sources", []))
+            + int(rendered.get("estimated_bytes", 0)),
+        )
+        return {
+            **job,
+            "selected_moments": selected,
+            "output": {"outputs": validated.get("outputs", [])},
+            "skipped_inputs": inspected.get("skipped_inputs", []),
+            "warnings": warnings,
+            "fallbacks": warnings,
+            "stage_times": stage_times,
+            "storage_roots": {
+                key: str(value) for key, value in vars(self.config.paths).items()
+            },
+            "estimated_peak_space_bytes": estimate,
+            "cloud_usage": 0,
+        }
+
+    def _write_report_stage(
+        self, job_id: str, report_state: dict[str, Any], *, started: bool = False
+    ) -> dict[str, Any]:
+        if not started:
+            self._start(
+                job_id,
+                "report",
+                report_state.get("output", {}),
+                {"output": str(self.config.paths.output_dir)},
+            )
+        report_root = self._configured_destination(self.config.paths.output_dir, job_id)
+        try:
+            job = self.store.get_job(job_id)
+            self._destination_volume(
+                report_root,
+                max(_MIN_WRITE_BYTES, len(json.dumps(report_state, default=str))),
+                self._expected_destination_volume(job, "output"),
+            )
+            report_root.mkdir(parents=True, exist_ok=True)
+            json_path = report_root / "report.json"
+            md_path = report_root / "report.md"
+            write_json_report(report_state, json_path)
+            write_markdown_report(report_state, md_path)
+            self.store.save_artifact(job_id, "report", json_path)
+            self.store.save_artifact(job_id, "report", md_path)
+            result = {"artifacts": [str(json_path), str(md_path)]}
+            self.store.complete_stage(job_id, "report", result)
+            return result
+        except VideoEditorError as exc:
+            self.store.fail_stage(job_id, "report", exc.category, str(exc))
+            raise
+        except Exception as exc:
+            self.store.fail_stage(job_id, "report", ErrorCategory.OUTPUT, str(exc))
+            raise VideoEditorError(
+                ErrorCategory.OUTPUT, f"cannot write report: {exc}"
+            ) from exc
+
+    def _ensure_report(self, job_id: str, state: dict[str, Any]) -> dict[str, Any]:
+        fingerprint = state.get("output", {})
+        settings = {"output": str(self.config.paths.output_dir)}
+        job = self.store.get_job(job_id)
+        if self._stage_reusable(job, "report", fingerprint, settings):
+            return cast(dict[str, Any], job["stages"]["report"]["result"])
+        return self._run_stage(
+            job_id,
+            "report",
+            fingerprint,
+            settings,
+            ErrorCategory.OUTPUT,
+            lambda: self._write_report_stage(job_id, state, started=True),
+        )
+
+    def _execute(self, job_id: str) -> dict[str, Any]:
+        job = self.store.get_job(job_id)
+        input_path = Path(job["config"]["input_path"])
+        source_volume = _volume(job["volume"])
+        current_source_volume = inspect_volume(input_path)
+        if (
+            current_source_volume.device != source_volume.device
+            or current_source_volume.filesystem != source_volume.filesystem
+        ):
+            raise VideoEditorError(
+                ErrorCategory.STORAGE,
+                f"source volume changed for {input_path}: expected {source_volume}, found {current_source_volume}",
+            )
+        inspected = self._ensure_inspect(job_id, input_path)
+        self._ensure_proxy(job_id)
+        planned = self._ensure_plan(job_id)
+        rendered = self._ensure_render(job_id, planned)
+        validated = self._ensure_validate(job_id, rendered)
+        report_state = self._report_state(
+            job_id, inspected, planned, rendered, validated
+        )
+        reports = self._ensure_report(job_id, report_state)
         self.store.complete_job(job_id)
         return {
             "job_id": job_id,
-            "outputs": render_results,
-            "reports": [str(json_path), str(md_path)],
+            "outputs": rendered.get("outputs", []),
+            "reports": reports.get("artifacts", []),
         }
 
-    def _render_existing_plan(
-        self, job_id: str, path: Path, volume: VolumeIdentity
-    ) -> dict[str, Any]:
-        plan = load_plan(path)
-        self._check_volume(volume.mount_point, volume, required=0)
-        if (
-            self.store.get_job(job_id)["stages"].get("render", {}).get("status")
-            != StageStatus.RUNNING
-        ):
-            self._start(job_id, "render", str(path), plan.model_dump(mode="json"))
-        command = compile_render(plan, "ffmpeg")
-        run_render(command, lambda: None)
-        self.store.save_artifact(
-            job_id, "render", command.final_path, name=command.final_path.name
+    def render_from_plan(self, plan_path: Path) -> dict[str, Any]:
+        self._require_open_store()
+        plan_path = Path(plan_path)
+        plan = load_plan(plan_path)
+        job_id = self._new_job(plan.sources[0].path)
+        output = self._configured_destination(self.config.paths.output_dir, job_id)
+        fingerprint = {
+            "path": str(plan_path),
+            "digest": hashlib.sha256(plan_path.read_bytes()).hexdigest(),
+        }
+        settings = {"output": str(output), "encoder": "libx264"}
+
+        def operation() -> dict[str, Any]:
+            job = self.store.get_job(job_id)
+            estimate = (
+                _duration_seconds(plan) * plan.output.width * plan.output.height // 8
+            )
+            self._destination_volume(
+                output,
+                max(_MIN_WRITE_BYTES, estimate),
+                self._expected_destination_volume(job, "output"),
+            )
+            output.mkdir(parents=True, exist_ok=True)
+            result = self._render_plan(job_id, plan_path)
+            self.store.complete_stage(job_id, "render", result)
+            return result
+
+        result = self._run_stage(
+            job_id, "render", fingerprint, settings, ErrorCategory.RENDER, operation
         )
-        self.store.complete_stage(
-            job_id, "render", {"plan": str(path), "output": str(command.final_path)}
-        )
-        return {"plan": str(path), "output": str(command.final_path)}
+        return {"job_id": job_id, **result}
+
+    def run(self, input_path: Path) -> dict[str, Any]:
+        self._require_open_store()
+        input_path = Path(input_path)
+        job_id = self._new_job(input_path)
+        return self._execute(job_id)
 
     def status(self, job_id: str) -> dict[str, Any]:
         self._require_open_store()
@@ -422,33 +841,8 @@ class WorkflowService:
 
     def resume(self, job_id: str) -> dict[str, Any]:
         self._require_open_store()
-        job = self.status(job_id)
-        if self._completed(job, "report") and job["status"] == "completed":
-            return job
-        input_path = Path(job["config"]["input_path"])
-        for name in STAGES:
-            job = self.store.get_job(job_id)
-            if self._completed(job, name):
-                continue
-            if name == "inspect":
-                volume = _volume(job["volume"])
-                self._check_volume(input_path, volume)
-                self._start(job_id, "inspect", str(input_path))
-                self._inspect_stage(job_id, input_path, volume)
-                self.store.complete_stage(
-                    job_id,
-                    "inspect",
-                    {
-                        "artifact": str(
-                            self.config.paths.workspace_dir / f"{job_id}-inventory.json"
-                        )
-                    },
-                )
-            elif name == "plan":
-                return self.plan(input_path, self.config.paths.output_dir)
-            elif name in {"proxy", "render", "validate", "report"}:
-                return self.run(input_path)
-        return self.store.get_job(job_id)
+        self.status(job_id)
+        return self._execute(job_id)
 
 
 def error_exit_code(error: VideoEditorError) -> int:

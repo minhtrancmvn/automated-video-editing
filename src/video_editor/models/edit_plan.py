@@ -7,7 +7,14 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from video_editor.errors import ErrorCategory, VideoEditorError
 
@@ -241,6 +248,10 @@ def load_plan(path: Path) -> EditPlan:
     except OSError as exc:
         raise VideoEditorError(
             ErrorCategory.PLAN, f"cannot load edit plan {path}: {exc}"
+        ) from exc
+    except (ValidationError, ValueError, TypeError) as exc:
+        raise VideoEditorError(
+            ErrorCategory.PLAN, f"invalid edit plan {path}: {exc}"
         ) from exc
 
 

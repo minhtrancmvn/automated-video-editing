@@ -278,7 +278,14 @@ def create_analysis_media(
             ErrorCategory.STORAGE, "source path cannot be inside cache root"
         )
     cache_root.mkdir(parents=True, exist_ok=True)
-    source_probe: MediaProbe = probe_media(source, ffprobe=ffprobe)
+    try:
+        source_probe: MediaProbe = probe_media(source, ffprobe=ffprobe)
+    except VideoEditorError:
+        raise
+    except (OSError, ValueError, TypeError) as exc:
+        raise VideoEditorError(
+            ErrorCategory.INSPECTION, f"cannot inspect source for analysis media: {exc}"
+        ) from exc
     actual_duration = duration if duration is not None else source_probe.duration
     if actual_duration is None:
         raise VideoEditorError(
@@ -292,9 +299,7 @@ def create_analysis_media(
     _run_and_cleanup(
         build_proxy_args(source, partial_proxy, settings, ffmpeg=ffmpeg), partial_proxy
     )
-    proxy = _validated_rename(
-        partial_proxy, final_proxy, settings, ffprobe=ffprobe
-    )
+    proxy = _validated_rename(partial_proxy, final_proxy, settings, ffprobe=ffprobe)
 
     audio: Path | None = None
     if source_probe.audio is not None:

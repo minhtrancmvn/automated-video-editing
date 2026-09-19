@@ -152,9 +152,7 @@ def _audio_filter(
     )
 
 
-def _hardware_probe(
-    ffmpeg: str, encoder: str
-) -> tuple[bool, str]:
+def _hardware_probe(ffmpeg: str, encoder: str) -> tuple[bool, str]:
     """Probe encoder and return capability plus actionable failure reason."""
     args = [
         ffmpeg,
@@ -187,7 +185,11 @@ def _hardware_probe(
 
 
 def compile_render(
-    plan: EditPlan, ffmpeg: str, encoder: str = "libx264"
+    plan: EditPlan,
+    ffmpeg: str,
+    encoder: str = "libx264",
+    output_dir: Path | None = None,
+    output_name: str | None = None,
 ) -> RenderCommand:
     """Compile plan into one shell-free FFmpeg command."""
     selected_encoder = encoder
@@ -199,16 +201,24 @@ def compile_render(
             warnings.append(
                 RenderWarning(
                     code="hardware_encoder_fallback",
-                    message=(
-                        f"encoder {encoder} unavailable; using libx264 fallback"
-                    ),
+                    message=(f"encoder {encoder} unavailable; using libx264 fallback"),
                     reason=reason,
                     requested_encoder=encoder,
                     selected_encoder=selected_encoder,
                 )
             )
 
-    final_path = plan.sources[0].path.parent / f"{plan.output.kind}.mp4"
+    source_paths = [source.path.resolve() for source in plan.sources]
+    root = (output_dir or Path.cwd() / ".video-editor-output").resolve()
+    if any(root == source or root in source.parents for source in source_paths):
+        raise ValueError("render output root cannot contain source media")
+    root.mkdir(parents=True, exist_ok=True)
+    name = output_name or f"{plan.output.kind}.mp4"
+    if Path(name).name != name or name in {"", ".", ".."}:
+        raise ValueError("render output name must be a filename")
+    final_path = root / name
+    if final_path.resolve() in source_paths:
+        raise ValueError("render output cannot overwrite source media")
     partial_path = final_path.with_name(final_path.name + ".partial")
     args: list[str] = [ffmpeg, "-hide_banner", "-y"]
     for source in plan.sources:
@@ -237,7 +247,9 @@ def compile_render(
             continue
         audio_label = f"aclip{index}"
         # Silence policy is explicit and must never inspect or map source audio.
-        use_source_audio = plan.output.audio == "source" and plan.sources[source_index].has_audio
+        use_source_audio = (
+            plan.output.audio == "source" and plan.sources[source_index].has_audio
+        )
         graph.append(
             _audio_filter(
                 source_index,
@@ -256,7 +268,11 @@ def compile_render(
         transition = _transition(plan, index - 1)
         next_video = video_labels[index]
         video_out = f"vjoin{index}"
-        if transition is not None and transition.kind == "dissolve" and transition.duration > 0:
+        if (
+            transition is not None
+            and transition.kind == "dissolve"
+            and transition.duration > 0
+        ):
             offset = current_duration - transition.duration
             graph.append(
                 f"[{current_video}][{next_video}]xfade=transition=fade:"
@@ -272,7 +288,11 @@ def compile_render(
         current_video = video_out
         if current_audio is not None:
             audio_out = f"ajoin{index}"
-            if transition is not None and transition.kind == "dissolve" and transition.duration > 0:
+            if (
+                transition is not None
+                and transition.kind == "dissolve"
+                and transition.duration > 0
+            ):
                 graph.append(
                     f"[{current_audio}][{audio_labels[index]}]acrossfade="
                     f"d={_number(transition.duration)}:c1=tri:c2=tri[{audio_out}]"
