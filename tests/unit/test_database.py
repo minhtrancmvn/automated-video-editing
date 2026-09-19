@@ -41,6 +41,26 @@ def test_interrupted_stage_has_interrupted_status(tmp_path: Path) -> None:
     assert state["stages"]["render"]["status"] == StageStatus.INTERRUPTED
 
 
+def test_completing_stage_preserves_failed_job_status(tmp_path: Path) -> None:
+    with JobStore(tmp_path / "state.db") as store:
+        job = store.create_job("{}", "{}")
+        store.start_stage(job, "failed", "source", "settings", "v1")
+        store.start_stage(job, "other", "source", "settings", "v1")
+        store.fail_stage(job, "failed", "encoding", "encoder failed")
+        store.complete_stage(job, "other")
+        assert store.get_job(job)["status"] == JobStatus.FAILED
+
+
+def test_completing_stage_preserves_interrupted_job_status(tmp_path: Path) -> None:
+    with JobStore(tmp_path / "state.db") as store:
+        job = store.create_job("{}", "{}")
+        store.start_stage(job, "interrupted", "source", "settings", "v1")
+        store.start_stage(job, "other", "source", "settings", "v1")
+        store.fail_stage(job, "interrupted", "encoding", "stopped", interrupted=True)
+        store.complete_stage(job, "other")
+        assert store.get_job(job)["status"] == JobStatus.INTERRUPTED
+
+
 def test_sources_and_chronology_are_persisted(tmp_path: Path) -> None:
     with JobStore(tmp_path / "state.db") as store:
         job = store.create_job("{}", "{}")
@@ -105,12 +125,15 @@ def test_falsy_artifact_metadata_is_preserved(tmp_path: Path) -> None:
         assert store.get_job(job)["artifacts"][0]["metadata"] == []
 
 
-def test_successful_stage_completes_job(tmp_path: Path) -> None:
+def test_completing_stage_leaves_job_running_until_explicit_completion(tmp_path: Path) -> None:
     with JobStore(tmp_path / "state.db") as store:
         job = store.create_job("{}", "{}")
         store.start_stage(job, "inspect", "source", "settings", "impl")
         store.complete_stage(job, "inspect")
-        assert store.get_job(job)["status"] == JobStatus.COMPLETED
+        assert store.get_job(job)["status"] == JobStatus.RUNNING
+
+        store.start_stage(job, "render", "source", "settings", "impl")
+        assert store.get_job(job)["status"] == JobStatus.RUNNING
 
 
 def test_complete_job_requires_all_stages_completed(tmp_path: Path) -> None:
@@ -124,3 +147,7 @@ def test_complete_job_requires_all_stages_completed(tmp_path: Path) -> None:
         else:
             raise AssertionError("incomplete job was marked completed")
         assert store.get_job(job)["status"] == JobStatus.RUNNING
+
+        store.complete_stage(job, "inspect")
+        store.complete_job(job)
+        assert store.get_job(job)["status"] == JobStatus.COMPLETED

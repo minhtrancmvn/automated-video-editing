@@ -245,11 +245,20 @@ class JobStore:
             )
             if cursor.rowcount == 0:
                 raise KeyError(f"unknown stage: {job_id}/{name}")
-            remaining = connection.execute(
-                "SELECT COUNT(*) FROM job_stages WHERE job_id = ? AND status != ?",
-                (job_id, StageStatus.COMPLETED),
-            ).fetchone()[0]
-            job_status = JobStatus.COMPLETED if remaining == 0 else JobStatus.RUNNING
+            interrupted = connection.execute(
+                "SELECT 1 FROM job_stages WHERE job_id = ? AND status = ? LIMIT 1",
+                (job_id, StageStatus.INTERRUPTED),
+            ).fetchone()
+            failed = connection.execute(
+                "SELECT 1 FROM job_stages WHERE job_id = ? AND status = ? LIMIT 1",
+                (job_id, StageStatus.FAILED),
+            ).fetchone()
+            if interrupted is not None:
+                job_status = JobStatus.INTERRUPTED
+            elif failed is not None:
+                job_status = JobStatus.FAILED
+            else:
+                job_status = JobStatus.RUNNING
             connection.execute(
                 "UPDATE jobs SET status = ?, updated_at = ? WHERE id = ?",
                 (job_status, now, job_id),
