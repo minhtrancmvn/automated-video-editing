@@ -1,9 +1,19 @@
+import importlib.util
+import shutil
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from video_editor.media.probe import AudioStream, VideoStream
+_fixture_spec = importlib.util.spec_from_file_location(
+    "video_editor_test_fixtures", Path(__file__).parents[1] / "fixtures.py"
+)
+assert _fixture_spec is not None and _fixture_spec.loader is not None
+_fixture_module = importlib.util.module_from_spec(_fixture_spec)
+_fixture_spec.loader.exec_module(_fixture_module)
+create_media_fixture = _fixture_module.create_media_fixture
+from video_editor.media.probe import AudioStream, MediaProbe, VideoStream, probe_media
 from video_editor.media.proxies import (
     ProxySettings,
     build_audio_args,
@@ -76,13 +86,13 @@ def test_no_audio_returns_none_and_outputs_stay_in_cache(
             path=path,
             duration=12.5,
             video=VideoStream(
-                codec_name="libx264", width=960, height=540, avg_frame_rate=15
+                codec_name="h264", width=960, height=540, avg_frame_rate=15
             ),
         ),
     )
-    calls: list[tuple[list[str], dict]] = []
+    calls: list[tuple[list[str], dict[str, Any]]] = []
 
-    def run(args, **kwargs):
+    def run(args: list[str], **kwargs: Any) -> object:
         calls.append((args, kwargs))
         Path(args[-1]).write_bytes(b"derived")
         return type("Result", (), {"returncode": 0, "stderr": ""})()
@@ -127,7 +137,7 @@ def test_audio_output_is_created_only_inside_cache(
             path=path,
             duration=12.5,
             video=VideoStream(
-                codec_name="libx264", width=960, height=540, avg_frame_rate=15
+                codec_name="h264", width=960, height=540, avg_frame_rate=15
             ),
             audio=None
             if path.name.endswith(".proxy.mp4.partial")
@@ -136,7 +146,7 @@ def test_audio_output_is_created_only_inside_cache(
 
     monkeypatch.setattr("video_editor.media.proxies.probe_media", probe)
 
-    def run(args, **kwargs):
+    def run(args: list[str], **kwargs: Any) -> object:
         Path(args[-1]).write_bytes(b"derived")
         return type("Result", (), {"returncode": 0, "stderr": ""})()
 
@@ -153,9 +163,9 @@ def test_audio_output_is_created_only_inside_cache(
     "video",
     [
         None,
-        VideoStream(codec_name="libx264", width=961, avg_frame_rate=15),
-        VideoStream(codec_name="h264", width=960, avg_frame_rate=15),
-        VideoStream(codec_name="libx264", width=960, avg_frame_rate=30),
+        VideoStream(codec_name="h265", width=960, avg_frame_rate=15),
+        VideoStream(codec_name="h264", width=961, avg_frame_rate=15),
+        VideoStream(codec_name="h264", width=960, avg_frame_rate=30),
     ],
 )
 def test_invalid_proxy_properties_are_not_renamed(
@@ -210,7 +220,7 @@ def test_invalid_audio_properties_are_not_renamed(
     source.write_bytes(b"source")
     cache = tmp_path / "cache"
     proxy_video = VideoStream(
-        codec_name="libx264", width=960, height=540, avg_frame_rate=15
+        codec_name="h264", width=960, height=540, avg_frame_rate=15
     )
 
     def probe(path: Path, ffprobe: str = "ffprobe") -> MediaProbe:
@@ -236,6 +246,55 @@ def test_invalid_audio_properties_are_not_renamed(
     assert not list(cache.glob("*.audio.wav"))
     assert not list(cache.glob("*.partial"))
     assert source.read_bytes() == b"source"
+
+
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="local FFmpeg and ffprobe required",
+)
+def test_default_proxy_accepts_ffmpeg_stream_codec_metadata(tmp_path: Path) -> None:
+    from video_editor.media.proxies import create_analysis_media
+
+    source = create_media_fixture(tmp_path / "source.mp4", with_audio=False)
+    proxy, audio, mapping = create_analysis_media(
+        source,
+        "source-1",
+        tmp_path / "cache",
+    )
+
+    inspected = probe_media(proxy)
+    assert inspected.video is not None
+    assert inspected.video.codec_name == "h264"
+    assert audio is None
+    assert mapping.source_end > 0
+
+
+def test_proxy_replace_failure_cleans_partial(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from video_editor.media.proxies import _validated_rename
+
+    partial = tmp_path / "proxy.mp4.partial"
+    final = tmp_path / "proxy.mp4"
+    partial.write_bytes(b"derived")
+    monkeypatch.setattr(
+        "video_editor.media.proxies.probe_media",
+        lambda path, ffprobe="ffprobe": MediaProbe(
+            path=path,
+            video=VideoStream(codec_name="h264", width=960, avg_frame_rate=15),
+        ),
+    )
+
+    def fail_replace(self: Path, target: Path) -> Path:
+        raise OSError("rename failed")
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+
+    with pytest.raises(OSError, match="rename failed"):
+        _validated_rename(partial, final, ProxySettings(), ffprobe="ffprobe")
+
+    assert not partial.exists()
+    assert not final.exists()
 
 
 def test_ffprobe_failure_cleans_partial_and_preserves_error(

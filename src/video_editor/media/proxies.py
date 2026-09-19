@@ -79,6 +79,12 @@ def settings_hash(settings: ProxySettings) -> str:
 _DEFAULT_SETTINGS = ProxySettings()
 
 
+def _expected_stream_codec(encoder: str) -> str:
+    """Return codec name ffprobe reports for an FFmpeg encoder."""
+
+    return {"libx264": "h264"}.get(encoder, encoder)
+
+
 def build_proxy_args(
     source: Path,
     output: Path,
@@ -192,7 +198,7 @@ def _validated_rename(
         and video is not None
         and video.width is not None
         and video.width <= settings.max_width
-        and video.codec_name == settings.video_codec
+        and video.codec_name == _expected_stream_codec(settings.video_codec)
         and valid_frame_rate
         and inspected.audio is None
     )
@@ -201,7 +207,11 @@ def _validated_rename(
         raise VideoEditorError(
             ErrorCategory.OUTPUT, f"invalid generated proxy: {partial}"
         )
-    partial.replace(final)
+    try:
+        partial.replace(final)
+    except OSError:
+        partial.unlink(missing_ok=True)
+        raise
     return final
 
 
@@ -226,7 +236,11 @@ def _validated_audio_rename(partial: Path, final: Path, *, ffprobe: str) -> Path
         raise VideoEditorError(
             ErrorCategory.OUTPUT, f"invalid generated audio: {partial}"
         )
-    partial.replace(final)
+    try:
+        partial.replace(final)
+    except OSError:
+        partial.unlink(missing_ok=True)
+        raise
     return final
 
 
