@@ -9,6 +9,7 @@ import typer
 
 from video_editor.config import resolve_config
 from video_editor.errors import VideoEditorError
+from video_editor.media.storage import inspect_volume
 from video_editor.persistence.database import JobStore
 from video_editor.workflow import WorkflowService, error_exit_code
 
@@ -17,6 +18,8 @@ app = typer.Typer(help="Local-first generic video editor.")
 
 def _service(config_path: Path) -> tuple[WorkflowService, JobStore]:
     config = resolve_config(config_path)
+    if config.paths.state_dir.anchor == "/" and config.paths.state_dir.parts[1:2] == ("Volumes",):
+        inspect_volume(config.paths.state_dir)
     store = JobStore(config.paths.state_dir / "jobs.sqlite3")
     return WorkflowService(config, store), store
 

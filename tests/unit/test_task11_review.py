@@ -308,6 +308,10 @@ def test_report_aggregates_probe_warnings_without_render_fallbacks(
         )
     assert state["warnings"] == [{"code": "hevc", "message": "source uses HEVC"}]
     assert state["fallbacks"] == ["software encoder fallback"]
+    assert state["estimated_peak_space_scope"] == (
+        "generated-byte growth across workspace, cache, and output roots"
+    )
+    assert state["estimated_peak_space_bytes"] == 1
 
 
 def test_interrupted_render_preserves_valid_output_on_resume(
@@ -359,6 +363,72 @@ def test_interrupted_render_preserves_valid_output_on_resume(
         str(second_plan),
     ]
     render_plan.assert_called_once_with(job_id, second_plan)
+
+
+def test_resume_persists_and_reuses_final_output_without_old_artifact_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    plan_path = tmp_path / "long-plan.json"
+    plan_path.write_text("plan")
+    output_path = config.paths.output_dir / "job" / "long.mp4"
+    output_path.parent.mkdir(parents=True)
+    output_path.write_bytes(b"valid")
+    plan = Mock(output=Mock(width=1920, height=1080))
+    with JobStore(tmp_path / "state.db") as store:
+        job_id = store.create_job({}, {})
+        service = WorkflowService(config, store)
+        monkeypatch.setattr("video_editor.workflow.load_plan", lambda _path: plan)
+        monkeypatch.setattr("video_editor.workflow.timeline_duration", lambda _plan: Decimal(1))
+        monkeypatch.setattr(
+            service, "_configured_destination", lambda _root, _job_id: output_path.parent
+        )
+        monkeypatch.setattr(service, "_destination_volume", lambda *args: Mock())
+        monkeypatch.setattr(service, "_expected_destination_volume", lambda *args: Mock())
+        monkeypatch.setattr(
+            service,
+            "_artifact_valid",
+            lambda _name, path, _metadata=None: path == output_path,
+        )
+        render = Mock(side_effect=AssertionError("existing final must be reused"))
+        monkeypatch.setattr(service, "_render_plan", render)
+
+        result = service._ensure_render(job_id, {"plans": [str(plan_path)]})
+        artifacts = store.get_job(job_id)["artifacts"]
+
+    assert result["outputs"][0]["output"] == str(output_path)
+    assert artifacts == [
+        {
+            "stage": "render",
+            "name": "long.mp4",
+            "path": str(output_path),
+            "metadata": {"plan": str(plan_path), "warnings": []},
+        }
+    ]
+    render.assert_not_called()
+
+
+def test_run_stage_persists_keyboard_interrupt_as_interrupted(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    with JobStore(tmp_path / "state.db") as store:
+        job_id = store.create_job({}, {})
+        service = WorkflowService(config, store)
+        with pytest.raises(VideoEditorError) as caught:
+            service._run_stage(
+                job_id,
+                "inspect",
+                "input",
+                "settings",
+                ErrorCategory.INSPECTION,
+                lambda: (_ for _ in ()).throw(KeyboardInterrupt()),
+            )
+        state = store.get_job(job_id)
+
+    assert caught.value.interrupted
+    assert state["status"] == "interrupted"
+    assert state["stages"]["inspect"]["status"] == "interrupted"
 
 
 def test_stage_reuse_requires_matching_identity_and_valid_artifact(

@@ -318,6 +318,12 @@ class WorkflowService:
                 interrupted=exc.interrupted,
             )
             raise
+        except KeyboardInterrupt as exc:
+            message = f"{name} interrupted"
+            self.store.fail_stage(
+                job_id, name, category, message, interrupted=True
+            )
+            raise VideoEditorError(category, message, interrupted=True) from exc
         except (OSError, ValueError, TypeError, ValidationError) as exc:
             self.store.fail_stage(job_id, name, category, str(exc))
             raise VideoEditorError(category, f"{name} failed: {exc}") from exc
@@ -686,6 +692,26 @@ class WorkflowService:
             }
         return results
 
+    def _recover_render_results(
+        self, job_id: str, plan_paths: list[Path]
+    ) -> dict[Path, dict[str, Any]]:
+        """Recover valid finals when interruption happened before artifact persistence."""
+        output = self._configured_destination(self.config.paths.output_dir, job_id)
+        recovered: dict[Path, dict[str, Any]] = {}
+        for plan_path in plan_paths:
+            plan = load_plan(plan_path)
+            name = "long.mp4" if plan.output.width == 1920 and plan.output.height == 1080 else "short-01.mp4"
+            output_path = output / name
+            metadata = {"plan": str(plan_path), "warnings": []}
+            if self._artifact_valid("render", output_path, metadata):
+                self.store.save_artifact(job_id, "render", output_path, metadata)
+                recovered[plan_path.resolve()] = {
+                    "plan": str(plan_path),
+                    "output": str(output_path),
+                    **metadata,
+                }
+        return recovered
+
     def _ensure_render(self, job_id: str, planned: dict[str, Any]) -> dict[str, Any]:
         plan_paths = [Path(value) for value in planned.get("plans", [])]
         fingerprint = [
@@ -719,7 +745,27 @@ class WorkflowService:
                 output, estimate, self._expected_destination_volume(current, "output")
             )
             output.mkdir(parents=True, exist_ok=True)
+            for path, plan in zip(plan_paths, plans, strict=True):
+                name = (
+                    "long.mp4"
+                    if plan.output.width == 1920 and plan.output.height == 1080
+                    else "short-01.mp4"
+                )
+                output_path = output / name
+                metadata = {"plan": str(path), "warnings": []}
+                # Persist expected final before render. Resume can recover a renamed
+                # final even if process died before normal artifact persistence.
+                self.store.save_artifact(job_id, "render", output_path, metadata)
             preserved = self._valid_render_results(current, plan_paths)
+            preserved.update(
+                {
+                    path: result
+                    for path, result in self._recover_render_results(
+                        job_id, plan_paths
+                    ).items()
+                    if path not in preserved
+                }
+            )
             results: list[dict[str, Any]] = []
             for path in plan_paths:
                 existing = preserved.get(path.resolve())
@@ -835,11 +881,7 @@ class WorkflowService:
             for output in rendered.get("outputs", [])
             for warning in output.get("warnings", [])
         ]
-        estimate = max(
-            _MIN_WRITE_BYTES,
-            sum(int(source.get("size_bytes", 0)) for source in job.get("sources", []))
-            + int(rendered.get("estimated_bytes", 0)),
-        )
+        estimate = max(_MIN_WRITE_BYTES, int(rendered.get("estimated_bytes", 0)))
         return {
             **job,
             "selected_moments": selected,
@@ -852,6 +894,9 @@ class WorkflowService:
                 key: str(value) for key, value in vars(self.config.paths).items()
             },
             "estimated_peak_space_bytes": estimate,
+            "estimated_peak_space_scope": (
+                "generated-byte growth across workspace, cache, and output roots"
+            ),
             "cloud_usage": 0,
         }
 
@@ -907,6 +952,14 @@ class WorkflowService:
             lambda: self._write_report_stage(job_id, state, started=True),
         )
 
+    def _validate_recorded_destinations(self, job: dict[str, Any]) -> None:
+        for name, root in (
+            ("workspace", self.config.paths.workspace_dir),
+            ("cache", self.config.paths.cache_dir),
+            ("output", self.config.paths.output_dir),
+        ):
+            self._destination_volume(root, _MIN_WRITE_BYTES, self._expected_destination_volume(job, name))
+
     def _execute(self, job_id: str) -> dict[str, Any]:
         job = self.store.get_job(job_id)
         input_path = Path(job["config"]["input_path"])
@@ -917,6 +970,7 @@ class WorkflowService:
                 ErrorCategory.STORAGE,
                 f"source volume changed for {input_path}: expected {source_volume}, found {current_source_volume}",
             )
+        self._validate_recorded_destinations(job)
         inspected = self._ensure_inspect(job_id, input_path)
         self._ensure_proxy(job_id)
         planned = self._ensure_plan(job_id)

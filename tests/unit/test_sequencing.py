@@ -58,6 +58,15 @@ def test_chapters_group_by_file_number_and_order_numerically() -> None:
     ] == [["GOPR0123.MP4", "GP020123.MP4", "GP030123.MP4"]]
 
 
+def test_repeated_chapter_one_starts_new_session_group() -> None:
+    sources = _candidates(["GOPR0001.MP4", "GP020001.MP4", "GOPR0001.MP4"])
+    groups = sequence_sources(sources, {})
+
+    assert [group.group_id for group in groups] == ["1", "1-session-1"]
+    assert all(len(group.members) for group in groups)
+    assert any("session boundary" in warning for warning in groups[1].warnings)
+
+
 def test_duplicate_chapter_emits_warning() -> None:
     groups = sequence_sources(_candidates(["GP020123.MP4", "GH020123.MP4"]), {})
     assert any("duplicate chapter" in warning for warning in groups[0].warnings)

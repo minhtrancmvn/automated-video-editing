@@ -22,14 +22,15 @@ video-editor run /Volumes/TravelSSD/authorized-hero12 --config config.toml
 video-editor status JOB_ID --config config.toml
 ```
 
-Record wall time from start through report completion. Report `estimated_peak_space_bytes` is a conservative planning estimate; it is not measured peak disk usage. Measure peak usage independently while job runs, across workspace, cache, and output. On macOS, capture baseline and poll allocated bytes every few seconds from another terminal:
+Record wall time from start through report completion. Report `estimated_peak_space_bytes` means generated-byte growth across workspace, cache, and output roots. It excludes input baseline bytes and existing unrelated files. The independent measurement must use the same scope: record root baseline before start, then subtract that baseline from each sampled sum. Measure peak usage while job runs. On macOS, capture baseline and poll allocated bytes every few seconds from another terminal:
 
 ```bash
 ROOTS="/Volumes/TravelSSD/video-editor/workspace /Volumes/TravelSSD/video-editor/cache /Volumes/TravelSSD/video-editor/output"
 bytes() { du -sk $ROOTS 2>/dev/null | awk '{sum += $1} END {print sum * 1024}'; }
-printf 'timestamp,bytes\n' > peak-disk.csv
+BASELINE=$(bytes)
+printf 'timestamp,growth_bytes\n' > peak-disk.csv
 while kill -0 "$VIDEO_EDITOR_PID" 2>/dev/null; do
-  printf '%s,%s\n' "$(date -Iseconds)" "$(bytes)" >> peak-disk.csv
+  printf '%s,%s\n' "$(date -Iseconds)" "$(( $(bytes) - BASELINE ))" >> peak-disk.csv
   sleep 5
 done
 sort -t, -k2,2nr peak-disk.csv | head -2
@@ -65,6 +66,7 @@ Record these fields for each batch:
 | Report estimated peak space bytes | |
 | Independently measured peak disk bytes | |
 | Measurement interval, command, and baseline | |
+| Estimated metric scope | Generated-byte growth across workspace, cache, and output roots; input baseline excluded |
 | Horizontal and vertical ffprobe result | |
 | Manual filename chronology result | |
 | Original hash comparison | |

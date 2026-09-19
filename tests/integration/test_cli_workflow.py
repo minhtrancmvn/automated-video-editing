@@ -7,6 +7,22 @@ from typer.testing import CliRunner
 from video_editor.cli import app
 
 
+def test_service_rejects_missing_external_state_volume_before_store_open(
+    tmp_path: Path,
+) -> None:
+    missing = Path("/Volumes") / f"video-editor-state-{tmp_path.name}"
+    config = tmp_path / "config.toml"
+    config.write_text(
+        f"""[paths]\ninput_dir = \"{missing}/input\"\nworkspace_dir = \"{missing}/workspace\"\ncache_dir = \"{missing}/cache\"\noutput_dir = \"{missing}/output\"\nstate_dir = \"{missing}/state\"\n[settings]\nstorage_reserve_bytes = 0\n"""
+    )
+
+    result = CliRunner().invoke(app, ["status", "missing", "--config", str(config)])
+
+    assert result.exit_code == 11
+    assert "not mounted" in result.output
+    assert not missing.exists()
+
+
 def test_cli_commands_require_config_and_expose_workflow(tmp_path: Path) -> None:
     config = tmp_path / "config.toml"
     config.write_text(

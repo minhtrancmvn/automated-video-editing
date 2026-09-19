@@ -206,11 +206,32 @@ def sequence_sources(
         )
 
     grouped: dict[str, list[SequencedSource]] = {}
+    sessions: dict[int, list[str]] = {}
     for item in parsed_sources:
         if item.parsed is None:
             group_id = f"discovery-{item.source.discovery_index}"
         else:
-            group_id = str(item.parsed.file_number)
+            number = item.parsed.file_number
+            number_sessions = sessions.setdefault(number, [str(number)])
+            if item.parsed.chapter == 1 and any(
+                member.parsed is not None and member.parsed.chapter == 1
+                for member in grouped.get(number_sessions[-1], [])
+            ):
+                group_id = f"{number}-session-{len(number_sessions)}"
+                number_sessions.append(group_id)
+            elif item.parsed.chapter == 1:
+                group_id = number_sessions[-1]
+            else:
+                compatible = [
+                    candidate
+                    for candidate in reversed(number_sessions)
+                    if not any(
+                        member.parsed is not None
+                        and member.parsed.chapter == item.parsed.chapter
+                        for member in grouped.get(candidate, [])
+                    )
+                ]
+                group_id = compatible[0] if compatible else number_sessions[-1]
         grouped.setdefault(group_id, []).append(item)
 
     groups: list[ChronologyGroup] = []
@@ -236,6 +257,8 @@ def sequence_sources(
                         f"chapter {item.parsed.chapter}"
                     )
                 seen_chapters.add(item.parsed.chapter)
+        if "-session-" in group_id:
+            warnings.append("session boundary: repeated chapter 1/file number")
         group = ChronologyGroup(group_id, tuple(ordered), tuple(warnings))
         for warning in warnings:
             group = _add_group_warning(group, warning)
@@ -243,11 +266,11 @@ def sequence_sources(
 
     groups = _sort_groups(groups)
 
-    parsed_group_numbers = [
-        number
-        for group in sorted(groups, key=_first_index)
-        if (number := _group_file_number(group)) is not None
-    ]
+    parsed_group_numbers: list[int] = []
+    for group in sorted(groups, key=_first_index):
+        group_number = _group_file_number(group)
+        if group_number is not None:
+            parsed_group_numbers.append(group_number)
     if any(right < left for left, right in pairwise(parsed_group_numbers)):
         warning = "numbering reset: file numbers decrease in discovery order"
         groups = [
