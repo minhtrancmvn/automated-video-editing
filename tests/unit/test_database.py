@@ -1,5 +1,8 @@
+from datetime import UTC, datetime
 from pathlib import Path
 
+from video_editor.media.discovery import SourceCandidate
+from video_editor.media.sequencing import sequence_sources
 from video_editor.persistence.database import JobStatus, JobStore, StageStatus
 
 
@@ -9,19 +12,24 @@ def test_failed_stage_retains_prior_completed_stage(tmp_path: Path) -> None:
         store.start_stage(job, "inspect", "a", "b", "v1")
         store.complete_stage(job, "inspect", "{}")
         store.start_stage(job, "render", "c", "d", "v1")
-        store.fail_stage(job, "render", "rendering", "encoder failed", interrupted=False)
+        store.fail_stage(
+            job, "render", "rendering", "encoder failed", interrupted=False
+        )
         state = store.get_job(job)
     assert state["status"] == JobStatus.FAILED
     assert state["stages"]["inspect"]["status"] == StageStatus.COMPLETED
     assert state["stages"]["render"]["status"] == StageStatus.FAILED
-    assert state["stages"]["render"]["error"] == {"phase": "rendering", "message": "encoder failed"}
+    assert state["stages"]["render"]["error"] == {
+        "phase": "rendering",
+        "message": "encoder failed",
+    }
 
 
 def test_parameterized_values_preserve_quotes(tmp_path: Path) -> None:
     volume = '{"path":"/tmp/a\\"b"}'
     with JobStore(tmp_path / "state.db") as store:
         job = store.create_job('{"title":"O\'Reilly"}', volume)
-        store.start_stage(job, "inspect", "input'fingerprint", "settings\"hash", "v1")
+        store.start_stage(job, "inspect", "input'fingerprint", 'settings"hash', "v1")
         store.complete_stage(job, "inspect", '{"note":"it\'s \\"done\\""}')
         state = store.get_job(job)
     assert state["config"] == {"title": "O'Reilly"}
@@ -65,10 +73,14 @@ def test_sources_and_chronology_are_persisted(tmp_path: Path) -> None:
     with JobStore(tmp_path / "state.db") as store:
         job = store.create_job("{}", "{}")
         store.save_sources(job, [{"source_id": "s1", "path": "clip.mp4", "size": 12}])
-        store.save_chronology(job, [{"group_id": "g1", "members": ["s1"], "confidence": "high"}])
+        store.save_chronology(
+            job, [{"group_id": "g1", "members": ["s1"], "confidence": "high"}]
+        )
         state = store.get_job(job)
     assert state["sources"] == [{"source_id": "s1", "path": "clip.mp4", "size": 12}]
-    assert state["chronology"] == [{"group_id": "g1", "members": ["s1"], "confidence": "high"}]
+    assert state["chronology"] == [
+        {"group_id": "g1", "members": ["s1"], "confidence": "high"}
+    ]
 
 
 def test_replace_sources_removes_stale_sources_and_probes(tmp_path: Path) -> None:
@@ -125,10 +137,33 @@ def test_reuse_requires_all_cache_keys_and_valid_artifact(tmp_path: Path) -> Non
         store.save_artifact(job, "render", artifact, {"valid": True})
 
         validator = lambda path, metadata: path.exists() and metadata["valid"]
-        assert store.find_reusable_stage("render", "source-a", "settings-a", "impl-a", validator) is not None
-        assert store.find_reusable_stage("render", "source-a", "settings-b", "impl-a", lambda path, metadata: True) is None
+        assert (
+            store.find_reusable_stage(
+                "render", "source-a", "settings-a", "impl-a", validator
+            )
+            is not None
+        )
+        assert (
+            store.find_reusable_stage(
+                "render",
+                "source-a",
+                "settings-b",
+                "impl-a",
+                lambda path, metadata: True,
+            )
+            is None
+        )
         artifact.unlink()
-        assert store.find_reusable_stage("render", "source-a", "settings-a", "impl-a", lambda path, metadata: path.exists()) is None
+        assert (
+            store.find_reusable_stage(
+                "render",
+                "source-a",
+                "settings-a",
+                "impl-a",
+                lambda path, metadata: path.exists(),
+            )
+            is None
+        )
 
 
 def test_reuse_rejects_missing_validator_and_non_file_artifact(tmp_path: Path) -> None:
@@ -141,7 +176,12 @@ def test_reuse_rejects_missing_validator_and_non_file_artifact(tmp_path: Path) -
         store.save_artifact(job, "render", artifact_dir)
 
         assert store.find_reusable_stage("render", "source", "settings", "impl") is None
-        assert store.find_reusable_stage("render", "source", "settings", "impl", lambda path: True) is None
+        assert (
+            store.find_reusable_stage(
+                "render", "source", "settings", "impl", lambda path: True
+            )
+            is None
+        )
 
 
 def test_stage_restart_invalidates_prior_artifacts(tmp_path: Path) -> None:
@@ -155,7 +195,78 @@ def test_stage_restart_invalidates_prior_artifacts(tmp_path: Path) -> None:
 
         store.start_stage(job, "render", "source", "settings", "impl")
         assert store.get_job(job)["artifacts"] == []
-        assert store.find_reusable_stage("render", "source", "settings", "impl", lambda path: True) is None
+        assert (
+            store.find_reusable_stage(
+                "render", "source", "settings", "impl", lambda path: True
+            )
+            is None
+        )
+
+
+def test_persisted_chronology_keeps_groups_order_and_warnings(tmp_path: Path) -> None:
+    sources = [
+        SourceCandidate(Path(name), 1, index, f"id-{index}", "bounded-v1")
+        for index, name in enumerate(
+            [
+                "GOPR0200.MP4",
+                "GP020200.MP4",
+                "GH020200.MP4",
+                "GOPR0100.MP4",
+                "GP020100.MP4",
+                "phone.mp4",
+            ]
+        )
+    ]
+    chronology = sequence_sources(
+        sources,
+        {
+            "GOPR0200.MP4": datetime(2026, 1, 2, tzinfo=UTC),
+            "GP020200.MP4": datetime(2026, 1, 2, 0, 0, 1, tzinfo=UTC),
+            "GH020200.MP4": datetime(2026, 1, 2, 0, 0, 2, tzinfo=UTC),
+            "GOPR0100.MP4": datetime(2026, 1, 1, tzinfo=UTC),
+            "GP020100.MP4": datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC),
+        },
+    )
+    groups = [
+        {
+            "group_id": group.group_id,
+            "members": [
+                {
+                    "source_id": member.source.fingerprint,
+                    "position": position,
+                }
+                for position, member in enumerate(group.members)
+            ],
+            "warnings": list(group.warnings),
+        }
+        for group in chronology
+    ]
+    with JobStore(tmp_path / "state.db") as store:
+        job = store.create_job("{}", "{}")
+        store.save_chronology(job, groups)
+        saved = store.get_job(job)["chronology"]
+    assert [group["group_id"] for group in saved] == ["100", "200", "discovery-5"]
+    assert saved[0]["members"][0]["position"] == 0
+    assert any("duplicate chapter" in warning for warning in saved[1]["warnings"])
+    assert any("uncertain" in warning for warning in saved[-1]["warnings"])
+
+
+def test_render_retry_can_preserve_per_output_artifacts(tmp_path: Path) -> None:
+    first = tmp_path / "long.mp4"
+    second = tmp_path / "short.mp4"
+    first.write_text("valid")
+    second.write_text("valid")
+    with JobStore(tmp_path / "state.db") as store:
+        job = store.create_job("{}", "{}")
+        store.start_stage(job, "render", "source", "settings", "impl")
+        store.save_artifact(job, "render", first, {"plan": "long.json"})
+        store.save_artifact(job, "render", second, {"plan": "short.json"})
+        store.complete_stage(job, "render")
+        store.start_stage(
+            job, "render", "source", "settings", "impl", preserve_artifacts=True
+        )
+        artifacts = store.get_job(job)["artifacts"]
+    assert [item["path"] for item in artifacts] == [str(first), str(second)]
 
 
 def test_falsy_artifact_metadata_is_preserved(tmp_path: Path) -> None:
@@ -169,7 +280,9 @@ def test_falsy_artifact_metadata_is_preserved(tmp_path: Path) -> None:
         assert store.get_job(job)["artifacts"][0]["metadata"] == []
 
 
-def test_completing_stage_leaves_job_running_until_explicit_completion(tmp_path: Path) -> None:
+def test_completing_stage_leaves_job_running_until_explicit_completion(
+    tmp_path: Path,
+) -> None:
     with JobStore(tmp_path / "state.db") as store:
         job = store.create_job("{}", "{}")
         store.start_stage(job, "inspect", "source", "settings", "impl")

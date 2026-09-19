@@ -38,7 +38,9 @@ def run_render(command: RenderCommand, on_interrupt: Callable[[], None]) -> None
         try:
             process = subprocess.Popen(command.args, shell=False)
         except OSError as exc:
-            raise VideoEditorError(ErrorCategory.RENDER, f"cannot start ffmpeg: {exc}") from exc
+            raise VideoEditorError(
+                ErrorCategory.RENDER, f"cannot start ffmpeg: {exc}"
+            ) from exc
         try:
             return_code = process.wait(timeout=10 if interrupted else None)
         except subprocess.TimeoutExpired:
@@ -49,6 +51,7 @@ def run_render(command: RenderCommand, on_interrupt: Callable[[], None]) -> None
             raise VideoEditorError(
                 ErrorCategory.RENDER,
                 f"render interrupted; partial output retained at {command.partial_path}",
+                interrupted=True,
             )
         if return_code != 0:
             raise VideoEditorError(

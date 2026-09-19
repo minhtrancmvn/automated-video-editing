@@ -22,7 +22,20 @@ video-editor run /Volumes/TravelSSD/authorized-hero12 --config config.toml
 video-editor status JOB_ID --config config.toml
 ```
 
-Record wall time from start through report completion. Record peak disk use across workspace, cache, and output. Save `status` output and job report. Probe both final outputs independently:
+Record wall time from start through report completion. Report `estimated_peak_space_bytes` is a conservative planning estimate; it is not measured peak disk usage. Measure peak usage independently while job runs, across workspace, cache, and output. On macOS, capture baseline and poll allocated bytes every few seconds from another terminal:
+
+```bash
+ROOTS="/Volumes/TravelSSD/video-editor/workspace /Volumes/TravelSSD/video-editor/cache /Volumes/TravelSSD/video-editor/output"
+bytes() { du -sk $ROOTS 2>/dev/null | awk '{sum += $1} END {print sum * 1024}'; }
+printf 'timestamp,bytes\n' > peak-disk.csv
+while kill -0 "$VIDEO_EDITOR_PID" 2>/dev/null; do
+  printf '%s,%s\n' "$(date -Iseconds)" "$(bytes)" >> peak-disk.csv
+  sleep 5
+done
+sort -t, -k2,2nr peak-disk.csv | head -2
+```
+
+Replace `VIDEO_EDITOR_PID` with running process PID. Record largest sampled value, sampling interval, paths, and whether other activity touched volumes. Compare independently measured peak bytes against report estimate; keep both values in benchmark record. Save `status` output and job report. Probe both final outputs independently:
 
 ```bash
 ffprobe -v error -show_format -show_streams \
@@ -49,7 +62,9 @@ Record these fields for each batch:
 | SSD model, filesystem, free space | |
 | Input file count and bytes | |
 | Wall time by stage and total | |
-| Peak workspace/cache/output bytes | |
+| Report estimated peak space bytes | |
+| Independently measured peak disk bytes | |
+| Measurement interval, command, and baseline | |
 | Horizontal and vertical ffprobe result | |
 | Manual filename chronology result | |
 | Original hash comparison | |

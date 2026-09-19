@@ -16,7 +16,12 @@ import pytest
 from typer.testing import CliRunner
 
 from video_editor.cli import app
+from video_editor.config import resolve_config
+from video_editor.errors import ErrorCategory, VideoEditorError
+from video_editor.media.storage import inspect_volume
 from video_editor.models.edit_plan import load_plan, timeline_duration
+from video_editor.persistence.database import JobStore
+from video_editor.workflow import WorkflowService
 
 pytestmark = pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
@@ -145,6 +150,85 @@ def _source_names(plan_path: Path) -> list[str]:
 
 def _assert_no_network(address: tuple[object, ...]) -> None:
     raise AssertionError(f"unexpected network access: {address}")
+
+
+def test_missing_external_volume_fails_without_internal_fallback(
+    tmp_path: Path, media_batch: MediaBatch, cli: CliRunner
+) -> None:
+    config = tmp_path / "missing-volume.toml"
+    missing_volume = Path("/Volumes") / f"video-editor-task12-{tmp_path.name}"
+    config.write_text(
+        "\n".join(
+            [
+                "[paths]",
+                f'input_dir = "{media_batch.input_dir}"',
+                f'workspace_dir = "{missing_volume / "workspace"}"',
+                f'cache_dir = "{missing_volume / "cache"}"',
+                f'output_dir = "{missing_volume / "output"}"',
+                f'state_dir = "{tmp_path / "state"}"',
+                "[settings]",
+                "storage_reserve_bytes = 0",
+                "cloud_enabled = false",
+                "render_concurrency = 1",
+                "",
+            ]
+        )
+    )
+    result = cli.invoke(
+        app, ["run", str(media_batch.input_dir), "--config", str(config)]
+    )
+    assert result.exit_code == 11, result.output
+    assert "storage" in result.output
+    assert not missing_volume.exists()
+    config.write_text(config.read_text().replace(str(missing_volume), str(tmp_path)))
+    restored = cli.invoke(
+        app, ["run", str(media_batch.input_dir), "--config", str(config)]
+    )
+    assert restored.exit_code == 0, restored.output
+
+
+def test_missing_configured_output_volume_during_write_resumes_after_restore(
+    tmp_path: Path, media_batch: MediaBatch, config_file: Path
+) -> None:
+    config = resolve_config(config_file)
+    with JobStore(config.paths.state_dir / "jobs.sqlite3") as store:
+        service = WorkflowService(config, store)
+        job_id = service._new_job(media_batch.input_dir)
+        service._ensure_inspect(job_id, media_batch.input_dir)
+        planned = service._ensure_plan(job_id)
+        job = store.get_job(job_id)
+        configured_output = config.paths.output_dir
+        missing_mount = Path("/Volumes") / f"video-editor-task12-write-{tmp_path.name}"
+        recorded = job["config"]["destination_volumes"]["output"]
+        recorded["mount_point"] = str(missing_mount)
+        store.connection.execute(
+            "UPDATE jobs SET config_json = ? WHERE id = ?",
+            (json.dumps(job["config"]), job_id),
+        )
+        store.connection.commit()
+
+        with pytest.raises(VideoEditorError) as caught:
+            service._ensure_render(job_id, planned)
+        assert caught.value.category == ErrorCategory.STORAGE
+        assert not missing_mount.exists()
+        failed = service.status(job_id)
+        assert failed["status"] == "failed"
+        assert failed["stages"]["render"]["status"] == "failed"
+
+        restored = inspect_volume(configured_output)
+        failed["config"]["destination_volumes"]["output"] = {
+            "device": restored.device,
+            "mount_point": str(restored.mount_point),
+            "filesystem": restored.filesystem,
+        }
+        store.connection.execute(
+            "UPDATE jobs SET config_json = ? WHERE id = ?",
+            (json.dumps(failed["config"]), job_id),
+        )
+        store.connection.commit()
+        rendered = service.resume(job_id)
+        assert len(rendered["outputs"]) == 2
+        assert service.status(job_id)["stages"]["render"]["status"] == "completed"
 
 
 def test_run_produces_validated_outputs_without_changing_originals(

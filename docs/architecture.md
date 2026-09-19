@@ -33,7 +33,7 @@ Planner chooses bounded first intervals with clean cuts. It is deterministic fix
 
 ## Rendering and validation
 
-Compiler accepts validated plan data and builds FFmpeg argument vectors; it does not execute shell text from paths or plans. Render writes `.partial` on output volume, then validates readable video, dimensions, duration tolerance, and requested audio policy with ffprobe before same-volume rename. Software `libx264` is portable baseline. Hardware encoder requests only survive capability checks; otherwise workflow records fallback.
+Compiler accepts validated plan data and builds FFmpeg argument vectors; it does not execute shell text from paths or plans. Render writes `.partial` on output volume, then validates readable video, dimensions, duration tolerance, and requested audio policy with ffprobe before same-volume rename. Software `libx264` is portable baseline. Hardware encoder requests only survive capability checks; otherwise workflow records fallback. Phase 1 validates `render_concurrency` but serializes renders with one process at a time; configured values above one do not enable parallel work.
 
 ## Persistence and reports
 

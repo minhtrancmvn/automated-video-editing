@@ -201,7 +201,10 @@ class JobStore:
         return job_id
 
     def _job_exists(self, connection: sqlite3.Connection, job_id: str) -> None:
-        if connection.execute("SELECT 1 FROM jobs WHERE id = ?", (job_id,)).fetchone() is None:
+        if (
+            connection.execute("SELECT 1 FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            is None
+        ):
             raise KeyError(f"unknown job: {job_id}")
 
     def start_stage(
@@ -211,15 +214,18 @@ class JobStore:
         input_fingerprint: str,
         settings_hash: str,
         implementation_version: str,
+        *,
+        preserve_artifacts: bool = False,
     ) -> None:
         now = _now()
         with self._transaction() as connection:
             self._job_exists(connection, job_id)
-            # A restarted stage must not expose artifacts produced by its prior attempt.
-            connection.execute(
-                "DELETE FROM artifacts WHERE job_id = ? AND stage_name = ?",
-                (job_id, name),
-            )
+            # Render retries preserve valid per-output artifacts so resume can skip them.
+            if not preserve_artifacts:
+                connection.execute(
+                    "DELETE FROM artifacts WHERE job_id = ? AND stage_name = ?",
+                    (job_id, name),
+                )
             connection.execute(
                 """INSERT INTO job_stages(
                     job_id, name, input_fingerprint, settings_hash,
@@ -235,7 +241,15 @@ class JobStore:
                     completed_at=NULL,
                     error_json=NULL,
                     result_json=NULL""",
-                (job_id, name, input_fingerprint, settings_hash, implementation_version, StageStatus.RUNNING, now),
+                (
+                    job_id,
+                    name,
+                    input_fingerprint,
+                    settings_hash,
+                    implementation_version,
+                    StageStatus.RUNNING,
+                    now,
+                ),
             )
             connection.execute(
                 "UPDATE jobs SET status = ?, updated_at = ? WHERE id = ?",
@@ -302,7 +316,13 @@ class JobStore:
             cursor = connection.execute(
                 "UPDATE job_stages SET status = ?, completed_at = ?, error_json = ? "
                 "WHERE job_id = ? AND name = ?",
-                (status, now, _json({"phase": phase, "message": message}), job_id, name),
+                (
+                    status,
+                    now,
+                    _json({"phase": phase, "message": message}),
+                    job_id,
+                    name,
+                ),
             )
             if cursor.rowcount == 0:
                 raise KeyError(f"unknown stage: {job_id}/{name}")
@@ -347,7 +367,9 @@ class JobStore:
                 (source_row["id"], _json(probe)),
             )
 
-    def replace_sources(self, job_id: str, sources: Iterable[Mapping[str, Any]]) -> None:
+    def replace_sources(
+        self, job_id: str, sources: Iterable[Mapping[str, Any]]
+    ) -> None:
         """Atomically replace inspection sources and their persisted probes."""
         with self._transaction() as connection:
             self._job_exists(connection, job_id)
@@ -361,11 +383,15 @@ class JobStore:
             for group in groups:
                 self._insert_chronology_group(connection, job_id, group)
 
-    def replace_chronology(self, job_id: str, groups: Iterable[Mapping[str, Any]]) -> None:
+    def replace_chronology(
+        self, job_id: str, groups: Iterable[Mapping[str, Any]]
+    ) -> None:
         """Atomically replace chronology groups and their ordered members."""
         with self._transaction() as connection:
             self._job_exists(connection, job_id)
-            connection.execute("DELETE FROM chronology_groups WHERE job_id = ?", (job_id,))
+            connection.execute(
+                "DELETE FROM chronology_groups WHERE job_id = ?", (job_id,)
+            )
             for group in groups:
                 self._insert_chronology_group(connection, job_id, group)
 
@@ -389,12 +415,18 @@ class JobStore:
             (job_id, group_id),
         ).fetchone()
         assert row is not None
-        connection.execute("DELETE FROM chronology_members WHERE group_id = ?", (row["id"],))
+        connection.execute(
+            "DELETE FROM chronology_members WHERE group_id = ?", (row["id"],)
+        )
         members = data.get("members", [])
         if not isinstance(members, list):
             raise TypeError("chronology group members must be a list")
         for position, member in enumerate(members):
-            member_data = dict(member) if isinstance(member, Mapping) else {"source_id": str(member)}
+            member_data = (
+                dict(member)
+                if isinstance(member, Mapping)
+                else {"source_id": str(member)}
+            )
             source_id = str(member_data.get("source_id", member_data.get("id", "")))
             if not source_id:
                 raise ValueError("chronology member requires source_id")
@@ -420,7 +452,14 @@ class JobStore:
                 VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(job_id, stage_name, name) DO UPDATE SET
                     path=excluded.path, metadata_json=excluded.metadata_json, created_at=excluded.created_at""",
-                (job_id, stage_name, artifact_name, str(path), _json(metadata if metadata is not None else {}), now),
+                (
+                    job_id,
+                    stage_name,
+                    artifact_name,
+                    str(path),
+                    _json(metadata if metadata is not None else {}),
+                    now,
+                ),
             )
             row = connection.execute(
                 "SELECT id FROM artifacts WHERE job_id = ? AND stage_name = ? AND name = ?",
@@ -443,7 +482,13 @@ class JobStore:
             WHERE s.name = ? AND s.input_fingerprint = ? AND s.settings_hash = ?
               AND s.implementation_version = ? AND s.status = ?
             ORDER BY s.completed_at DESC LIMIT 1""",
-            (name, input_fingerprint, settings_hash, implementation_version, StageStatus.COMPLETED),
+            (
+                name,
+                input_fingerprint,
+                settings_hash,
+                implementation_version,
+                StageStatus.COMPLETED,
+            ),
         ).fetchone()
         if row is None:
             return None
@@ -460,10 +505,16 @@ class JobStore:
             if not path.is_file() or artifact_validator is None:
                 return None
             parameters = inspect.signature(artifact_validator).parameters
-            valid = bool(artifact_validator(path, metadata) if len(parameters) >= 2 else artifact_validator(path))
+            valid = bool(
+                artifact_validator(path, metadata)
+                if len(parameters) >= 2
+                else artifact_validator(path)
+            )
             if not valid:
                 return None
-            checked.append({"name": artifact["name"], "path": path, "metadata": metadata})
+            checked.append(
+                {"name": artifact["name"], "path": path, "metadata": metadata}
+            )
         return {
             "job_id": row["job_id"],
             "stage_id": row["id"],
@@ -477,7 +528,9 @@ class JobStore:
         }
 
     def get_job(self, job_id: str) -> dict[str, Any]:
-        job = self.connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        job = self.connection.execute(
+            "SELECT * FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
         if job is None:
             raise KeyError(f"unknown job: {job_id}")
         stages = self.connection.execute(
@@ -487,7 +540,8 @@ class JobStore:
             "SELECT data_json FROM sources WHERE job_id = ? ORDER BY id", (job_id,)
         ).fetchall()
         chronology = self.connection.execute(
-            "SELECT data_json FROM chronology_groups WHERE job_id = ? ORDER BY id", (job_id,)
+            "SELECT data_json FROM chronology_groups WHERE job_id = ? ORDER BY id",
+            (job_id,),
         ).fetchall()
         artifacts = self.connection.execute(
             "SELECT * FROM artifacts WHERE job_id = ? ORDER BY id", (job_id,)

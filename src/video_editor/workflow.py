@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -103,6 +104,9 @@ class WorkflowService:
     def __init__(self, config: AppConfig, store: JobStore) -> None:
         self.config = config
         self.store = store
+        # Phase 1 explicitly serializes all renders. Keep configured concurrency
+        # validated for forward-compatible config, but never run parallel renders.
+        self._render_lock = threading.Lock()
 
     def _require_open_store(self) -> None:
         try:
@@ -118,6 +122,13 @@ class WorkflowService:
         required: int,
         expected: VolumeIdentity | None = None,
     ) -> VolumeIdentity:
+        if (
+            not destination.exists()
+            and destination.anchor == "/"
+            and destination.parts[1:2] == ("Volumes",)
+        ):
+            # Never treat an absent macOS mount path as an internal parent.
+            inspect_volume(destination)
         existing = _existing_parent(destination)
         actual = inspect_volume(existing)
         if expected is not None and actual != expected:
@@ -171,23 +182,43 @@ class WorkflowService:
     def _stage_keys(self, fingerprint: Any, settings: Any) -> tuple[str, str]:
         return _hash(fingerprint), _hash(settings)
 
-    def _start(self, job_id: str, name: str, fingerprint: Any, settings: Any) -> None:
+    def _start(
+        self,
+        job_id: str,
+        name: str,
+        fingerprint: Any,
+        settings: Any,
+        *,
+        preserve_artifacts: bool = False,
+    ) -> None:
         input_hash, settings_hash = self._stage_keys(fingerprint, settings)
         self.store.start_stage(
-            job_id, name, input_hash, settings_hash, IMPLEMENTATION_VERSION
+            job_id,
+            name,
+            input_hash,
+            settings_hash,
+            IMPLEMENTATION_VERSION,
+            preserve_artifacts=preserve_artifacts,
         )
 
-    def _artifact_valid(self, name: str, path: Path) -> bool:
+    def _artifact_valid(
+        self, name: str, path: Path, metadata: dict[str, Any] | None = None
+    ) -> bool:
         try:
             if not path.is_file() or path.stat().st_size <= 0:
                 return False
             if name == "plan":
                 load_plan(path)
+            elif name == "render":
+                if not metadata or not isinstance(metadata.get("plan"), str):
+                    return False
+                plan = load_plan(Path(metadata["plan"]))
+                validate_output(path, plan.output, timeline_duration(plan))
             elif name == "inspect" or (name == "report" and path.suffix == ".json"):
                 value = json.loads(path.read_text())
                 if not isinstance(value, dict):
                     return False
-        except (OSError, ValueError, TypeError, VideoEditorError):
+        except (OSError, ValueError, TypeError, VideoEditorError, ValidationError):
             return False
         return True
 
@@ -202,7 +233,15 @@ class WorkflowService:
         ]
         if name in {"inspect", "proxy", "plan", "render", "report"} and not artifacts:
             return False
-        return all(self._artifact_valid(name, path) for path in artifacts)
+        return all(
+            self._artifact_valid(
+                name,
+                Path(item["path"]),
+                cast(dict[str, Any], item.get("metadata")),
+            )
+            for item in job.get("artifacts", [])
+            if item.get("stage") == name and isinstance(item.get("path"), str)
+        )
 
     def _stage_reusable(
         self,
@@ -261,11 +300,23 @@ class WorkflowService:
         category: ErrorCategory,
         operation: Callable[[], _T],
     ) -> _T:
-        self._start(job_id, name, fingerprint, settings)
+        self._start(
+            job_id,
+            name,
+            fingerprint,
+            settings,
+            preserve_artifacts=name == "render",
+        )
         try:
             return operation()
         except VideoEditorError as exc:
-            self.store.fail_stage(job_id, name, exc.category, str(exc))
+            self.store.fail_stage(
+                job_id,
+                name,
+                exc.category,
+                str(exc),
+                interrupted=exc.interrupted,
+            )
             raise
         except (OSError, ValueError, TypeError, ValidationError) as exc:
             self.store.fail_stage(job_id, name, category, str(exc))
@@ -587,12 +638,14 @@ class WorkflowService:
         )
         source_paths = [source.path for source in plan.sources]
         self._protect_sources(command.final_path, source_paths)
-        run_render(command, lambda: None)
+        with self._render_lock:
+            run_render(command, lambda: None)
         validated = validate_output(
             command.final_path, plan.output, timeline_duration(plan)
         )
         metadata = {
             "plan": str(path),
+            "warnings": [warning.message for warning in command.warnings],
             "width": validated.video.width if validated.video else None,
             "height": validated.video.height if validated.video else None,
             "duration": validated.duration,
@@ -603,9 +656,35 @@ class WorkflowService:
         return {
             "plan": str(path),
             "output": str(command.final_path),
-            "warnings": [warning.message for warning in command.warnings],
             **metadata,
         }
+
+    def _valid_render_results(
+        self, job: dict[str, Any], plan_paths: list[Path]
+    ) -> dict[Path, dict[str, Any]]:
+        expected = {path.resolve() for path in plan_paths}
+        results: dict[Path, dict[str, Any]] = {}
+        for artifact in job.get("artifacts", []):
+            if artifact.get("stage") != "render":
+                continue
+            metadata = artifact.get("metadata")
+            if not isinstance(metadata, dict) or not isinstance(
+                metadata.get("plan"), str
+            ):
+                continue
+            plan_path = Path(metadata["plan"])
+            if plan_path.resolve() not in expected:
+                continue
+            output_path = Path(str(artifact.get("path", "")))
+            if not self._artifact_valid("render", output_path, metadata):
+                continue
+            results[plan_path.resolve()] = {
+                "plan": str(plan_path),
+                "output": str(output_path),
+                "warnings": list(metadata.get("warnings", [])),
+                **metadata,
+            }
+        return results
 
     def _ensure_render(self, job_id: str, planned: dict[str, Any]) -> dict[str, Any]:
         plan_paths = [Path(value) for value in planned.get("plans", [])]
@@ -613,7 +692,11 @@ class WorkflowService:
             {"path": str(path), "digest": hashlib.sha256(path.read_bytes()).hexdigest()}
             for path in plan_paths
         ]
-        settings = {"output": str(self.config.paths.output_dir), "encoder": "libx264"}
+        settings = {
+            "output": str(self.config.paths.output_dir),
+            "encoder": "libx264",
+            "render_concurrency": 1,
+        }
         job = self.store.get_job(job_id)
         if self._stage_reusable(job, "render", fingerprint, settings):
             return cast(dict[str, Any], job["stages"]["render"]["result"])
@@ -636,7 +719,14 @@ class WorkflowService:
                 output, estimate, self._expected_destination_volume(current, "output")
             )
             output.mkdir(parents=True, exist_ok=True)
-            results = [self._render_plan(job_id, path) for path in plan_paths]
+            preserved = self._valid_render_results(current, plan_paths)
+            results: list[dict[str, Any]] = []
+            for path in plan_paths:
+                existing = preserved.get(path.resolve())
+                if existing is not None:
+                    results.append(existing)
+                    continue
+                results.append(self._render_plan(job_id, path))
             result = {"outputs": results, "estimated_bytes": estimate}
             self.store.complete_stage(job_id, "render", result)
             return result

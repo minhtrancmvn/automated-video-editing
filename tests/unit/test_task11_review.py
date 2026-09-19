@@ -73,15 +73,28 @@ def test_inspection_rerun_replaces_old_chronology_group(
         service = WorkflowService(config, store)
         monkeypatch.setattr(service, "_discover", lambda _path: [candidate])
         monkeypatch.setattr("video_editor.workflow.probe_media", lambda _path: probe)
-        monkeypatch.setattr("video_editor.workflow.detect_capabilities", lambda: Mock(model_dump=lambda mode: {}))
-        monkeypatch.setattr("video_editor.workflow.inspect_volume", lambda _path: volume)
-        monkeypatch.setattr("video_editor.workflow.assert_free_space", lambda *args: None)
-        store.start_stage(job_id, "inspect", "first", "settings", IMPLEMENTATION_VERSION)
+        monkeypatch.setattr(
+            "video_editor.workflow.detect_capabilities",
+            lambda: Mock(model_dump=lambda mode: {}),
+        )
+        monkeypatch.setattr(
+            "video_editor.workflow.inspect_volume", lambda _path: volume
+        )
+        monkeypatch.setattr(
+            "video_editor.workflow.assert_free_space", lambda *args: None
+        )
+        store.start_stage(
+            job_id, "inspect", "first", "settings", IMPLEMENTATION_VERSION
+        )
         service._inspect_stage(job_id, input_path)
         assert len(store.get_job(job_id)["chronology"]) == 1
 
-        monkeypatch.setattr("video_editor.workflow.sequence_sources", lambda _sources, _times: [])
-        store.start_stage(job_id, "inspect", "second", "settings", IMPLEMENTATION_VERSION)
+        monkeypatch.setattr(
+            "video_editor.workflow.sequence_sources", lambda _sources, _times: []
+        )
+        store.start_stage(
+            job_id, "inspect", "second", "settings", IMPLEMENTATION_VERSION
+        )
         service._inspect_stage(job_id, input_path)
         assert store.get_job(job_id)["chronology"] == []
 
@@ -222,8 +235,16 @@ def test_validate_reuse_revalidates_every_recorded_output(
     with JobStore(tmp_path / "state.db") as store:
         job_id = store.create_job({}, {})
         service = WorkflowService(config, store)
-        store.start_stage(job_id, "validate", _hash(rendered["outputs"]), _hash({"tolerance": "0.20"}), IMPLEMENTATION_VERSION)
-        store.complete_stage(job_id, "validate", {"outputs": [{"path": str(output_path)}]})
+        store.start_stage(
+            job_id,
+            "validate",
+            _hash(rendered["outputs"]),
+            _hash({"tolerance": "0.20"}),
+            IMPLEMENTATION_VERSION,
+        )
+        store.complete_stage(
+            job_id, "validate", {"outputs": [{"path": str(output_path)}]}
+        )
         validate = Mock(side_effect=VideoEditorError(ErrorCategory.OUTPUT, "corrupt"))
         monkeypatch.setattr("video_editor.workflow.load_plan", lambda path: Mock())
         monkeypatch.setattr("video_editor.workflow.timeline_duration", lambda plan: 1)
@@ -239,7 +260,13 @@ def test_new_job_rejects_roots_overlapping_input_root(tmp_path: Path) -> None:
     input_path = tmp_path / "input"
     input_path.mkdir()
     config = AppConfig(
-        PathSettings(input_path, input_path / "workspace", tmp_path / "cache", tmp_path / "output", tmp_path / "state"),
+        PathSettings(
+            input_path,
+            input_path / "workspace",
+            tmp_path / "cache",
+            tmp_path / "output",
+            tmp_path / "state",
+        ),
         1,
     )
     with JobStore(config.paths.state_dir / "jobs.sqlite") as store:
@@ -257,12 +284,16 @@ def test_destination_volume_rejects_mount_point_change(
         expected = VolumeIdentity(1, Path("/mounted-a"), "apfs")
         actual = VolumeIdentity(1, Path("/mounted-b"), "apfs")
         monkeypatch.setattr("video_editor.workflow.inspect_volume", lambda path: actual)
-        monkeypatch.setattr("video_editor.workflow.assert_free_space", lambda *args: None)
+        monkeypatch.setattr(
+            "video_editor.workflow.assert_free_space", lambda *args: None
+        )
         with pytest.raises(VideoEditorError, match="volume changed"):
             service._destination_volume(tmp_path / "output", 1, expected)
 
 
-def test_report_aggregates_probe_warnings_without_render_fallbacks(tmp_path: Path) -> None:
+def test_report_aggregates_probe_warnings_without_render_fallbacks(
+    tmp_path: Path,
+) -> None:
     config = _config(tmp_path)
     with JobStore(config.paths.state_dir / "jobs.sqlite") as store:
         job_id = store.create_job({}, {})
@@ -277,6 +308,57 @@ def test_report_aggregates_probe_warnings_without_render_fallbacks(tmp_path: Pat
         )
     assert state["warnings"] == [{"code": "hevc", "message": "source uses HEVC"}]
     assert state["fallbacks"] == ["software encoder fallback"]
+
+
+def test_interrupted_render_preserves_valid_output_on_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    with JobStore(tmp_path / "state.db") as store:
+        service = WorkflowService(config, store)
+        job_id = store.create_job({}, {})
+        first_plan = tmp_path / "first.json"
+        second_plan = tmp_path / "second.json"
+        first_plan.write_text("first")
+        second_plan.write_text("second")
+        valid_output = tmp_path / "long.mp4"
+        valid_output.write_bytes(b"valid")
+        monkeypatch.setattr(
+            service,
+            "_artifact_valid",
+            lambda name, path, metadata=None: path == valid_output,
+        )
+        monkeypatch.setattr(service, "_destination_volume", lambda *args: None)
+        monkeypatch.setattr(
+            service, "_expected_destination_volume", lambda *args: Mock()
+        )
+        monkeypatch.setattr(
+            "video_editor.workflow.load_plan",
+            lambda path: Mock(output=Mock(width=16, height=16)),
+        )
+        monkeypatch.setattr("video_editor.workflow._duration_seconds", lambda plan: 1)
+        store.start_stage(
+            job_id, "render", "source", "settings", IMPLEMENTATION_VERSION
+        )
+        store.save_artifact(
+            job_id, "render", valid_output, {"plan": str(first_plan), "warnings": []}
+        )
+        store.fail_stage(job_id, "render", "rendering", "stopped", interrupted=True)
+        render_plan = Mock(
+            return_value={
+                "plan": str(second_plan),
+                "output": str(tmp_path / "short.mp4"),
+            }
+        )
+        monkeypatch.setattr(service, "_render_plan", render_plan)
+        result = service._ensure_render(
+            job_id, {"plans": [str(first_plan), str(second_plan)]}
+        )
+    assert [item["plan"] for item in result["outputs"]] == [
+        str(first_plan),
+        str(second_plan),
+    ]
+    render_plan.assert_called_once_with(job_id, second_plan)
 
 
 def test_stage_reuse_requires_matching_identity_and_valid_artifact(

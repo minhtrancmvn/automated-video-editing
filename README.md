@@ -39,6 +39,8 @@ cloud_enabled = false
 render_concurrency = 1
 ```
 
+`render_concurrency` remains validated for configuration compatibility, but Phase 1 deliberately ignores values above one and serializes render execution with one process at a time. This preserves output-volume safety; do not expect parallel renders until later phase documentation changes.
+
 Input, workspace, cache, output, and state paths are independent. Keep large proxies, extracted audio, temporary renders, and final outputs on external SSD. Keep SQLite state on internal storage or another durable location. APFS and exFAT paths are supported; workflow does not rely on cross-volume atomic renames.
 
 Missing or changed external volumes fail loudly. No internal fallback directory is created. Write-heavy stages check recorded volume identity and free space. Originals are read-only inputs from workflow perspective and are never edited or deleted. Cleanup, when performed manually, must stay inside configured cache/workspace descendants; never clean input roots.

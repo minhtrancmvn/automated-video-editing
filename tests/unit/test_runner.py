@@ -127,9 +127,10 @@ def test_runner_terminates_on_main_thread_interrupt_and_keeps_partial(
         "video_editor.rendering.runner.signal.getsignal", lambda _signum: None
     )
 
-    with pytest.raises(VideoEditorError, match="partial output retained"):
+    with pytest.raises(VideoEditorError, match="partial output retained") as caught:
         run_render(command, on_interrupt)
 
+    assert caught.value.interrupted
     assert callback_called
     assert process.terminated
     assert command.partial_path.exists()
