@@ -60,7 +60,67 @@ def test_reuse_requires_all_cache_keys_and_valid_artifact(tmp_path: Path) -> Non
         store.complete_stage(job, "render", '{"artifact":"render"}')
         store.save_artifact(job, "render", artifact, {"valid": True})
 
-        assert store.find_reusable_stage("render", "source-a", "settings-a", "impl-a", lambda path, metadata: path.exists() and metadata["valid"]) is not None
+        validator = lambda path, metadata: path.exists() and metadata["valid"]
+        assert store.find_reusable_stage("render", "source-a", "settings-a", "impl-a", validator) is not None
         assert store.find_reusable_stage("render", "source-a", "settings-b", "impl-a", lambda path, metadata: True) is None
         artifact.unlink()
         assert store.find_reusable_stage("render", "source-a", "settings-a", "impl-a", lambda path, metadata: path.exists()) is None
+
+
+def test_reuse_rejects_missing_validator_and_non_file_artifact(tmp_path: Path) -> None:
+    artifact_dir = tmp_path / "render.mp4"
+    artifact_dir.mkdir()
+    with JobStore(tmp_path / "state.db") as store:
+        job = store.create_job("{}", "{}")
+        store.start_stage(job, "render", "source", "settings", "impl")
+        store.complete_stage(job, "render")
+        store.save_artifact(job, "render", artifact_dir)
+
+        assert store.find_reusable_stage("render", "source", "settings", "impl") is None
+        assert store.find_reusable_stage("render", "source", "settings", "impl", lambda path: True) is None
+
+
+def test_stage_restart_invalidates_prior_artifacts(tmp_path: Path) -> None:
+    artifact = tmp_path / "render.mp4"
+    artifact.write_text("old output")
+    with JobStore(tmp_path / "state.db") as store:
+        job = store.create_job("{}", "{}")
+        store.start_stage(job, "render", "source", "settings", "impl")
+        store.complete_stage(job, "render")
+        store.save_artifact(job, "render", artifact, {"attempt": 1})
+
+        store.start_stage(job, "render", "source", "settings", "impl")
+        assert store.get_job(job)["artifacts"] == []
+        assert store.find_reusable_stage("render", "source", "settings", "impl", lambda path: True) is None
+
+
+def test_falsy_artifact_metadata_is_preserved(tmp_path: Path) -> None:
+    artifact = tmp_path / "render.mp4"
+    artifact.write_text("output")
+    with JobStore(tmp_path / "state.db") as store:
+        job = store.create_job("{}", "{}")
+        store.start_stage(job, "render", "source", "settings", "impl")
+        store.complete_stage(job, "render")
+        store.save_artifact(job, "render", artifact, metadata=[])
+        assert store.get_job(job)["artifacts"][0]["metadata"] == []
+
+
+def test_successful_stage_completes_job(tmp_path: Path) -> None:
+    with JobStore(tmp_path / "state.db") as store:
+        job = store.create_job("{}", "{}")
+        store.start_stage(job, "inspect", "source", "settings", "impl")
+        store.complete_stage(job, "inspect")
+        assert store.get_job(job)["status"] == JobStatus.COMPLETED
+
+
+def test_complete_job_requires_all_stages_completed(tmp_path: Path) -> None:
+    with JobStore(tmp_path / "state.db") as store:
+        job = store.create_job("{}", "{}")
+        store.start_stage(job, "inspect", "source", "settings", "impl")
+        try:
+            store.complete_job(job)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("incomplete job was marked completed")
+        assert store.get_job(job)["status"] == JobStatus.RUNNING

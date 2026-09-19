@@ -92,92 +92,94 @@ class JobStore:
             connection.commit()
 
     def _create_schema(self) -> None:
+        ddl = (
+            """CREATE TABLE IF NOT EXISTS schema_metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS jobs (
+                id TEXT PRIMARY KEY,
+                config_json TEXT NOT NULL,
+                volume_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS job_stages (
+                id INTEGER PRIMARY KEY,
+                job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                input_fingerprint TEXT NOT NULL,
+                settings_hash TEXT NOT NULL,
+                implementation_version TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at TEXT,
+                completed_at TEXT,
+                error_json TEXT,
+                result_json TEXT,
+                UNIQUE(job_id, name)
+            )""",
+            """CREATE INDEX IF NOT EXISTS job_stages_cache_idx
+                ON job_stages(name, input_fingerprint, settings_hash, implementation_version, status)""",
+            """CREATE TABLE IF NOT EXISTS sources (
+                id INTEGER PRIMARY KEY,
+                job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                source_id TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                UNIQUE(job_id, source_id)
+            )""",
+            """CREATE TABLE IF NOT EXISTS source_probes (
+                id INTEGER PRIMARY KEY,
+                source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+                data_json TEXT NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS chronology_groups (
+                id INTEGER PRIMARY KEY,
+                job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                group_id TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                UNIQUE(job_id, group_id)
+            )""",
+            """CREATE TABLE IF NOT EXISTS chronology_members (
+                id INTEGER PRIMARY KEY,
+                group_id INTEGER NOT NULL REFERENCES chronology_groups(id) ON DELETE CASCADE,
+                source_id TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                data_json TEXT NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS proxy_mappings (
+                id INTEGER PRIMARY KEY,
+                job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                data_json TEXT NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS artifacts (
+                id INTEGER PRIMARY KEY,
+                job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                stage_name TEXT NOT NULL,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL,
+                metadata_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(job_id, stage_name, name)
+            )""",
+            """CREATE TABLE IF NOT EXISTS cache_entries (
+                id INTEGER PRIMARY KEY,
+                stage_id INTEGER NOT NULL REFERENCES job_stages(id) ON DELETE CASCADE,
+                artifact_id INTEGER REFERENCES artifacts(id) ON DELETE SET NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS render_attempts (
+                id INTEGER PRIMARY KEY,
+                job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                stage_name TEXT NOT NULL,
+                data_json TEXT NOT NULL
+            )""",
+        )
         with self._transaction() as connection:
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS schema_metadata (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                );
-                INSERT OR IGNORE INTO schema_metadata(key, value)
-                    VALUES ('migration_version', '1');
-                CREATE TABLE IF NOT EXISTS jobs (
-                    id TEXT PRIMARY KEY,
-                    config_json TEXT NOT NULL,
-                    volume_json TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS job_stages (
-                    id INTEGER PRIMARY KEY,
-                    job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-                    name TEXT NOT NULL,
-                    input_fingerprint TEXT NOT NULL,
-                    settings_hash TEXT NOT NULL,
-                    implementation_version TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    started_at TEXT,
-                    completed_at TEXT,
-                    error_json TEXT,
-                    result_json TEXT,
-                    UNIQUE(job_id, name)
-                );
-                CREATE INDEX IF NOT EXISTS job_stages_cache_idx
-                    ON job_stages(name, input_fingerprint, settings_hash, implementation_version, status);
-                CREATE TABLE IF NOT EXISTS sources (
-                    id INTEGER PRIMARY KEY,
-                    job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-                    source_id TEXT NOT NULL,
-                    data_json TEXT NOT NULL,
-                    UNIQUE(job_id, source_id)
-                );
-                CREATE TABLE IF NOT EXISTS source_probes (
-                    id INTEGER PRIMARY KEY,
-                    source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
-                    data_json TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS chronology_groups (
-                    id INTEGER PRIMARY KEY,
-                    job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-                    group_id TEXT NOT NULL,
-                    data_json TEXT NOT NULL,
-                    UNIQUE(job_id, group_id)
-                );
-                CREATE TABLE IF NOT EXISTS chronology_members (
-                    id INTEGER PRIMARY KEY,
-                    group_id INTEGER NOT NULL REFERENCES chronology_groups(id) ON DELETE CASCADE,
-                    source_id TEXT NOT NULL,
-                    position INTEGER NOT NULL,
-                    data_json TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS proxy_mappings (
-                    id INTEGER PRIMARY KEY,
-                    job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-                    data_json TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS artifacts (
-                    id INTEGER PRIMARY KEY,
-                    job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-                    stage_name TEXT NOT NULL,
-                    name TEXT NOT NULL,
-                    path TEXT NOT NULL,
-                    metadata_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    UNIQUE(job_id, stage_name, name)
-                );
-                CREATE TABLE IF NOT EXISTS cache_entries (
-                    id INTEGER PRIMARY KEY,
-                    stage_id INTEGER NOT NULL REFERENCES job_stages(id) ON DELETE CASCADE,
-                    artifact_id INTEGER REFERENCES artifacts(id) ON DELETE SET NULL
-                );
-                CREATE TABLE IF NOT EXISTS render_attempts (
-                    id INTEGER PRIMARY KEY,
-                    job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-                    stage_name TEXT NOT NULL,
-                    data_json TEXT NOT NULL
-                );
-                """
+            for statement in ddl:
+                connection.execute(statement)
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_metadata(key, value) VALUES (?, ?)",
+                ("migration_version", "1"),
             )
 
     def create_job(self, config_json: Any, volume_json: Any) -> str:
@@ -206,6 +208,11 @@ class JobStore:
         now = _now()
         with self._transaction() as connection:
             self._job_exists(connection, job_id)
+            # A restarted stage must not expose artifacts produced by its prior attempt.
+            connection.execute(
+                "DELETE FROM artifacts WHERE job_id = ? AND stage_name = ?",
+                (job_id, name),
+            )
             connection.execute(
                 """INSERT INTO job_stages(
                     job_id, name, input_fingerprint, settings_hash,
@@ -238,7 +245,31 @@ class JobStore:
             )
             if cursor.rowcount == 0:
                 raise KeyError(f"unknown stage: {job_id}/{name}")
-            connection.execute("UPDATE jobs SET updated_at = ? WHERE id = ?", (now, job_id))
+            remaining = connection.execute(
+                "SELECT COUNT(*) FROM job_stages WHERE job_id = ? AND status != ?",
+                (job_id, StageStatus.COMPLETED),
+            ).fetchone()[0]
+            job_status = JobStatus.COMPLETED if remaining == 0 else JobStatus.RUNNING
+            connection.execute(
+                "UPDATE jobs SET status = ?, updated_at = ? WHERE id = ?",
+                (job_status, now, job_id),
+            )
+
+    def complete_job(self, job_id: str) -> None:
+        """Mark job completed in one transaction after successful execution."""
+        now = _now()
+        with self._transaction() as connection:
+            self._job_exists(connection, job_id)
+            incomplete = connection.execute(
+                "SELECT 1 FROM job_stages WHERE job_id = ? AND status != ? LIMIT 1",
+                (job_id, StageStatus.COMPLETED),
+            ).fetchone()
+            if incomplete is not None:
+                raise ValueError(f"job has incomplete stages: {job_id}")
+            connection.execute(
+                "UPDATE jobs SET status = ?, updated_at = ? WHERE id = ?",
+                (JobStatus.COMPLETED, now, job_id),
+            )
 
     def fail_stage(
         self,
@@ -309,7 +340,7 @@ class JobStore:
                 VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(job_id, stage_name, name) DO UPDATE SET
                     path=excluded.path, metadata_json=excluded.metadata_json, created_at=excluded.created_at""",
-                (job_id, stage_name, artifact_name, str(path), _json(metadata or {}), now),
+                (job_id, stage_name, artifact_name, str(path), _json(metadata if metadata is not None else {}), now),
             )
             row = connection.execute(
                 "SELECT id FROM artifacts WHERE job_id = ? AND stage_name = ? AND name = ?",
@@ -346,11 +377,10 @@ class JobStore:
         for artifact in artifacts:
             path = Path(artifact["path"])
             metadata = _row_json(artifact["metadata_json"])
-            if artifact_validator is None:
-                valid = path.exists()
-            else:
-                parameters = inspect.signature(artifact_validator).parameters
-                valid = bool(artifact_validator(path, metadata) if len(parameters) >= 2 else artifact_validator(path))
+            if not path.is_file() or artifact_validator is None:
+                return None
+            parameters = inspect.signature(artifact_validator).parameters
+            valid = bool(artifact_validator(path, metadata) if len(parameters) >= 2 else artifact_validator(path))
             if not valid:
                 return None
             checked.append({"name": artifact["name"], "path": path, "metadata": metadata})
