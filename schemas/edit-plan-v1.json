@@ -4,6 +4,14 @@
       "additionalProperties": false,
       "description": "Output framing primitive supported by Phase 1.",
       "properties": {
+        "mode": {
+          "enum": [
+            "center_crop",
+            "fit_background"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
         "background": {
           "anyOf": [
             {
@@ -15,14 +23,6 @@
           ],
           "default": null,
           "title": "Background"
-        },
-        "mode": {
-          "enum": [
-            "center_crop",
-            "fit_background"
-          ],
-          "title": "Mode",
-          "type": "string"
         }
       },
       "required": [
@@ -35,25 +35,23 @@
       "additionalProperties": false,
       "description": "Requested output properties.",
       "properties": {
-        "audio": {
-          "default": "source",
+        "kind": {
           "enum": [
-            "source",
-            "silence",
-            "none"
+            "short",
+            "long"
           ],
-          "title": "Audio",
+          "title": "Kind",
           "type": "string"
         },
-        "codec": {
-          "minLength": 1,
-          "title": "Codec",
-          "type": "string"
+        "width": {
+          "exclusiveMinimum": 0,
+          "title": "Width",
+          "type": "integer"
         },
-        "color": {
-          "default": "passthrough",
-          "title": "Color",
-          "type": "string"
+        "height": {
+          "exclusiveMinimum": 0,
+          "title": "Height",
+          "type": "integer"
         },
         "frame_rate": {
           "anyOf": [
@@ -68,23 +66,25 @@
           ],
           "title": "Frame Rate"
         },
-        "height": {
-          "exclusiveMinimum": 0,
-          "title": "Height",
-          "type": "integer"
-        },
-        "kind": {
-          "enum": [
-            "short",
-            "long"
-          ],
-          "title": "Kind",
+        "codec": {
+          "minLength": 1,
+          "title": "Codec",
           "type": "string"
         },
-        "width": {
-          "exclusiveMinimum": 0,
-          "title": "Width",
-          "type": "integer"
+        "audio": {
+          "default": "source",
+          "enum": [
+            "source",
+            "silence",
+            "none"
+          ],
+          "title": "Audio",
+          "type": "string"
+        },
+        "color": {
+          "default": "passthrough",
+          "title": "Color",
+          "type": "string"
         }
       },
       "required": [
@@ -101,6 +101,21 @@
       "additionalProperties": false,
       "description": "Source identity and media facts referenced by an edit plan.",
       "properties": {
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "path": {
+          "format": "path",
+          "title": "Path",
+          "type": "string"
+        },
+        "identity": {
+          "minLength": 1,
+          "title": "Identity",
+          "type": "string"
+        },
         "duration": {
           "anyOf": [
             {
@@ -118,21 +133,6 @@
           "default": true,
           "title": "Has Audio",
           "type": "boolean"
-        },
-        "id": {
-          "minLength": 1,
-          "title": "Id",
-          "type": "string"
-        },
-        "identity": {
-          "minLength": 1,
-          "title": "Identity",
-          "type": "string"
-        },
-        "path": {
-          "format": "path",
-          "title": "Path",
-          "type": "string"
         }
       },
       "required": [
@@ -144,49 +144,26 @@
       "title": "PlanSource",
       "type": "object"
     },
+    "Provenance": {
+      "additionalProperties": false,
+      "description": "Data-only provenance metadata; command execution fields are forbidden.",
+      "properties": {
+        "planner": {
+          "minLength": 1,
+          "title": "Planner",
+          "type": "string"
+        }
+      },
+      "required": [
+        "planner"
+      ],
+      "title": "Provenance",
+      "type": "object"
+    },
     "TimelineClip": {
       "additionalProperties": false,
       "description": "One source interval placed consecutively on timeline.",
       "properties": {
-        "confidence": {
-          "anyOf": [
-            {
-              "maximum": 1.0,
-              "minimum": 0.0,
-              "type": "number"
-            },
-            {
-              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Confidence"
-        },
-        "framing": {
-          "$ref": "#/$defs/Framing"
-        },
-        "selection_reason": {
-          "minLength": 1,
-          "title": "Selection Reason",
-          "type": "string"
-        },
-        "source_end": {
-          "anyOf": [
-            {
-              "exclusiveMinimum": 0.0,
-              "type": "number"
-            },
-            {
-              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-              "type": "string"
-            }
-          ],
-          "title": "Source End"
-        },
         "source_id": {
           "minLength": 1,
           "title": "Source Id",
@@ -205,7 +182,7 @@
           ],
           "title": "Source Start"
         },
-        "speed": {
+        "source_end": {
           "anyOf": [
             {
               "exclusiveMinimum": 0.0,
@@ -216,7 +193,7 @@
               "type": "string"
             }
           ],
-          "title": "Speed"
+          "title": "Source End"
         },
         "timeline_start": {
           "anyOf": [
@@ -230,6 +207,45 @@
             }
           ],
           "title": "Timeline Start"
+        },
+        "speed": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "title": "Speed"
+        },
+        "framing": {
+          "$ref": "#/$defs/Framing"
+        },
+        "selection_reason": {
+          "minLength": 1,
+          "title": "Selection Reason",
+          "type": "string"
+        },
+        "confidence": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confidence"
         }
       },
       "required": [
@@ -248,6 +264,24 @@
       "additionalProperties": false,
       "description": "Transition between adjacent clips.",
       "properties": {
+        "from_clip": {
+          "minimum": 0,
+          "title": "From Clip",
+          "type": "integer"
+        },
+        "to_clip": {
+          "minimum": 0,
+          "title": "To Clip",
+          "type": "integer"
+        },
+        "kind": {
+          "enum": [
+            "cut",
+            "dissolve"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
         "duration": {
           "anyOf": [
             {
@@ -260,24 +294,6 @@
             }
           ],
           "title": "Duration"
-        },
-        "from_clip": {
-          "minimum": 0,
-          "title": "From Clip",
-          "type": "integer"
-        },
-        "kind": {
-          "enum": [
-            "cut",
-            "dissolve"
-          ],
-          "title": "Kind",
-          "type": "string"
-        },
-        "to_clip": {
-          "minimum": 0,
-          "title": "To Clip",
-          "type": "integer"
         }
       },
       "required": [
@@ -293,31 +309,15 @@
   "additionalProperties": false,
   "description": "Version 1 edit plan containing data, never shell commands.",
   "properties": {
-    "clips": {
-      "items": {
-        "$ref": "#/$defs/TimelineClip"
-      },
-      "minItems": 1,
-      "title": "Clips",
-      "type": "array"
-    },
-    "output": {
-      "$ref": "#/$defs/OutputSpec"
+    "schema_version": {
+      "const": 1,
+      "title": "Schema Version",
+      "type": "integer"
     },
     "planner_version": {
       "minLength": 1,
       "title": "Planner Version",
       "type": "string"
-    },
-    "provenance": {
-      "additionalProperties": true,
-      "title": "Provenance",
-      "type": "object"
-    },
-    "schema_version": {
-      "const": 1,
-      "title": "Schema Version",
-      "type": "integer"
     },
     "sources": {
       "items": {
@@ -327,12 +327,26 @@
       "title": "Sources",
       "type": "array"
     },
+    "clips": {
+      "items": {
+        "$ref": "#/$defs/TimelineClip"
+      },
+      "minItems": 1,
+      "title": "Clips",
+      "type": "array"
+    },
     "transitions": {
       "items": {
         "$ref": "#/$defs/Transition"
       },
       "title": "Transitions",
       "type": "array"
+    },
+    "output": {
+      "$ref": "#/$defs/OutputSpec"
+    },
+    "provenance": {
+      "$ref": "#/$defs/Provenance"
     }
   },
   "required": [
@@ -340,7 +354,8 @@
     "planner_version",
     "sources",
     "clips",
-    "output"
+    "output",
+    "provenance"
   ],
   "title": "EditPlan",
   "type": "object"

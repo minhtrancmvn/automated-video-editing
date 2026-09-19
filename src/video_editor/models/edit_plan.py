@@ -123,6 +123,12 @@ class OutputSpec(_PlanModel):
         return value
 
 
+class Provenance(_PlanModel):
+    """Data-only provenance metadata; command execution fields are forbidden."""
+
+    planner: str = Field(min_length=1)
+
+
 class EditPlan(_PlanModel):
     """Version 1 edit plan containing data, never shell commands."""
 
@@ -132,7 +138,7 @@ class EditPlan(_PlanModel):
     clips: list[TimelineClip] = Field(min_length=1)
     transitions: list[Transition] = Field(default_factory=list)
     output: OutputSpec
-    provenance: dict[str, Any] = Field(default_factory=dict)
+    provenance: Provenance
 
     @model_validator(mode="after")
     def validate_semantics(self) -> EditPlan:
@@ -189,7 +195,12 @@ class EditPlan(_PlanModel):
             raise ValueError(
                 "long-form output must be strictly shorter than 60 minutes"
             )
-        if self.output.audio == "source" and not any(s.has_audio for s in self.sources):
+        referenced_source_ids = {clip.source_id for clip in self.clips}
+        if self.output.audio == "source" and not any(
+            source.has_audio
+            for source in self.sources
+            if source.id in referenced_source_ids
+        ):
             raise ValueError("source audio requested but plan has no audio")
         return self
 

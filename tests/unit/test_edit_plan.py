@@ -136,18 +136,33 @@ def test_unsupported_primitives_and_missing_dimensions_are_rejected() -> None:
         EditPlan.model_validate(data)
 
 
-def test_plan_data_forbids_shell_command_fields() -> None:
+@pytest.mark.parametrize("field", ["command", "executable", "shell"])
+def test_plan_data_forbids_shell_command_fields(field: str) -> None:
     data = valid_plan_data()
-    data["command"] = "ffmpeg -i input.mp4 output.mp4"
+    data["provenance"][field] = "ffmpeg -i input.mp4 output.mp4"
     with pytest.raises(ValidationError, match="extra_forbidden"):
         EditPlan.model_validate(data)
 
 
-def test_missing_audio_plan_is_rejected_when_source_audio_requested() -> None:
+def test_nested_provenance_shell_command_fields_are_rejected() -> None:
+    data = valid_plan_data()
+    data["provenance"]["metadata"] = {"details": {"command": "ffmpeg"}}
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        EditPlan.model_validate(data)
+
+
+def test_missing_audio_plan_is_rejected_when_referenced_source_has_no_audio() -> None:
     data = valid_plan_data()
     data["sources"] = [source(has_audio=False)]
     with pytest.raises(ValidationError, match="no audio"):
         EditPlan.model_validate(data)
+
+
+def test_unreferenced_source_without_audio_does_not_reject_plan() -> None:
+    data = valid_plan_data()
+    data["sources"] = [source(has_audio=True), source("unused", has_audio=False)]
+    plan = EditPlan.model_validate(data)
+    assert plan.sources[-1].has_audio is False
 
 
 def test_schema_version_and_checked_in_schema() -> None:
