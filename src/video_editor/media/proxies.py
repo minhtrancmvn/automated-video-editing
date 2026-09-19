@@ -1,0 +1,253 @@
+"""Local analysis proxy and speech-audio generation."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import subprocess
+from dataclasses import dataclass
+from decimal import Decimal
+from pathlib import Path
+
+from video_editor.errors import ErrorCategory, VideoEditorError
+from video_editor.media.probe import MediaProbe, probe_media
+
+
+@dataclass(frozen=True)
+class ProxySettings:
+    """Deterministic settings for bounded analysis video."""
+
+    max_width: int = 960
+    fps: int = 15
+    video_codec: str = "libx264"
+
+
+@dataclass(frozen=True)
+class ProxyMapping:
+    """Explicit mapping between source and derived-media timestamps."""
+
+    source_id: str
+    source_start: Decimal
+    source_end: Decimal
+    proxy_start: Decimal
+    proxy_end: Decimal
+    settings_hash: str
+    tool_version: str
+
+
+def _decimal(value: Decimal | float | str) -> Decimal:
+    return value if isinstance(value, Decimal) else Decimal(value)
+
+
+def identity_mapping(
+    source_id: str,
+    duration: Decimal | float | str,
+    settings_hash: str,
+    tool_version: str,
+) -> ProxyMapping:
+    """Create explicit full-duration identity mapping for constant-rate output."""
+
+    end = _decimal(duration)
+    if end < 0:
+        raise ValueError("duration must be non-negative")
+    return ProxyMapping(
+        source_id=source_id,
+        source_start=Decimal(0),
+        source_end=end,
+        proxy_start=Decimal(0),
+        proxy_end=end,
+        settings_hash=settings_hash,
+        tool_version=tool_version,
+    )
+
+
+def settings_hash(settings: ProxySettings) -> str:
+    """Hash canonical proxy settings for cache invalidation."""
+
+    payload = json.dumps(
+        {
+            "fps": settings.fps,
+            "max_width": settings.max_width,
+            "video_codec": settings.video_codec,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+_DEFAULT_SETTINGS = ProxySettings()
+
+
+def build_proxy_args(
+    source: Path,
+    output: Path,
+    settings: ProxySettings = _DEFAULT_SETTINGS,
+    *,
+    ffmpeg: str = "ffmpeg",
+) -> list[str]:
+    """Build shell-free FFmpeg arguments for muted, bounded analysis video."""
+
+    if settings.max_width <= 0 or settings.fps <= 0:
+        raise ValueError("proxy max_width and fps must be positive")
+    return [
+        ffmpeg,
+        "-v",
+        "error",
+        "-y",
+        "-i",
+        str(source),
+        "-vf",
+        f"scale='min({settings.max_width},iw)':-2",
+        "-r",
+        str(settings.fps),
+        "-c:v",
+        settings.video_codec,
+        "-pix_fmt",
+        "yuv420p",
+        "-an",
+        "-f",
+        "mp4",
+        str(output),
+    ]
+
+
+def build_audio_args(
+    source: Path,
+    output: Path,
+    *,
+    ffmpeg: str = "ffmpeg",
+) -> list[str]:
+    """Build shell-free FFmpeg arguments for mono 16 kHz Whisper WAV."""
+
+    return [
+        ffmpeg,
+        "-v",
+        "error",
+        "-y",
+        "-i",
+        str(source),
+        "-ac",
+        "1",
+        "-f",
+        "wav",
+        "-vn",
+        "-acodec",
+        "pcm_s16le",
+        "-ar",
+        "16000",
+        str(output),
+    ]
+
+
+def _run(args: list[str]) -> None:
+    try:
+        completed = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            shell=False,
+            check=False,
+        )
+    except OSError as exc:
+        raise VideoEditorError(
+            ErrorCategory.RENDER, f"media generation failed: {exc}"
+        ) from exc
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or "unknown ffmpeg error"
+        raise VideoEditorError(
+            ErrorCategory.RENDER, f"media generation failed: {detail}"
+        )
+
+
+def _ensure_cache_output(cache_root: Path, path: Path) -> None:
+    root = cache_root.resolve()
+    if path.resolve().parent != root:
+        raise VideoEditorError(
+            ErrorCategory.STORAGE, f"derived output escapes cache root: {path}"
+        )
+
+
+def _validated_rename(partial: Path, final: Path, *, ffprobe: str) -> Path:
+    try:
+        inspected = probe_media(partial, ffprobe=ffprobe)
+    except VideoEditorError:
+        partial.unlink(missing_ok=True)
+        raise
+    if partial.stat().st_size <= 0 or inspected.video is None:
+        partial.unlink(missing_ok=True)
+        raise VideoEditorError(
+            ErrorCategory.OUTPUT, f"invalid generated proxy: {partial}"
+        )
+    partial.replace(final)
+    return final
+
+
+def _validated_audio_rename(partial: Path, final: Path, *, ffprobe: str) -> Path:
+    try:
+        inspected = probe_media(partial, ffprobe=ffprobe)
+    except VideoEditorError:
+        partial.unlink(missing_ok=True)
+        raise
+    if partial.stat().st_size <= 0 or inspected.audio is None:
+        partial.unlink(missing_ok=True)
+        raise VideoEditorError(
+            ErrorCategory.OUTPUT, f"invalid generated audio: {partial}"
+        )
+    partial.replace(final)
+    return final
+
+
+def _name(source: Path, source_id: str, suffix: str) -> str:
+    digest = hashlib.sha256(f"{source_id}:{source.name}".encode()).hexdigest()[:16]
+    return f"{digest}{suffix}"
+
+
+def create_analysis_media(
+    source: Path,
+    source_id: str,
+    cache_root: Path,
+    duration: Decimal | float | str | None = None,
+    *,
+    settings: ProxySettings = _DEFAULT_SETTINGS,
+    tool_version: str = "ffmpeg",
+    ffmpeg: str = "ffmpeg",
+    ffprobe: str = "ffprobe",
+) -> tuple[Path, Path | None, ProxyMapping]:
+    """Generate validated proxy and optional Whisper audio wholly under cache root."""
+
+    if (
+        source.resolve() == cache_root.resolve()
+        or cache_root.resolve() in source.resolve().parents
+    ):
+        raise VideoEditorError(
+            ErrorCategory.STORAGE, "source path cannot be inside cache root"
+        )
+    cache_root.mkdir(parents=True, exist_ok=True)
+    source_probe: MediaProbe = probe_media(source, ffprobe=ffprobe)
+    actual_duration = duration if duration is not None else source_probe.duration
+    if actual_duration is None:
+        raise VideoEditorError(
+            ErrorCategory.INSPECTION, f"source duration unavailable: {source}"
+        )
+    final_proxy = cache_root / _name(source, source_id, ".proxy.mp4")
+    partial_proxy = final_proxy.with_name(final_proxy.name + ".partial")
+    _ensure_cache_output(cache_root, final_proxy)
+    _ensure_cache_output(cache_root, partial_proxy)
+
+    _run(build_proxy_args(source, partial_proxy, settings, ffmpeg=ffmpeg))
+    proxy = _validated_rename(partial_proxy, final_proxy, ffprobe=ffprobe)
+
+    audio: Path | None = None
+    if source_probe.audio is not None:
+        final_audio = cache_root / _name(source, source_id, ".audio.wav")
+        partial_audio = final_audio.with_name(final_audio.name + ".partial")
+        _ensure_cache_output(cache_root, final_audio)
+        _ensure_cache_output(cache_root, partial_audio)
+        _run(build_audio_args(source, partial_audio, ffmpeg=ffmpeg))
+        audio = _validated_audio_rename(partial_audio, final_audio, ffprobe=ffprobe)
+
+    mapping = identity_mapping(
+        source_id, actual_duration, settings_hash(settings), tool_version
+    )
+    return proxy, audio, mapping
