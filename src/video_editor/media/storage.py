@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import platform
 import plistlib
 import shutil
 import subprocess
@@ -39,8 +40,10 @@ def _mount_point(path: Path, device: int) -> Path:
 
 
 def _filesystem(mount_point: Path) -> str | None:
-    if shutil.which("diskutil") is None:
+    if platform.system() != "Darwin":
         return None
+    if shutil.which("diskutil") is None:
+        raise _storage_error("cannot inspect filesystem: diskutil is unavailable")
     try:
         result = subprocess.run(
             ["diskutil", "info", "-plist", str(mount_point)],
@@ -48,10 +51,12 @@ def _filesystem(mount_point: Path) -> str | None:
             capture_output=True,
         )
         info = plistlib.loads(result.stdout)
-    except (OSError, subprocess.SubprocessError, plistlib.InvalidFileException):
-        return None
+    except (OSError, subprocess.SubprocessError, plistlib.InvalidFileException) as exc:
+        raise _storage_error(f"cannot inspect filesystem for {mount_point}: {exc}") from exc
     value = info.get("FilesystemName")
-    return value.lower() if isinstance(value, str) else None
+    if not isinstance(value, str):
+        raise _storage_error(f"cannot inspect filesystem for {mount_point}: missing FilesystemName")
+    return value.lower()
 
 
 def inspect_volume(path: Path) -> VolumeIdentity:

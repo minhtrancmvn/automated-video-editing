@@ -63,12 +63,15 @@ def resolve_config(path: Path) -> AppConfig:
     reserve = settings.get("storage_reserve_bytes", raw.get("storage_reserve_bytes", 0))
     cloud_enabled = settings.get("cloud_enabled", raw.get("cloud_enabled", False))
     concurrency = settings.get("render_concurrency", raw.get("render_concurrency", 1))
-    if not isinstance(reserve, int) or reserve < 0:
-        raise VideoEditorError(ErrorCategory.CONFIGURATION, "storage_reserve_bytes must be a non-negative integer")
+    if type(reserve) is not int or reserve < 0:
+        raise VideoEditorError(
+            ErrorCategory.CONFIGURATION,
+            "storage_reserve_bytes must be a non-negative integer",
+        )
     if not isinstance(cloud_enabled, bool):
         raise VideoEditorError(ErrorCategory.CONFIGURATION, "cloud_enabled must be boolean")
     if cloud_enabled:
         raise VideoEditorError(ErrorCategory.CONFIGURATION, "cloud_enabled is not supported in Phase 1")
-    if not isinstance(concurrency, int) or concurrency < 1:
+    if type(concurrency) is not int or concurrency < 1:
         raise VideoEditorError(ErrorCategory.CONFIGURATION, "render_concurrency must be positive")
     return AppConfig(path_settings, reserve, cloud_enabled, concurrency)

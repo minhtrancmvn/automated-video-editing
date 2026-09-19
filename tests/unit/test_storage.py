@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from video_editor.errors import VideoEditorError
+from video_editor.media import storage
 from video_editor.media.storage import (
     VolumeIdentity,
     assert_expected_volume,
@@ -38,6 +39,13 @@ def test_cleanup_containment(tmp_path: Path) -> None:
     root.mkdir()
     assert is_within(root, root / "cache" / "partial.mp4")
     assert not is_within(root, tmp_path / "outside.mp4")
+
+
+def test_diskutil_failure_is_storage_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(storage.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(storage.shutil, "which", lambda _: None)
+    with pytest.raises(VideoEditorError, match="diskutil is unavailable"):
+        inspect_volume(tmp_path)
 
 
 def test_filesystem_policy_accepts_apfs_and_exfat(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
