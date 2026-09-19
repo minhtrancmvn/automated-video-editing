@@ -28,6 +28,24 @@ def test_discovery_returns_empty_list_for_empty_readable_folder(tmp_path: Path) 
     assert discover_sources(tmp_path) == []
 
 
+def test_discovery_includes_symlinked_video_without_recursing_symlink_dirs(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target.mp4"
+    target.write_bytes(b"video")
+    linked_file = tmp_path / "linked.mp4"
+    linked_dir = tmp_path / "linked-dir"
+    try:
+        linked_file.symlink_to(target)
+        linked_dir.symlink_to(tmp_path, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    sources = discover_sources(tmp_path)
+
+    assert [source.path.name for source in sources] == ["linked.mp4", "target.mp4"]
+
+
 def test_discovery_rejects_nonexistent_root_with_inspection_error(
     tmp_path: Path,
 ) -> None:

@@ -112,8 +112,10 @@ def discover_sources(
                     entry_path = Path(entry.path)
                     if stat.S_ISDIR(entry_stat.st_mode):
                         pending.append(entry_path)
-                    elif (
-                        stat.S_ISREG(entry_stat.st_mode)
+                        continue
+                    followed_stat = entry.stat(follow_symlinks=True)
+                    if (
+                        stat.S_ISREG(followed_stat.st_mode)
                         and entry_path.suffix.lower() in normalized
                     ):
                         candidates.append(entry_path)
