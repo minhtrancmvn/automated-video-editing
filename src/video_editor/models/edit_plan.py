@@ -125,10 +125,17 @@ class TimelineClip(_PlanModel):
     confidence: Decimal | None = Field(default=None, ge=0, le=1)
 
     @field_validator(
-        "source_start", "source_end", "timeline_start", "speed", mode="before"
+        "source_start",
+        "source_end",
+        "timeline_start",
+        "speed",
+        "confidence",
+        mode="before",
     )
     @classmethod
-    def validate_decimal_fields(cls, value: Any) -> Decimal:
+    def validate_decimal_fields(cls, value: Any) -> Decimal | None:
+        if value is None:
+            return None
         return _decimal(value)
 
     @model_validator(mode="after")

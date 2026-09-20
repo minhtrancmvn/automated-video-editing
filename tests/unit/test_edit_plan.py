@@ -228,6 +228,25 @@ def test_checked_in_json_schema_rejects_negative_decimal_strings(
 
 
 @pytest.mark.parametrize(
+    ("value", "expected"),
+    [("0", Decimal(0)), ("0.5", Decimal("0.5")), ("1", Decimal(1))],
+)
+def test_confidence_decimal_strings_have_schema_model_parity(
+    value: str, expected: Decimal
+) -> None:
+    data = valid_plan_data()
+    data["clips"][0]["confidence"] = value
+
+    schema_errors = list(
+        Draft202012Validator(json.loads(SCHEMA_PATH.read_text())).iter_errors(data)
+    )
+
+    assert not schema_errors
+    plan = EditPlan.model_validate(data)
+    assert plan.clips[0].confidence == expected
+
+
+@pytest.mark.parametrize(
     ("location", "value"),
     [
         (("sources", 0, "duration"), "0"),
@@ -236,6 +255,7 @@ def test_checked_in_json_schema_rejects_negative_decimal_strings(
         (("output", "frame_rate"), "0"),
         (("clips", 0, "confidence"), "1.1"),
         (("clips", 0, "confidence"), "-0.1"),
+        (("clips", 0, "confidence"), "1e-1"),
         (("sources", 0, "duration"), "1e1"),
         (("clips", 0, "timeline_start"), ""),
         (("clips", 0, "timeline_start"), "+"),
