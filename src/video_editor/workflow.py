@@ -283,9 +283,15 @@ class WorkflowService:
         if not metadata:
             return False
         source_id = metadata.get("source_id")
-        if not isinstance(source_id, str):
+        source_path_value = metadata.get("source_path")
+        if not isinstance(source_id, str) or not isinstance(source_path_value, str):
             return False
-        expected_identity = f"{IDENTITY_VERSION}:{source_id}"
+        try:
+            expected_identity = (
+                f"{IDENTITY_VERSION}:{bounded_fingerprint(Path(source_path_value))}"
+            )
+        except VideoEditorError:
+            return False
         settings_data = metadata.get("settings")
         if not isinstance(settings_data, dict):
             return False
@@ -738,6 +744,7 @@ class WorkflowService:
                 }
                 media_metadata = {
                     "source_id": source_id,
+                    "source_path": str(source_path),
                     "source_identity": source_identity,
                     "settings": {
                         "max_width": proxy_settings.max_width,

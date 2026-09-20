@@ -621,10 +621,13 @@ def test_proxy_artifact_requires_exact_current_source_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy_identity: str
 ) -> None:
     config = _config(tmp_path)
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
     artifact = tmp_path / "proxy.mp4"
     artifact.write_bytes(b"proxy")
     metadata = {
         "source_id": "source",
+        "source_path": str(source),
         "source_identity": legacy_identity,
         "settings": {"max_width": 960, "fps": 15, "video_codec": "libx264"},
         "settings_hash": proxy_settings_hash(ProxySettings()),
@@ -645,6 +648,41 @@ def test_proxy_artifact_requires_exact_current_source_identity(
     )
     with JobStore(tmp_path / "state.db") as store:
         service = WorkflowService(config, store)
+        assert not service._proxy_artifact_valid(artifact, metadata)
+
+
+def test_proxy_artifact_rejects_changed_source_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source-v1")
+    artifact = tmp_path / "proxy.mp4"
+    artifact.write_bytes(b"proxy")
+    digest = bounded_fingerprint(source)
+    identity = f"{IDENTITY_VERSION}:{digest}"
+    metadata = {
+        "source_id": "source",
+        "source_path": str(source),
+        "source_identity": identity,
+        "settings": {"max_width": 960, "fps": 15, "video_codec": "libx264"},
+        "settings_hash": proxy_settings_hash(ProxySettings()),
+        "tool_version": "ffmpeg",
+        "kind": "proxy",
+        "mapping": {
+            "source_id": "source",
+            "source_identity": identity,
+            "settings_hash": proxy_settings_hash(ProxySettings()),
+            "tool_version": "ffmpeg",
+        },
+    }
+    monkeypatch.setattr(
+        "video_editor.workflow.valid_cached_media", lambda *args, **kwargs: True
+    )
+    with JobStore(tmp_path / "state.db") as store:
+        service = WorkflowService(config, store)
+        assert service._proxy_artifact_valid(artifact, metadata)
+        source.write_bytes(b"source-v2")
         assert not service._proxy_artifact_valid(artifact, metadata)
 
 

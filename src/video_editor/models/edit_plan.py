@@ -43,8 +43,9 @@ class _PlanModel(BaseModel):
     ) -> dict[str, Any]:
         schema = handler(core_schema)
 
-        positive = r"^(?!^[-+.]*$)\+?(?=.*[1-9])\d*\.?\d*$"
-        nonnegative = r"^\+?0*\d*\.?\d*$"
+        decimal = r"(?:\d+(?:\.\d*)?|\.\d+)"
+        positive = rf"^\+?(?=[0-9.]*[1-9]){decimal}$"
+        nonnegative = rf"^\+?{decimal}$"
         field_patterns = {
             "PlanSource": {"duration": positive},
             "TimelineClip": {

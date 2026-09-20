@@ -237,6 +237,10 @@ def test_checked_in_json_schema_rejects_negative_decimal_strings(
         (("clips", 0, "confidence"), "1.1"),
         (("clips", 0, "confidence"), "-0.1"),
         (("sources", 0, "duration"), "1e1"),
+        (("clips", 0, "timeline_start"), ""),
+        (("clips", 0, "timeline_start"), "+"),
+        (("clips", 0, "timeline_start"), "."),
+        (("clips", 0, "timeline_start"), "+."),
     ],
 )
 def test_schema_and_model_reject_same_numeric_values(
