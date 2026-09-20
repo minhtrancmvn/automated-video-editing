@@ -182,6 +182,22 @@ def test_schema_version_and_checked_in_schema() -> None:
         EditPlan.model_validate(data)
 
 
+def test_transition_zero_duration_string_has_schema_model_parity() -> None:
+    data = valid_plan_data()
+    data["clips"].append(clip("a", 10, 20, timeline_start=10))
+    data["transitions"] = [
+        {"from_clip": 0, "to_clip": 1, "kind": "cut", "duration": "0"}
+    ]
+
+    schema_errors = list(
+        Draft202012Validator(json.loads(SCHEMA_PATH.read_text())).iter_errors(data)
+    )
+
+    assert not schema_errors
+    plan = EditPlan.model_validate(data)
+    assert plan.transitions[0].duration == 0
+
+
 @pytest.mark.parametrize(
     ("location", "value"),
     [

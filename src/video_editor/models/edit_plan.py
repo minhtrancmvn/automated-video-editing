@@ -43,42 +43,41 @@ class _PlanModel(BaseModel):
     ) -> dict[str, Any]:
         schema = handler(core_schema)
 
-        def tighten_decimal_strings(value: Any) -> None:
-            if isinstance(value, dict):
-                if value.get("type") == "string" and "pattern" in value:
-                    value["pattern"] = value["pattern"].replace("[+-]?", r"\+?")
-                for child in value.values():
-                    tighten_decimal_strings(child)
-            elif isinstance(value, list):
-                for child in value:
-                    tighten_decimal_strings(child)
+        positive = r"^(?!^[-+.]*$)\+?(?=.*[1-9])\d*\.?\d*$"
+        nonnegative = r"^\+?0*\d*\.?\d*$"
+        field_patterns = {
+            "PlanSource": {"duration": positive},
+            "TimelineClip": {
+                "source_start": nonnegative,
+                "source_end": positive,
+                "timeline_start": nonnegative,
+                "speed": positive,
+                "confidence": r"^(?:\+?(?:0+(?:\.\d+)?|\.\d+|1(?:\.0*)?))$",
+            },
+            "Transition": {"duration": nonnegative},
+            "OutputSpec": {"frame_rate": positive},
+        }
+        patterns = field_patterns.get(cls.__name__, {})
 
-        def tighten_positive_decimal_strings(value: Any, field_name: str = "") -> None:
+        def tighten(value: Any, field_name: str = "") -> None:
             if isinstance(value, dict):
                 if (
-                    field_name in {"duration", "source_end", "speed", "frame_rate"}
+                    field_name in patterns
                     and value.get("type") == "string"
                     and "pattern" in value
                 ):
-                    value["pattern"] = r"^(?!^[-+.]*$)\+?(?=.*[1-9])\d*\.?\d*$"
-                if (
-                    field_name == "confidence"
-                    and value.get("type") == "string"
-                    and "pattern" in value
-                ):
-                    value["pattern"] = r"^(?:\+?(?:0+(?:\.\d+)?|\.\d+|1(?:\.0*)?))$"
+                    value["pattern"] = patterns[field_name]
                 properties = value.get("properties", {})
                 for name, child in properties.items():
-                    tighten_positive_decimal_strings(child, name)
+                    tighten(child, name)
                 for child in value.values():
                     if child is not properties:
-                        tighten_positive_decimal_strings(child, field_name)
+                        tighten(child, field_name)
             elif isinstance(value, list):
                 for child in value:
-                    tighten_positive_decimal_strings(child, field_name)
+                    tighten(child, field_name)
 
-        tighten_decimal_strings(schema)
-        tighten_positive_decimal_strings(schema)
+        tighten(schema)
         return cast(dict[str, Any], schema)
 
 

@@ -282,6 +282,10 @@ class WorkflowService:
     ) -> bool:
         if not metadata:
             return False
+        source_id = metadata.get("source_id")
+        if not isinstance(source_id, str):
+            return False
+        expected_identity = f"{IDENTITY_VERSION}:{source_id}"
         settings_data = metadata.get("settings")
         if not isinstance(settings_data, dict):
             return False
@@ -298,15 +302,14 @@ class WorkflowService:
             mapping = metadata["mapping"]
             if not isinstance(mapping, dict):
                 return False
-            source_id = metadata.get("source_id")
             source_identity = metadata.get("source_identity")
-            if not isinstance(source_id, str) or not isinstance(source_identity, str):
+            if not isinstance(source_identity, str):
+                return False
+            if source_identity != expected_identity:
                 return False
             if mapping.get("source_id") != source_id:
                 return False
-            if mapping.get("source_identity") != source_identity:
-                return False
-            if ":" not in source_identity:
+            if mapping.get("source_identity") != expected_identity:
                 return False
             if mapping.get("settings_hash") != metadata.get("settings_hash"):
                 return False
@@ -669,13 +672,19 @@ class WorkflowService:
 
     def _ensure_proxy(self, job_id: str) -> dict[str, Any]:
         job = self.store.get_job(job_id)
-        fingerprint = [
-            {
-                "source_id": item["source_id"],
-                "identity": item.get("fingerprint", item["source_id"]),
-            }
-            for item in job.get("sources", [])
-        ]
+        fingerprint = {
+            "identity_version": IDENTITY_VERSION,
+            "current_identity": [
+                {
+                    "source_id": item["source_id"],
+                    "identity": (
+                        f"{IDENTITY_VERSION}:"
+                        f"{item.get('fingerprint', item['source_id'])}"
+                    ),
+                }
+                for item in job.get("sources", [])
+            ],
+        }
         proxy_settings = ProxySettings()
         settings = {
             "cache": str(self.config.paths.cache_dir),

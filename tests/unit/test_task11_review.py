@@ -614,28 +614,34 @@ def test_run_stage_persists_keyboard_interrupt_as_interrupted(
     assert state["stages"]["inspect"]["status"] == "interrupted"
 
 
-def test_proxy_artifact_requires_exact_source_identity_in_mapping(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "legacy_identity", ["legacy:anything", f"{IDENTITY_VERSION}:other-digest"]
+)
+def test_proxy_artifact_requires_exact_current_source_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy_identity: str
 ) -> None:
     config = _config(tmp_path)
     artifact = tmp_path / "proxy.mp4"
     artifact.write_bytes(b"proxy")
     metadata = {
         "source_id": "source",
-        "source_identity": f"{IDENTITY_VERSION}:digest",
+        "source_identity": legacy_identity,
         "settings": {"max_width": 960, "fps": 15, "video_codec": "libx264"},
         "settings_hash": proxy_settings_hash(ProxySettings()),
         "tool_version": "ffmpeg",
         "kind": "proxy",
         "mapping": {
             "source_id": "source",
-            "source_identity": f"{IDENTITY_VERSION}:other-digest",
+            "source_identity": legacy_identity,
             "settings_hash": proxy_settings_hash(ProxySettings()),
             "tool_version": "ffmpeg",
         },
     }
     monkeypatch.setattr(
         "video_editor.workflow.valid_cached_media", lambda *args, **kwargs: True
+    )
+    monkeypatch.setattr(
+        "video_editor.workflow.bounded_fingerprint", lambda _path: "digest"
     )
     with JobStore(tmp_path / "state.db") as store:
         service = WorkflowService(config, store)
