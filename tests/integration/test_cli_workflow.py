@@ -145,9 +145,42 @@ def test_each_cli_command_invokes_matching_service_method(
     store = Mock()
     store.__enter__ = Mock(return_value=store)
     store.__exit__ = Mock(return_value=None)
-    monkeypatch.setattr("video_editor.cli._service", lambda _path: (service, store))
+    monkeypatch.setattr(
+        "video_editor.cli._service", lambda _path, _progress: (service, store)
+    )
 
     result = CliRunner().invoke(app, [*args, "--config", str(config)])
 
     assert result.exit_code == 0, result.output
     getattr(service, method).assert_called_once_with(*expected)
+
+
+def test_run_prints_progress_to_stderr_and_result_to_stdout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        "[paths]\ninput_dir='.'\nworkspace_dir='.'\ncache_dir='.'\noutput_dir='.'\nstate_dir='.'\n"
+    )
+    store = Mock()
+    store.__enter__ = Mock(return_value=store)
+    store.__exit__ = Mock(return_value=None)
+
+    def service_factory(_path: Path, progress: object = None) -> tuple[Mock, Mock]:
+        service = Mock()
+
+        def run(_input: Path) -> dict[str, bool]:
+            assert callable(progress)
+            progress("job abc: [1/6] inspect started")
+            return {"ok": True}
+
+        service.run.side_effect = run
+        return service, store
+
+    monkeypatch.setattr("video_editor.cli._service", service_factory)
+
+    result = CliRunner().invoke(app, ["run", "/input", "--config", str(config)])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "{'ok': True}\n"
+    assert result.stderr == "job abc: [1/6] inspect started\n"

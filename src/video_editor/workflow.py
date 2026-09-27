@@ -115,9 +115,15 @@ def _duration_seconds(plan: EditPlan) -> int:
 class WorkflowService:
     """Orchestrate local stages while keeping every completed result resumable."""
 
-    def __init__(self, config: AppConfig, store: JobStore) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        store: JobStore,
+        progress: Callable[[str], None] | None = None,
+    ) -> None:
         self.config = config
         self.store = store
+        self.progress = progress
         # Phase 1 explicitly serializes all renders. Keep configured concurrency
         # validated for forward-compatible config, but never run parallel renders.
         self._render_lock = threading.Lock()
@@ -412,7 +418,10 @@ class WorkflowService:
             },
             "destination_volumes": destinations,
         }
-        return self.store.create_job(config, _volume_data(source_volume))
+        job_id = self.store.create_job(config, _volume_data(source_volume))
+        if self.progress is not None:
+            self.progress(f"job {job_id} started")
+        return job_id
 
     def _expected_destination_volume(
         self, job: dict[str, Any], name: str
@@ -434,6 +443,11 @@ class WorkflowService:
         category: ErrorCategory,
         operation: Callable[[], _T],
     ) -> _T:
+        stage_number = STAGES.index(name) + 1
+        if self.progress is not None:
+            self.progress(
+                f"job {job_id}: [{stage_number}/{len(STAGES)}] {name} started"
+            )
         self._start(
             job_id,
             name,
@@ -442,7 +456,12 @@ class WorkflowService:
             preserve_artifacts=name == "render",
         )
         try:
-            return operation()
+            result = operation()
+            if self.progress is not None:
+                self.progress(
+                    f"job {job_id}: [{stage_number}/{len(STAGES)}] {name} completed"
+                )
+            return result
         except VideoEditorError as exc:
             self.store.fail_stage(
                 job_id,

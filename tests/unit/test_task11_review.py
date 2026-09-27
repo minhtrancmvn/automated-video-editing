@@ -646,6 +646,53 @@ def test_resume_persists_and_reuses_final_output_without_old_artifact_row(
     render.assert_not_called()
 
 
+def test_new_job_emits_job_started_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    input_path = config.paths.input_dir
+    input_path.mkdir()
+    volume = VolumeIdentity(input_path.stat().st_dev, tmp_path, None)
+    messages: list[str] = []
+
+    monkeypatch.setattr("video_editor.workflow.inspect_volume", lambda _path: volume)
+
+    with JobStore(config.paths.state_dir / "jobs.sqlite") as store:
+        service = WorkflowService(config, store, messages.append)
+        monkeypatch.setattr(service, "_destination_volume", lambda *args: volume)
+        job_id = service._new_job(input_path)
+
+    assert messages == [f"job {job_id} started"]
+
+
+def test_run_stage_emits_start_and_completion_progress(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    messages: list[str] = []
+
+    with JobStore(config.paths.state_dir / "jobs.sqlite") as store:
+        job_id = store.create_job({}, {})
+        service = WorkflowService(config, store, messages.append)
+
+        def operation() -> dict[str, object]:
+            result: dict[str, object] = {}
+            store.complete_stage(job_id, "inspect", result)
+            return result
+
+        service._run_stage(
+            job_id,
+            "inspect",
+            "input",
+            "settings",
+            ErrorCategory.INSPECTION,
+            operation,
+        )
+
+    assert messages == [
+        f"job {job_id}: [1/6] inspect started",
+        f"job {job_id}: [1/6] inspect completed",
+    ]
+
+
 def test_run_stage_persists_keyboard_interrupt_as_interrupted(
     tmp_path: Path,
 ) -> None:

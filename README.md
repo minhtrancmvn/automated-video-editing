@@ -66,7 +66,18 @@ video-editor resume JOB_ID --config CONFIG
 video-editor run /Volumes/TravelSSD/footage --config config.toml
 ```
 
-`run` executes `inspect`, `proxy`, `plan`, `render`, `validate`, and `report`. It creates `<output_dir>/<job_id>/`, with:
+`run` executes `inspect`, `proxy`, `plan`, `render`, `validate`, and `report`. It prints job and stage progress to stderr while keeping the final result on stdout:
+
+```text
+job 76dabac4-31db-451d-bf15-1ccb26575403 started
+job 76dabac4-31db-451d-bf15-1ccb26575403: [1/6] inspect started
+job 76dabac4-31db-451d-bf15-1ccb26575403: [1/6] inspect completed
+job 76dabac4-31db-451d-bf15-1ccb26575403: [2/6] proxy started
+```
+
+Progress reports stage activity, not FFmpeg frame percentages. `inspect`, `plan`, `render-from-plan`, and `resume` use the same progress output when they execute stages.
+
+`run` creates `<output_dir>/<job_id>/`, with:
 
 ```text
 edit-plan-horizontal.json

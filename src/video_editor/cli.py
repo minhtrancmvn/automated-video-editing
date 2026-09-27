@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated
 
@@ -17,7 +18,9 @@ from video_editor.workflow import WorkflowService, error_exit_code
 app = typer.Typer(help="Local-first generic video editor.")
 
 
-def _service(config_path: Path) -> tuple[WorkflowService, JobStore]:
+def _service(
+    config_path: Path, progress: Callable[[str], None] | None = None
+) -> tuple[WorkflowService, JobStore]:
     config = resolve_config(config_path)
     if config.paths.state_dir.anchor == "/" and config.paths.state_dir.parts[1:2] == (
         "Volumes",
@@ -25,7 +28,7 @@ def _service(config_path: Path) -> tuple[WorkflowService, JobStore]:
         inspect_volume(config.paths.state_dir)
     WorkflowService.validate_configured_roots(config, config.paths.input_dir)
     store = JobStore(config.paths.state_dir / "jobs.sqlite3")
-    return WorkflowService(config, store), store
+    return WorkflowService(config, store, progress), store
 
 
 def _invoke(config_path: Path, action: str, *args: object) -> None:
@@ -40,7 +43,8 @@ def _invoke(config_path: Path, action: str, *args: object) -> None:
                     config.paths.input_dir,
                     [source.path for source in plan.sources],
                 )
-        service, store = _service(config_path)
+        progress = lambda message: typer.echo(message, err=True)
+        service, store = _service(config_path, progress)
         with store:
             result = getattr(service, action)(*args)
         typer.echo(result)
