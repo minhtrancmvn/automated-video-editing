@@ -136,14 +136,15 @@ class WorkflowService:
         required: int,
         expected: VolumeIdentity | None = None,
     ) -> VolumeIdentity:
+        existing = _existing_parent(destination)
         if (
             not destination.exists()
             and destination.anchor == "/"
             and destination.parts[1:2] == ("Volumes",)
+            and existing == Path("/Volumes")
         ):
             # Never treat an absent macOS mount path as an internal parent.
             inspect_volume(destination)
-        existing = _existing_parent(destination)
         actual = inspect_volume(existing)
         if expected is not None and actual != expected:
             raise VideoEditorError(

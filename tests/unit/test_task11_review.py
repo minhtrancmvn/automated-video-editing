@@ -427,6 +427,61 @@ def test_destination_volume_rejects_mount_point_change(
             service._destination_volume(tmp_path / "output", 1, expected)
 
 
+def test_destination_volume_accepts_missing_job_directory_under_existing_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    root = Path("/Volumes/external/workspace")
+    destination = root / "job-id"
+    actual = VolumeIdentity(1, Path("/Volumes/external"), "apfs")
+    inspected: list[Path] = []
+
+    def inspect(path: Path) -> VolumeIdentity:
+        inspected.append(path)
+        if path != root:
+            raise VideoEditorError(
+                ErrorCategory.STORAGE, f"volume path {path} is not mounted"
+            )
+        return actual
+
+    monkeypatch.setattr("video_editor.workflow._existing_parent", lambda path: root)
+    monkeypatch.setattr("video_editor.workflow.inspect_volume", inspect)
+    monkeypatch.setattr("video_editor.workflow.assert_free_space", lambda *args: None)
+
+    with JobStore(config.paths.state_dir / "jobs.sqlite") as store:
+        service = WorkflowService(config, store)
+        result = service._destination_volume(destination, 1)
+
+    assert inspected == [root]
+    assert result == actual
+
+
+def test_destination_volume_rejects_missing_external_mount(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    destination = Path("/Volumes/missing/workspace")
+    inspected: list[Path] = []
+
+    def inspect(path: Path) -> VolumeIdentity:
+        inspected.append(path)
+        raise VideoEditorError(
+            ErrorCategory.STORAGE, f"volume path {path} is not mounted"
+        )
+
+    monkeypatch.setattr(
+        "video_editor.workflow._existing_parent", lambda path: Path("/Volumes")
+    )
+    monkeypatch.setattr("video_editor.workflow.inspect_volume", inspect)
+
+    with JobStore(config.paths.state_dir / "jobs.sqlite") as store:
+        service = WorkflowService(config, store)
+        with pytest.raises(VideoEditorError, match="not mounted"):
+            service._destination_volume(destination, 1)
+
+    assert inspected == [destination]
+
+
 def test_report_aggregates_probe_warnings_without_render_fallbacks(
     tmp_path: Path,
 ) -> None:
