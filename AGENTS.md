@@ -1,7 +1,3 @@
-## Model Routing
-
-Use Opus as primary model for planning and synthesis. Delegate independent bounded work to Sonnet, mechanical research to Haiku, and use Fable only if architectural ambiguity warrants its cost. Verify all outputs.
-
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
@@ -13,7 +9,6 @@ This project is indexed by GitNexus as **automated-video-editing** (1164 symbols
 
 - **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
 - **MUST run `detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows. For regression review, compare against the default branch: `detect_changes({scope: "compare", base_ref: "main"})`.
-- **MUST clean up agent-created worktrees after agents finish.** An agent is finished only after its task is complete and its changes are committed and pushed. Then remove its worktree immediately, run `git worktree prune`, and verify `git worktree list` contains no stale agent-created worktrees. Never remove active or user-created worktrees.
 - **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
 - When exploring unfamiliar code, use `query({search_query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
 - When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `context({name: "symbolName"})`.

@@ -1,0 +1,260 @@
+[
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/10654e2bd49a5432.audio.wav",
+    "size": 21202340,
+    "mtime_ns": 1790536570720000000,
+    "sha256": "74d6e7d59d16124da54c46968eb050e53c5516acf936761713ff8a95d57259f4"
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/10654e2bd49a5432.proxy.mp4",
+    "size": 218892020,
+    "mtime_ns": 1790536548860000000,
+    "sha256": null
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/389c94d2eadc506e.audio.wav",
+    "size": 11387640,
+    "mtime_ns": 1790536720560000000,
+    "sha256": "79cfb3666ca2d936d6c7a02ddab0b22963084b9d410636954043311b830853d0"
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/389c94d2eadc506e.proxy.mp4",
+    "size": 120627835,
+    "mtime_ns": 1790536710100000000,
+    "sha256": "194453ff3855263b437834cfba2fca3220ce2b4ffd6d8a09381962b2bbbece92"
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/5176371af86ac987.audio.wav",
+    "size": 75851854,
+    "mtime_ns": 1790535015830000000,
+    "sha256": "029c9bc89bacfe80dbe040ee7f4e8cb1e0e9aa7a2c26a7fa6a60674081d14018"
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/5176371af86ac987.proxy.mp4",
+    "size": 890401426,
+    "mtime_ns": 1790534928480000000,
+    "sha256": null
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/52575e8dc110b1cd.audio.wav",
+    "size": 20684196,
+    "mtime_ns": 1790532091420000000,
+    "sha256": "ae9a8063da0da7429f47f0b59be653bd8353cba30c5774c1e639840f374b1bf3"
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/52575e8dc110b1cd.proxy.mp4",
+    "size": 68969191,
+    "mtime_ns": 1790532070100000000,
+    "sha256": "4a5b556d2cd62a2906a7bf49f07d7a475b37ee47f6fd31ac14efe608ceeaeeec"
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/6310e014c38c7e14.audio.wav",
+    "size": 77901220,
+    "mtime_ns": 1790528180010000000,
+    "sha256": "84244a19bbcef1fd58779f70b1f39e8ef539e5f05627cde94de3154bdf01323b"
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/6310e014c38c7e14.proxy.mp4",
+    "size": 521711675,
+    "mtime_ns": 1790528089670000000,
+    "sha256": null
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/8073b687e0eeeb42.audio.wav",
+    "size": 135302564,
+    "mtime_ns": 1790525864850000000,
+    "sha256": "2deb43f3fab625e782519970c7c3d518c2d9d6e2ce20b9f7c9931c2b9055d462"
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/8073b687e0eeeb42.proxy.mp4",
+    "size": 502659655,
+    "mtime_ns": 1790525698170000000,
+    "sha256": null
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/8267eff95648294e.audio.wav",
+    "size": 75851172,
+    "mtime_ns": 1790530661760000000,
+    "sha256": "5f0a17a1e1ff47f36999691d3c5328ce1aee3d3e98cf2a6b5c027d536b621e1b"
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/8267eff95648294e.proxy.mp4",
+    "size": 937575960,
+    "mtime_ns": 1790530572550000000,
+    "sha256": null
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/8c44064b047cc91f.audio.wav",
+    "size": 33878094,
+    "mtime_ns": 1790532578660000000,
+    "sha256": "944e1d929a6164ecced2da2b1e55fea9abbf99259240db13e66ce54c70529ccd"
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/8c44064b047cc91f.proxy.mp4",
+    "size": 232584948,
+    "mtime_ns": 1790532539130000000,
+    "sha256": null
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/96903d2fcce75b1f.audio.wav",
+    "size": 23677006,
+    "mtime_ns": 1790537075700000000,
+    "sha256": "778596b7ed8f430a26d52ba881a85de187fa0b00980953bbf9544d29cc904375"
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/96903d2fcce75b1f.proxy.mp4",
+    "size": 219058737,
+    "mtime_ns": 1790537048360000000,
+    "sha256": null
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/96c04425b2343540.audio.wav",
+    "size": 130116344,
+    "mtime_ns": 1790522962420000000,
+    "sha256": "b4f4d6cef420945c069636de6d16699f2eebd71cc992bf471060c5c713efd6e6"
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/96c04425b2343540.proxy.mp4",
+    "size": 377773466,
+    "mtime_ns": 1790522805300000000,
+    "sha256": null
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/9eb55cdcbb4812dc.audio.wav",
+    "size": 87089230,
+    "mtime_ns": 1790524065800000000,
+    "sha256": "3ca13f9842ee7d502620bb205dad8c7c9ad94a1ba16c35e61e4bbc1655b0fe3f"
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/9eb55cdcbb4812dc.proxy.mp4",
+    "size": 347949095,
+    "mtime_ns": 1790523958470000000,
+    "sha256": null
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/9fc73de7e36f7db4.audio.wav",
+    "size": 116038392,
+    "mtime_ns": 1790521708700000000,
+    "sha256": "99c03e05647c58dd024ad4021beaa3c236ffcdbf2a81613f086684fe62938403"
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/9fc73de7e36f7db4.proxy.mp4",
+    "size": 401186339,
+    "mtime_ns": 1790521561270000000,
+    "sha256": null
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/bcb27ccc62091019.audio.wav",
+    "size": 75851172,
+    "mtime_ns": 1790529385270000000,
+    "sha256": "92fe762cb470c8b718274e010cfc3fe89c988e57d1beb81cb24883b4879df907"
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/bcb27ccc62091019.proxy.mp4",
+    "size": 1027175775,
+    "mtime_ns": 1790529292350000000,
+    "sha256": null
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/cdc58fbb3a11ca53.audio.wav",
+    "size": 109882788,
+    "mtime_ns": 1790520520000000000,
+    "sha256": "a52d1a45b5165f1b05a70563ad79c96d5f4d22fad5d1270bb27a8cff64de0a38"
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/cdc58fbb3a11ca53.proxy.mp4",
+    "size": 404286495,
+    "mtime_ns": 1790520371380000000,
+    "sha256": null
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/e67480d730c7b3aa.audio.wav",
+    "size": 75851172,
+    "mtime_ns": 1790531897110000000,
+    "sha256": "d1ebfca0cb527a9349b354283981eab881dc7b38a2716ba5cf752950ae6b35b4"
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/e67480d730c7b3aa.proxy.mp4",
+    "size": 826947307,
+    "mtime_ns": 1790531806800000000,
+    "sha256": null
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/f566b830fc1e4013.audio.wav",
+    "size": 108941390,
+    "mtime_ns": 1790526997210000000,
+    "sha256": "57b046e1c2d5922ecf983258ed91e6bc09009e230ab775a510ad7956f32cd2bb"
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/f566b830fc1e4013.proxy.mp4",
+    "size": 317808893,
+    "mtime_ns": 1790526894040000000,
+    "sha256": null
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/f63e28526f980219.audio.wav",
+    "size": 75851854,
+    "mtime_ns": 1790533666240000000,
+    "sha256": "db67f9b65e2f47139a6629d05a47b4d410915dd5a94596b92cf135966b36d244"
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/f63e28526f980219.proxy.mp4",
+    "size": 937711223,
+    "mtime_ns": 1790533577260000000,
+    "sha256": null
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/ffb99e2b8249547d.audio.wav",
+    "size": 75851854,
+    "mtime_ns": 1790536285100000000,
+    "sha256": "ff4d24dd59b0bfee2120026f9d4c564d1915133a519d859c9364c2029496ca33"
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/cache/d0b50171-a0e0-41dd-a721-08daddbdfac7/ffb99e2b8249547d.proxy.mp4",
+    "size": 771225991,
+    "mtime_ns": 1790536198010000000,
+    "sha256": null
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/workspace/d0b50171-a0e0-41dd-a721-08daddbdfac7/inventory.json",
+    "size": 31742,
+    "mtime_ns": 1790519337190000000,
+    "sha256": "52172337b0a0d4751051acdb70b893fd09c5b3b2898d78ee5b9520a38dec065a"
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/output/d0b50171-a0e0-41dd-a721-08daddbdfac7/edit-plan-horizontal.json",
+    "size": 12393,
+    "mtime_ns": 1790560503330000000,
+    "sha256": "51acef894e1a81f0f68c6ba48d043319e3e8e79379a9a83fce4b50bd3cd7a933"
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/output/d0b50171-a0e0-41dd-a721-08daddbdfac7/edit-plan-vertical.json",
+    "size": 12285,
+    "mtime_ns": 1790560503330000000,
+    "sha256": "39a7ca2d8d195f7f0a22954fc8e3b7983e0f4d719ed1547462e679945abe56b7"
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/output/d0b50171-a0e0-41dd-a721-08daddbdfac7/long.mp4",
+    "size": 114696390,
+    "mtime_ns": 1790560806130000000,
+    "sha256": "8f95a48a6a3fbee97ab0fc32875c67cb5976ccbd1e81f804992e06b554941e6b"
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/output/d0b50171-a0e0-41dd-a721-08daddbdfac7/report.json",
+    "size": 163500,
+    "mtime_ns": 1790561083920000000,
+    "sha256": "c798b0a7ac07e7e6efa88887d12c7615de455504949dd0242da904e5d1203eb8"
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/output/d0b50171-a0e0-41dd-a721-08daddbdfac7/report.md",
+    "size": 14056,
+    "mtime_ns": 1790561083930000000,
+    "sha256": "043c5d7dd668a783bd6a52a90876339da03b10786640eb56555ef5adb3ba1a76"
+  },
+  {
+    "path": "/Volumes/microSD/video-editor/output/d0b50171-a0e0-41dd-a721-08daddbdfac7/short-01.mp4",
+    "size": 77892613,
+    "mtime_ns": 1790561083450000000,
+    "sha256": "3aeb2862fec4930c486f73404494d20e1789271261438ecbecd6d3df9ba39807"
+  }
+]

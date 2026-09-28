@@ -1,0 +1,5 @@
+job a7f07689-c781-46bb-a5c9-0fd14f53a527 started
+job a7f07689-c781-46bb-a5c9-0fd14f53a527: [1/6] inspect started
+job a7f07689-c781-46bb-a5c9-0fd14f53a527: [1/6] inspect completed
+job a7f07689-c781-46bb-a5c9-0fd14f53a527: [2/6] proxy started
+storage: insufficient free space on /Volumes/microSD: 82045042688 free, 10737418240 reserved, 76329520640 required

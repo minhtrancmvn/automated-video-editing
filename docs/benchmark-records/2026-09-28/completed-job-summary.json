@@ -1,0 +1,45 @@
+{
+  "job_id": "d0b50171-a0e0-41dd-a721-08daddbdfac7",
+  "status": "completed",
+  "source_count": 18,
+  "chronology_groups": 10,
+  "artifact_count": 43,
+  "stages": {
+    "inspect": {
+      "status": "completed",
+      "started_at": "2026-09-27T14:28:55.743435+00:00",
+      "completed_at": "2026-09-27T14:28:57.198247+00:00",
+      "duration_seconds": 1.454812
+    },
+    "proxy": {
+      "status": "completed",
+      "started_at": "2026-09-27T14:28:57.199454+00:00",
+      "completed_at": "2026-09-27T19:24:35.775328+00:00",
+      "duration_seconds": 17738.575874
+    },
+    "plan": {
+      "status": "completed",
+      "started_at": "2026-09-28T01:55:03.217779+00:00",
+      "completed_at": "2026-09-28T01:55:03.341236+00:00",
+      "duration_seconds": 0.123457
+    },
+    "render": {
+      "status": "completed",
+      "started_at": "2026-09-28T01:55:03.342869+00:00",
+      "completed_at": "2026-09-28T02:04:43.632452+00:00",
+      "duration_seconds": 580.289583
+    },
+    "validate": {
+      "status": "completed",
+      "started_at": "2026-09-27T20:39:35.137590+00:00",
+      "completed_at": "2026-09-27T20:39:35.219975+00:00",
+      "duration_seconds": 0.082385
+    },
+    "report": {
+      "status": "completed",
+      "started_at": "2026-09-28T02:04:43.743222+00:00",
+      "completed_at": "2026-09-28T02:04:43.940283+00:00",
+      "duration_seconds": 0.197061
+    }
+  }
+}

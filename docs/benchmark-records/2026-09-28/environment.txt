@@ -1,0 +1,20 @@
+System:
+ProductName:		macOS
+ProductVersion:		27.0
+BuildVersion:		26A428
+FFmpeg:
+ffmpeg version 9.0.2 Copyright (c) 2000-2026 the FFmpeg developers
+FFprobe:
+ffprobe version 9.0.2 Copyright (c) 2007-2026 the FFmpeg developers
+Application:
+
+ Usage: video-editor [OPTIONS] COMMAND [ARGS]...
+
+ Local-first generic video editor.
+
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --install-completion          Install completion for the current shell.      │
+│ --show-completion             Show completion for the current shell, to copy │
+Volume:
+Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk4s1   238Gi   162Gi    76Gi    68%       1     0  100%   /Volumes/microSD

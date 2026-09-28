@@ -2,9 +2,9 @@
 
 ## Status
 
-Synthetic fixtures exercise generated tone video, silent video, GoPro-style chapter names, multiple sessions, unreadable candidates, output probes, and resume behavior. They do not validate real HERO12 media. Real HERO12 support is pending until this procedure completes with user-authorized files.
+Synthetic fixtures exercise generated tone video, silent video, GoPro-style chapter names, multiple sessions, unreadable candidates, output probes, and resume behavior. Real-camera workflow validation also passed for one authorized 18-file HERO12 batch under the recorded environment; see [`benchmark-records/2026-09-28/benchmark-record.md`](benchmark-records/2026-09-28/benchmark-record.md).
 
-Do not claim HERO12 compatibility, performance, or chronology correctness from synthetic test results.
+The scoped result does not establish compatibility with every HERO12 setting. Camera firmware/settings, manual chronology confirmation, independent peak-disk sampling, and disconnected-volume recovery remain unverified. Do not claim broader HERO12 compatibility, performance, or chronology correctness from synthetic tests or this single batch.
 
 ## Prerequisites
 

@@ -1,35 +1,41 @@
-# Task Plan: Fix Vertical Crop and Resume Guidance
+# Task Plan: Real HERO12 Benchmark Gate
 
 ## Goal
-Fill vertical output with center-cropped footage and document same-job resume/cache behavior.
+Run the documented Phase 1 benchmark against authorized GoPro footage, preserve verifiable evidence, and report compatibility limits and discrepancies without modifying source media.
 
 ## Phases
-- [x] Phase 1: Reproduce and trace vertical framing and cache reuse
-- [x] Phase 2: Confirm bounded design
-- [x] Phase 3: Add failing framing and invalidation tests
-- [x] Phase 4: Implement vertical crop and workflow invalidation
-- [x] Phase 5: Update README resume guidance
-- [x] Phase 6: Verify full quality gate and representative render
+- [x] Phase 1: Confirm authorization, input batch, storage roots, and execution boundary
+- [x] Phase 2: Capture source hashes and camera/system/storage metadata
+- [x] Phase 3: Run inspection and full workflow benchmark with timing evidence
+- [x] Phase 4: Validate outputs, reports, chronology, source integrity, local-only behavior, and same-job artifact reuse
+- [x] Phase 5: Write benchmark record and identify follow-up work
+- [x] Phase 6: Run final scoped verification and deliver results
 
 ## Key Questions
-1. Why does vertical output preserve large black regions?
-2. Which version key invalidates stale plans and renders on resume?
-3. Can same-job resume reuse valid proxy files after planner behavior changes?
+1. Can all 18 authorized GoPro MP4 files be inspected and processed successfully?
+2. Do generated horizontal and vertical outputs satisfy dimensions, duration, readability, plan provenance, and crop requirements?
+3. Does the run preserve original source hashes and report zero cloud usage?
+4. Do filename chronology and chapter/session ordering agree with available source evidence?
+5. How do measured wall time and disk growth compare with reported estimates?
+6. Which discrepancies block a scoped HERO12 compatibility claim?
 
 ## Decisions Made
-- Default vertical sample plans to `center_crop`.
-- Keep horizontal sample plans on `fit_background`.
-- Bump planner version/settings so stale plans regenerate while completed proxy stages stay reusable.
-- Bind render artifacts to plan digests and reject recovery when output predates its plan.
-- Preserve valid same-job proxy media through existing content validation.
-- Document `status`, `resume`, and new-run cache boundaries in README.
+- Use branch `test/hero12-benchmark` because benchmark records change repository artifacts.
+- Treat `/Volumes/microSD/DCIM/100GOPRO` as the explicitly authorized 18-file input batch.
+- Restrict writes to configured `/Volumes/microSD/video-editor/` roots and local benchmark evidence files.
+- Keep source MP4 files immutable and compare hashes before and after processing.
+- Exclude SSD disconnect/unmount testing from this run because it can disrupt active work and needs separate approval.
+- Do not claim general HERO12 compatibility; any pass applies only to the tested batch and recorded conditions.
+- Keep the configured 10 GiB storage reserve intact; do not force duplicate proxy generation when capacity is insufficient.
+- Reuse and validate completed same-batch job `d0b50171-a0e0-41dd-a721-08daddbdfac7`: all six stages are complete, its inspect fingerprint matches the benchmark jobs, and its cache/plans/renders/reports exist. This is safer than deleting its 9.8 GiB cache, which would still leave insufficient room for a new run.
 
 ## Errors Encountered
-- Version bump alone would invalidate proxy stage reuse; changed only planner version/settings instead.
-- Existing render recovery accepted stale output after plan replacement; bound artifacts to plan digests and required recovered output to be newer than its plan.
-- Existing recovery test expected old metadata shape; updated it to include the new plan digest.
-- Full quality gate first stopped on three Ruff formatting differences; formatted those files and restarted the complete gate.
-- First real center-crop integration render exposed a trailing comma before FFmpeg output labels (`No such filter: ''`); added a multi-clip compiler regression and joined labels directly to the final filter.
+- Initial relative `microSD` directory probe failed because the configured media is mounted at `/Volumes/microSD`; corrected subsequent probes to the absolute configured volume path.
+- Full-run storage calculation found a 4.674 GiB shortfall after the required 10 GiB reserve; preserve the reserve and pause full rendering rather than forcing execution.
+- Hash-completion waiters matched their own `pgrep -f` command text and waited indefinitely after hashing completed; stopped those waiters and switched to direct artifact/process verification before starting inspection.
+- First inspection wrapper exited before writing its completion bookkeeping despite a completed inspection stage and valid 18-source stdout payload; identical direct reproduction exited 0, so record this as a non-reproducible wrapper anomaly rather than an application inspection failure.
+- Retry check found `GX011485.MP4` temporarily missing from the authorized input directory, reducing the batch from 18 files to 17; it was restored and its SHA-256 matched the original manifest exactly.
+- Clip-order evidence script initially used `source_id` for plan source records, but persisted plans use `id`; corrected the evidence-only script and generated the expected 18-clip sequence.
 
 ## Status
-**Complete** - Vertical plan v2 uses center crop, real 144-second short fills 1080×1920, same-job resume reused all 72 proxy/audio files unchanged, and 216 tests plus Ruff, formatting, mypy, build, CLI help, and diff checks passed.
+**Complete for scoped batch** - Existing completed same-batch job passed inspection, proxy, planning, render, validation, reporting, source-integrity, visual frame, and same-job reuse checks. Four benchmark limitations remain documented: firmware/settings, manual chronology confirmation, independent peak-disk sampling, and disconnected-volume recovery.

@@ -2,7 +2,7 @@
 
 Phase 1 is local-first workflow foundation. It discovers and inspects video, builds deterministic sample plans, renders validated horizontal and vertical MP4 files, persists job state, and emits reports. It does not provide automatic highlight intelligence, storytelling, transcription, captions, subject tracking, or content-aware reframing.
 
-Real HERO12 validation remains pending. Do not treat synthetic fixture success as real-camera support.
+Real-camera workflow validation passed for one authorized 18-file HERO12 batch under the recorded environment. This scoped result does not establish compatibility with every HERO12 setting; camera firmware/settings, manual chronology confirmation, independent peak-disk sampling, and disconnected-volume recovery remain unverified. See [`docs/benchmark-records/2026-09-28/benchmark-record.md`](docs/benchmark-records/2026-09-28/benchmark-record.md).
 
 ## Prerequisites
 
@@ -103,7 +103,7 @@ Supported recursive extensions: `.3gp`, `.avi`, `.m2ts`, `.m4v`, `.mkv`, `.mov`,
 
 ## Privacy, cost, and limits
 
-Media stays on configured local volumes. Phase 1 makes zero cloud calls and reports cloud usage as `0`. No automatic intelligence claim is valid: selection is deterministic sample selection, not highlight ranking or story editing. Real performance, chronology, and HERO12 compatibility require authorized representative footage and benchmark procedure in [`docs/benchmark.md`](docs/benchmark.md).
+Media stays on configured local volumes. Phase 1 makes zero cloud calls and reports cloud usage as `0`. No automatic intelligence claim is valid: selection is deterministic sample selection, not highlight ranking or story editing. The benchmark procedure lives in [`docs/benchmark.md`](docs/benchmark.md); the scoped real-camera result and its limitations live in [`docs/benchmark-records/2026-09-28/benchmark-record.md`](docs/benchmark-records/2026-09-28/benchmark-record.md).
 
 Reports expose warnings, fallbacks, stage timing, storage roots, estimated peak space, skipped inputs, and output metadata. Hardware encoding may fall back to software `libx264` after capability probing. Render output is written as a partial file on final volume, validated with ffprobe, then renamed in place.
 
@@ -130,4 +130,4 @@ uv build
 uv run video-editor --help
 ```
 
-Architecture details live in [`docs/architecture.md`](docs/architecture.md). Real-camera benchmark gate lives in [`docs/benchmark.md`](docs/benchmark.md).
+Architecture details live in [`docs/architecture.md`](docs/architecture.md). Real-camera benchmark procedure lives in [`docs/benchmark.md`](docs/benchmark.md), with the completed scoped record in [`docs/benchmark-records/2026-09-28/benchmark-record.md`](docs/benchmark-records/2026-09-28/benchmark-record.md).
