@@ -813,7 +813,7 @@ class WorkflowService:
         }
         settings = {
             "output": str(self.config.paths.output_dir),
-            "planner": "phase1-sample-v1",
+            "planner": "phase1-sample-v2",
         }
         if self._stage_reusable(job, "plan", fingerprint, settings):
             return cast(dict[str, Any], job["stages"]["plan"]["result"])
@@ -844,6 +844,7 @@ class WorkflowService:
         self._protect_sources(command.final_path, source_paths)
         metadata: dict[str, Any] = {
             "plan": str(path),
+            "plan_digest": hashlib.sha256(path.read_bytes()).hexdigest(),
             "warnings": [warning.message for warning in command.warnings],
         }
 
@@ -887,6 +888,12 @@ class WorkflowService:
             plan_path = Path(metadata["plan"])
             if plan_path.resolve() not in expected:
                 continue
+            try:
+                plan_digest = hashlib.sha256(plan_path.read_bytes()).hexdigest()
+            except OSError:
+                continue
+            if metadata.get("plan_digest") != plan_digest:
+                continue
             output_path = Path(str(artifact.get("path", "")))
             if not self._artifact_valid("render", output_path, metadata):
                 continue
@@ -912,7 +919,16 @@ class WorkflowService:
                 else "short-01.mp4"
             )
             output_path = output / name
-            metadata = {"plan": str(plan_path), "warnings": []}
+            if (
+                not output_path.is_file()
+                or output_path.stat().st_mtime_ns < plan_path.stat().st_mtime_ns
+            ):
+                continue
+            metadata = {
+                "plan": str(plan_path),
+                "plan_digest": hashlib.sha256(plan_path.read_bytes()).hexdigest(),
+                "warnings": [],
+            }
             if self._artifact_valid("render", output_path, metadata):
                 self.store.save_artifact(job_id, "render", output_path, metadata)
                 recovered[plan_path.resolve()] = {
@@ -962,7 +978,11 @@ class WorkflowService:
                     else "short-01.mp4"
                 )
                 output_path = output / name
-                metadata = {"plan": str(path), "warnings": []}
+                metadata = {
+                    "plan": str(path),
+                    "plan_digest": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    "warnings": [],
+                }
                 # Persist expected final before render. Resume can recover a renamed
                 # final even if process died before normal artifact persistence.
                 self.store.save_artifact(job_id, "render", output_path, metadata)

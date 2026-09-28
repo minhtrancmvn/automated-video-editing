@@ -181,6 +181,20 @@ def test_center_crop_uses_crop_not_background_overlay(tmp_path: Path) -> None:
     assert "boxblur" not in graph
 
 
+def test_multiple_center_crops_have_valid_filter_boundaries(tmp_path: Path) -> None:
+    plan = _plan(
+        tmp_path,
+        framing=Framing(mode="center_crop"),
+        transition=Transition(from_clip=0, to_clip=1, kind="cut", duration=Decimal(0)),
+    )
+    graph = _graph(plan)
+
+    assert "format=yuv420p[vclip0]" in graph
+    assert "format=yuv420p[vclip1]" in graph
+    assert "format=yuv420p,[vclip0]" not in graph
+    assert "format=yuv420p,[vclip1]" not in graph
+
+
 def test_hardware_probe_failure_records_structured_fallback(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -104,8 +104,7 @@ def _video_framing(
                 + [
                     f"scale={width}:{height}:force_original_aspect_ratio=increase",
                     f"crop={width}:{height}",
-                    "format=yuv420p",
-                    f"[{label}]",
+                    f"format=yuv420p[{label}]",
                 ]
             )
         ]

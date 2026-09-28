@@ -340,8 +340,9 @@ def test_run_produces_validated_outputs_without_changing_originals(
 
     horizontal = load_plan(horizontal_plan)
     vertical = load_plan(vertical_plan)
-    assert horizontal.provenance.planner == "phase1-sample-v1"
-    assert vertical.provenance.planner == "phase1-sample-v1"
+    assert horizontal.provenance.planner == "phase1-sample-v2"
+    assert vertical.provenance.planner == "phase1-sample-v2"
+    assert all(clip.framing.mode == "center_crop" for clip in vertical.clips)
     assert _source_names(horizontal_plan) == [
         "GOPR0001.MP4",
         "GH020001.MP4",

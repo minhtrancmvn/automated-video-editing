@@ -58,12 +58,13 @@ def test_sample_plans_have_required_outputs(tmp_path: Path) -> None:
     assert (horizontal.output.width, horizontal.output.height) == (1920, 1080)
     assert (vertical.output.width, vertical.output.height) == (1080, 1920)
     assert horizontal.clips[0].framing.mode == "fit_background"
-    assert vertical.clips[0].framing.mode == "fit_background"
+    assert vertical.clips[0].framing.mode == "center_crop"
     assert all(
         clip.selection_reason == "phase1_sample" and clip.confidence is None
         for clip in horizontal.clips
     )
-    assert horizontal.provenance.planner == "phase1-sample-v1"
+    assert horizontal.provenance.planner == "phase1-sample-v2"
+    assert vertical.provenance.planner == "phase1-sample-v2"
 
 
 def test_plans_follow_chronology_and_have_no_gaps(tmp_path: Path) -> None:

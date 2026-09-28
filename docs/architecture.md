@@ -24,10 +24,10 @@ Sequencing recognizes conservative GoPro forms `GOPR####.MP4` and `G[A-Z]CCFFFF.
 
 Proxy generation creates muted H.264 analysis MP4 at no more than 960px width and 15 fps. Audio-bearing source also yields mono 16 kHz PCM WAV. Both outputs stay beneath cache root and have explicit timestamp mapping. Rendering always returns to original inputs rather than proxies.
 
-Planner writes two versioned JSON plans with `phase1-sample-v1` provenance:
+Planner writes two versioned JSON plans with `phase1-sample-v2` provenance:
 
 - horizontal 1920×1080 `long.mp4`
-- vertical 1080×1920 `short-01.mp4`
+- vertical 1080×1920 center-cropped `short-01.mp4`
 
 Planner chooses bounded first intervals with clean cuts. It is deterministic fixture coverage, not quality assessment or automatic narrative selection. Model validation rejects missing sources, invalid intervals, gaps, invalid transitions, unsupported output semantics, and long-form duration at or above one hour.
 

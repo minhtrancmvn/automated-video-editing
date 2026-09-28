@@ -1,3 +1,4 @@
+import hashlib
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import Mock
@@ -577,7 +578,14 @@ def test_interrupted_render_preserves_valid_output_on_resume(
             job_id, "render", "source", "settings", IMPLEMENTATION_VERSION
         )
         store.save_artifact(
-            job_id, "render", valid_output, {"plan": str(first_plan), "warnings": []}
+            job_id,
+            "render",
+            valid_output,
+            {
+                "plan": str(first_plan),
+                "plan_digest": hashlib.sha256(first_plan.read_bytes()).hexdigest(),
+                "warnings": [],
+            },
         )
         store.fail_stage(job_id, "render", "rendering", "stopped", interrupted=True)
         render_plan = Mock(
@@ -595,6 +603,61 @@ def test_interrupted_render_preserves_valid_output_on_resume(
         str(second_plan),
     ]
     render_plan.assert_called_once_with(job_id, second_plan)
+
+
+def test_render_reuse_rejects_artifact_from_changed_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text("new plan")
+    output_path = tmp_path / "short-01.mp4"
+    output_path.write_bytes(b"old render")
+
+    with JobStore(tmp_path / "state.db") as store:
+        job_id = store.create_job({}, {})
+        store.save_artifact(
+            job_id,
+            "render",
+            output_path,
+            {
+                "plan": str(plan_path),
+                "plan_digest": "old-plan-digest",
+                "warnings": [],
+            },
+        )
+        service = WorkflowService(config, store)
+        monkeypatch.setattr(service, "_artifact_valid", lambda *args: True)
+
+        reusable = service._valid_render_results(store.get_job(job_id), [plan_path])
+
+    assert reusable == {}
+
+
+def test_render_recovery_rejects_output_older_than_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    output_root = config.paths.output_dir / "job"
+    output_root.mkdir(parents=True)
+    output_path = output_root / "short-01.mp4"
+    output_path.write_bytes(b"old render")
+    plan_path = tmp_path / "vertical-plan.json"
+    plan_path.write_text("new plan")
+    plan = Mock(output=Mock(width=1080, height=1920))
+
+    with JobStore(tmp_path / "state.db") as store:
+        job_id = store.create_job({}, {})
+        service = WorkflowService(config, store)
+        monkeypatch.setattr("video_editor.workflow.load_plan", lambda _path: plan)
+        monkeypatch.setattr(
+            service, "_configured_destination", lambda _root, _job_id: output_root
+        )
+        monkeypatch.setattr(service, "_artifact_valid", lambda *args: True)
+
+        recovered = service._recover_render_results(job_id, [plan_path])
+
+    assert recovered == {}
 
 
 def test_resume_persists_and_reuses_final_output_without_old_artifact_row(
@@ -640,7 +703,11 @@ def test_resume_persists_and_reuses_final_output_without_old_artifact_row(
             "stage": "render",
             "name": "long.mp4",
             "path": str(output_path),
-            "metadata": {"plan": str(plan_path), "warnings": []},
+            "metadata": {
+                "plan": str(plan_path),
+                "plan_digest": hashlib.sha256(plan_path.read_bytes()).hexdigest(),
+                "warnings": [],
+            },
         }
     ]
     render.assert_not_called()

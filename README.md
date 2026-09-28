@@ -88,7 +88,16 @@ report.json
 report.md
 ```
 
-Plans use `phase1-sample-v1` provenance and select first bounded samples, not highlights. Horizontal output is 1920×1080. Vertical output is 1080×1920. Long-form timelines must stay strictly below 60 minutes. `status` shows stage and artifact state. `resume` reuses matching valid stages and does not duplicate valid renders.
+Plans use `phase1-sample-v2` provenance and select first bounded samples, not highlights. Horizontal output is 1920×1080. Vertical output is 1080×1920 and center-crops wide footage to fill the vertical frame. Long-form timelines must stay strictly below 60 minutes.
+
+Use the job ID printed by `run` to inspect or resume the same job:
+
+```bash
+video-editor status JOB_ID --config config.toml
+video-editor resume JOB_ID --config config.toml
+```
+
+`resume` validates persisted artifacts and reuses matching completed stages. Valid proxies and extracted audio remain in `<cache_dir>/<job_id>/`; changed plans rerender affected outputs without regenerating those same-job proxies. A new `run` creates a new job ID and job-specific cache directory, so it does not reuse another job's proxy files.
 
 Supported recursive extensions: `.3gp`, `.avi`, `.m2ts`, `.m4v`, `.mkv`, `.mov`, `.mp4`, `.mts`, `.webm`. Unsupported or unreadable candidates are warned or skipped when other valid media remains; inspect report records skipped inputs. GoPro `GOPR####` and `G[A-Z]CCFFFF` names receive conservative chapter/session chronology evidence. Filename ordering is deterministic, not semantic understanding.
 

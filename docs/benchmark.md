@@ -48,7 +48,7 @@ ffprobe -v error -show_format -show_streams \
   /Volumes/TravelSSD/video-editor/output/JOB_ID/short-01.mp4
 ```
 
-Confirm horizontal dimensions are 1920×1080, vertical dimensions are 1080×1920, both MP4 files are readable, and both plans/reports exist. Confirm plan provenance is `phase1-sample-v1`. Verify long timeline is strictly below 3600 seconds.
+Confirm horizontal dimensions are 1920×1080, vertical dimensions are 1080×1920, both MP4 files are readable, and both plans/reports exist. Confirm plan provenance is `phase1-sample-v2` and vertical clips use `center_crop`. Verify long timeline is strictly below 3600 seconds.
 
 Manually inspect filenames and chronology. Check GoPro chapter ordering, session transitions, repeated/reset numbers, and agreement with recorded shooting order. Compare original hashes before and after run. Confirm no network dependency by running only local commands and reviewing report cloud usage `0`.
 

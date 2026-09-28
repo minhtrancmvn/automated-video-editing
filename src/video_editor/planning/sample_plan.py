@@ -19,7 +19,7 @@ from video_editor.models.edit_plan import (
 )
 
 _SAMPLE_SECONDS = Decimal(8)
-_PLANNER_VERSION = "phase1-sample-v1"
+_PLANNER_VERSION = "phase1-sample-v2"
 _FRAME_RATE = Decimal(30)
 _CODEC: Literal["libx264"] = "libx264"
 
@@ -174,7 +174,7 @@ def create_sample_plans(
         paths,
         width=1080,
         height=1920,
-        framing=Framing(mode="fit_background", background="black"),
+        framing=Framing(mode="center_crop"),
         sample_seconds=interval,
         max_sources=max_sources,
     )
