@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "Local-first generic video editor foundation"
 requires-python = ">=3.12"
 dependencies = [
+    "google-genai>=1.0,<2.0",
+    "opencv-python-headless>=4.10,<5",
     "pydantic>=2.0,<3.0",
     "typer>=0.12,<1.0",
 ]

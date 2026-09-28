@@ -63,6 +63,9 @@ EXIT_CODES = {
     ErrorCategory.RENDER: 14,
     ErrorCategory.OUTPUT: 15,
     ErrorCategory.STATE: 16,
+    ErrorCategory.ANALYSIS: 17,
+    ErrorCategory.PROVIDER: 18,
+    ErrorCategory.BUDGET: 19,
 }
 _T = TypeVar("_T")
 
