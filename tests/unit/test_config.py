@@ -81,6 +81,13 @@ def test_phase2_requires_key_only_when_cloud_execution_starts(tmp_path: Path) ->
     assert "secret" not in str(caught.value).lower()
 
 
+@pytest.mark.parametrize("value", ["", "   ", "\t\n"])
+def test_phase2_rejects_blank_gemini_api_key(value: str) -> None:
+    with pytest.raises(VideoEditorError, match="GEMINI_API_KEY") as caught:
+        load_gemini_api_key({"GEMINI_API_KEY": value})
+    assert caught.value.category == ErrorCategory.CONFIGURATION
+
+
 def test_cloud_mode_requires_enabled_gemini(tmp_path: Path) -> None:
     with pytest.raises(VideoEditorError, match="gemini.enabled"):
         resolve_config(write_config(tmp_path, cloud_enabled=True))
@@ -116,6 +123,37 @@ def test_phase2_rejects_weakened_limits(
                 crop=config["crop"],
             )
         )
+
+
+@pytest.mark.parametrize(
+    ("table", "setting"),
+    [
+        ("gemini", "broad_fps"),
+        ("gemini", "max_cost_per_source_hour_usd"),
+        ("highlights", "cross_short_overlap_ratio"),
+        ("crop", "max_velocity_widths_per_second"),
+        ("crop", "max_acceleration_widths_per_second_squared"),
+        ("crop", "safe_margin_ratio"),
+        ("crop", "minimum_subject_retention_ratio"),
+        ("crop", "max_fallback_hold_seconds"),
+    ],
+)
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+def test_phase2_rejects_non_finite_decimal_settings(
+    tmp_path: Path, table: str, setting: str, value: str
+) -> None:
+    config = {"gemini": "", "highlights": "", "crop": ""}
+    config[table] = f'{setting}="{value}"\n'
+    with pytest.raises(VideoEditorError, match=setting) as caught:
+        resolve_config(
+            write_config(
+                tmp_path,
+                gemini=config["gemini"],
+                highlights=config["highlights"],
+                crop=config["crop"],
+            )
+        )
+    assert caught.value.category == ErrorCategory.CONFIGURATION
 
 
 @pytest.mark.parametrize("setting", ["candidate_min_fps", "candidate_max_fps"])

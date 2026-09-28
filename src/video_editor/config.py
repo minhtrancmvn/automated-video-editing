@@ -87,11 +87,14 @@ def _decimal(value: Any, name: str) -> Decimal:
     if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
         raise VideoEditorError(ErrorCategory.CONFIGURATION, f"{name} must be a decimal")
     try:
-        return Decimal(str(value))
+        decimal = Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:
         raise VideoEditorError(
             ErrorCategory.CONFIGURATION, f"{name} must be a decimal"
         ) from exc
+    if not decimal.is_finite():
+        raise VideoEditorError(ErrorCategory.CONFIGURATION, f"{name} must be finite")
+    return decimal
 
 
 def _int(value: Any, name: str) -> int:
@@ -333,7 +336,7 @@ def load_gemini_api_key(env: Mapping[str, str]) -> str:
     """Load runtime-only Gemini credential without storing or exposing it in config."""
 
     key = env.get("GEMINI_API_KEY")
-    if not key:
+    if not key or not key.strip():
         raise VideoEditorError(
             ErrorCategory.CONFIGURATION, "GEMINI_API_KEY is required"
         )
