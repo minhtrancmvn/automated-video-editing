@@ -4,6 +4,9 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from video_editor.analysis.models import RequestReservation
 from video_editor.media.discovery import SourceCandidate
 from video_editor.media.sequencing import sequence_sources
@@ -449,6 +452,242 @@ def test_analysis_manifest_chunk_and_result_round_trip(tmp_path: Path) -> None:
 
     assert state["proxy_manifests"][0]["manifest_id"] == "manifest-1"
     assert state["analysis_results"][0]["result_id"] == "result-1"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"api-key": "manifest-secret"},
+        {"nested": [{"AuthoriZation": "chunk-secret"}]},
+        {"nested": {"credentials": "result-secret"}},
+    ],
+)
+def test_analysis_payloads_reject_secret_like_keys(
+    tmp_path: Path, payload: dict[str, object]
+) -> None:
+    with JobStore(tmp_path / "state.db") as store:
+        job_id = store.create_job("{}", "{}")
+        with pytest.raises(ValueError, match="secret-like key"):
+            store.save_proxy_manifest(job_id, "manifest-1", "digest", payload)
+        store.save_proxy_manifest(job_id, "manifest-1", "digest", {"safe": True})
+        with pytest.raises(ValueError, match="secret-like key"):
+            store.save_analysis_chunk(
+                job_id,
+                "chunk-1",
+                "manifest-1",
+                source_id="source-1",
+                source_start=Decimal(0),
+                source_end=Decimal(1),
+                data=payload,
+            )
+        store.save_analysis_chunk(
+            job_id,
+            "chunk-1",
+            "manifest-1",
+            source_id="source-1",
+            source_start=Decimal(0),
+            source_end=Decimal(1),
+            data={"safe": True},
+        )
+        with pytest.raises(ValueError, match="secret-like key"):
+            store.save_analysis_result(
+                "result-1",
+                job_id,
+                "cache-1",
+                "chunk-1",
+                "broad",
+                payload,
+                validated=True,
+            )
+
+        persisted = store.connection.execute(
+            "SELECT data_json FROM proxy_manifests UNION ALL "
+            "SELECT data_json FROM analysis_chunks"
+        ).fetchall()
+
+    assert "secret" not in json.dumps([row["data_json"] for row in persisted]).lower()
+
+
+def test_analysis_payloads_preserve_approved_keys(tmp_path: Path) -> None:
+    payload = {
+        "token_count": 5,
+        "request_token_count": 7,
+        "keyframe": 12,
+        "cache_key": "safe-cache",
+        "nested": [{"token_count": 3}],
+    }
+    with JobStore(tmp_path / "state.db") as store:
+        job_id = store.create_job("{}", "{}")
+        store.save_proxy_manifest(job_id, "manifest-1", "digest", payload)
+        store.save_analysis_chunk(
+            job_id,
+            "chunk-1",
+            "manifest-1",
+            source_id="source-1",
+            source_start=Decimal(0),
+            source_end=Decimal(1),
+            data=payload,
+        )
+        store.save_analysis_result(
+            "result-1",
+            job_id,
+            "cache-1",
+            "chunk-1",
+            "broad",
+            payload,
+            validated=True,
+        )
+
+        stored_payloads = [
+            json.loads(row["data_json"])
+            for table in ("proxy_manifests", "analysis_chunks", "analysis_results")
+            for row in store.connection.execute(f"SELECT data_json FROM {table}")
+        ]
+
+    assert stored_payloads == [payload, payload, payload]
+
+
+def test_analysis_records_reject_cross_job_identity_conflicts(tmp_path: Path) -> None:
+    with JobStore(tmp_path / "state.db") as store:
+        job_a = store.create_job("{}", "{}")
+        job_b = store.create_job("{}", "{}")
+        store.save_proxy_manifest(job_a, "manifest-a", "digest-a", {"version": 1})
+        store.save_analysis_chunk(
+            job_a,
+            "chunk-a",
+            "manifest-a",
+            source_id="source-a",
+            source_start=Decimal(0),
+            source_end=Decimal(10),
+            data={"revision": 1},
+        )
+        store.save_analysis_result(
+            "result-a",
+            job_a,
+            "cache-a",
+            "chunk-a",
+            "broad",
+            {"revision": 1},
+            validated=True,
+        )
+
+        with pytest.raises(ValueError, match="manifest ID belongs"):
+            store.save_proxy_manifest(job_b, "manifest-a", "digest-b", {"version": 2})
+        with pytest.raises(ValueError, match="proxy manifest belongs"):
+            store.save_analysis_chunk(
+                job_b,
+                "chunk-b",
+                "manifest-a",
+                source_id="source-b",
+                source_start=Decimal(0),
+                source_end=Decimal(10),
+                data={"revision": 2},
+            )
+        store.save_proxy_manifest(job_b, "manifest-b", "digest-b", {"version": 2})
+        with pytest.raises(ValueError, match="chunk ID is already"):
+            store.save_analysis_chunk(
+                job_b,
+                "chunk-a",
+                "manifest-b",
+                source_id="source-a",
+                source_start=Decimal(0),
+                source_end=Decimal(10),
+                data={"revision": 2},
+            )
+        with pytest.raises(ValueError, match="analysis chunk belongs"):
+            store.save_analysis_result(
+                "result-b",
+                job_b,
+                "cache-b",
+                "chunk-a",
+                "broad",
+                {"revision": 2},
+                validated=True,
+            )
+        store.save_analysis_chunk(
+            job_b,
+            "chunk-b",
+            "manifest-b",
+            source_id="source-b",
+            source_start=Decimal(0),
+            source_end=Decimal(10),
+            data={"revision": 2},
+        )
+        with pytest.raises(ValueError, match="result ID or cache key"):
+            store.save_analysis_result(
+                "result-a",
+                job_b,
+                "cache-b",
+                "chunk-b",
+                "broad",
+                {"revision": 2},
+                validated=True,
+            )
+        with pytest.raises(ValueError, match="result ID or cache key"):
+            store.save_analysis_result(
+                "result-b",
+                job_a,
+                "cache-a",
+                "chunk-a",
+                "broad",
+                {"revision": 2},
+                validated=True,
+            )
+
+        manifest = store.connection.execute(
+            "SELECT job_id, digest, data_json FROM proxy_manifests WHERE manifest_id = 'manifest-a'"
+        ).fetchone()
+        chunk = store.connection.execute(
+            "SELECT job_id, manifest_id, source_id, source_start, source_end, data_json "
+            "FROM analysis_chunks WHERE chunk_id = 'chunk-a'"
+        ).fetchone()
+        result = store.connection.execute(
+            "SELECT result_id, job_id, cache_key, chunk_id, data_json "
+            "FROM analysis_results WHERE result_id = 'result-a'"
+        ).fetchone()
+
+    assert tuple(manifest) == (job_a, "digest-a", '{"version":1}')
+    assert tuple(chunk) == (
+        job_a,
+        "manifest-a",
+        "source-a",
+        "0",
+        "10",
+        '{"revision":1}',
+    )
+    assert tuple(result) == ("result-a", job_a, "cache-a", "chunk-a", '{"revision":1}')
+
+
+@pytest.mark.parametrize(
+    ("source_start", "source_end"),
+    [
+        (Decimal("NaN"), Decimal(1)),
+        (Decimal("Infinity"), Decimal(1)),
+        (Decimal("-Infinity"), Decimal(1)),
+        (Decimal(1), Decimal(1)),
+        (Decimal(2), Decimal(1)),
+    ],
+)
+def test_analysis_chunk_rejects_non_finite_or_reversed_ranges(
+    tmp_path: Path, source_start: Decimal, source_end: Decimal
+) -> None:
+    with JobStore(tmp_path / "state.db") as store:
+        job_id = store.create_job("{}", "{}")
+        store.save_proxy_manifest(job_id, "manifest-1", "digest", {})
+        with pytest.raises(ValidationError):
+            store.save_analysis_chunk(
+                job_id,
+                "chunk-1",
+                "manifest-1",
+                source_id="source-1",
+                source_start=source_start,
+                source_end=source_end,
+                data={},
+            )
+
+        assert (
+            store.connection.execute("SELECT * FROM analysis_chunks").fetchall() == []
+        )
 
 
 def test_failed_migration_does_not_advance_version(tmp_path: Path) -> None:

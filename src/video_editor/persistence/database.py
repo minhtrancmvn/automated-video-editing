@@ -14,7 +14,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from video_editor.analysis.models import BudgetState, RequestReservation
+from video_editor.analysis.models import BudgetState, RequestReservation, SourceRange
 from video_editor.errors import ErrorCategory, VideoEditorError
 from video_editor.persistence.migrations import run_migrations
 
@@ -56,6 +56,44 @@ def _row_json(value: str | None) -> Any:
     if value is None:
         return None
     return json.loads(value)
+
+
+_SECRET_KEYS = frozenset(
+    {
+        "api_key",
+        "key",
+        "token",
+        "authorization",
+        "credential",
+        "credentials",
+        "secret",
+        "password",
+    }
+)
+
+
+def _normalize_payload_key(key: object) -> str:
+    return str(key).lower().replace("-", "_").replace(" ", "_")
+
+
+def _json_without_secrets(value: Any) -> str:
+    """Serialize JSON-compatible payload after rejecting secret-like keys."""
+    normalized = _json_value(value)
+
+    def reject_secrets(item: Any) -> None:
+        if isinstance(item, Mapping):
+            for key, nested_value in item.items():
+                if _normalize_payload_key(key) in _SECRET_KEYS:
+                    raise ValueError(
+                        f"analysis payload contains secret-like key: {key}"
+                    )
+                reject_secrets(nested_value)
+        elif isinstance(item, list):
+            for nested_value in item:
+                reject_secrets(nested_value)
+
+    reject_secrets(normalized)
+    return json.dumps(normalized, sort_keys=True, separators=(",", ":"))
 
 
 _MICRO_USD = Decimal(1000000)
@@ -581,8 +619,15 @@ class JobStore:
         data: Any,
     ) -> None:
         """Persist one generated proxy manifest for later upload validation."""
+        data_json = _json_without_secrets(data)
         with self._transaction() as connection:
             self._job_exists(connection, job_id)
+            existing = connection.execute(
+                "SELECT job_id FROM proxy_manifests WHERE manifest_id = ?",
+                (manifest_id,),
+            ).fetchone()
+            if existing is not None and existing["job_id"] != job_id:
+                raise ValueError("manifest ID belongs to another job")
             connection.execute(
                 """INSERT INTO proxy_manifests(
                     job_id, manifest_id, digest, data_json, created_at
@@ -591,7 +636,7 @@ class JobStore:
                     digest=excluded.digest,
                     data_json=excluded.data_json,
                     created_at=excluded.created_at""",
-                (job_id, manifest_id, digest, _json(data), _now()),
+                (job_id, manifest_id, digest, data_json, _now()),
             )
 
     def save_analysis_chunk(
@@ -606,28 +651,49 @@ class JobStore:
         data: Any,
     ) -> None:
         """Persist one source-mapped analysis chunk."""
-        if source_start < 0 or source_end <= source_start:
-            raise ValueError("analysis chunk requires an increasing source range")
+        source_range = SourceRange(
+            source_id=source_id,
+            start=source_start,
+            end=source_end,
+        )
+        data_json = _json_without_secrets(data)
         with self._transaction() as connection:
             self._job_exists(connection, job_id)
+            manifest = connection.execute(
+                "SELECT job_id FROM proxy_manifests WHERE manifest_id = ?",
+                (manifest_id,),
+            ).fetchone()
+            if manifest is None:
+                raise KeyError(f"unknown proxy manifest: {manifest_id}")
+            if manifest["job_id"] != job_id:
+                raise ValueError("proxy manifest belongs to another job")
+            existing = connection.execute(
+                """SELECT job_id, manifest_id, source_id, source_start, source_end
+                FROM analysis_chunks WHERE chunk_id = ?""",
+                (chunk_id,),
+            ).fetchone()
+            if existing is not None and (
+                existing["job_id"] != job_id
+                or existing["manifest_id"] != manifest_id
+                or existing["source_id"] != source_range.source_id
+                or existing["source_start"] != format(source_range.start, "f")
+                or existing["source_end"] != format(source_range.end, "f")
+            ):
+                raise ValueError("chunk ID is already assigned to another identity")
             connection.execute(
                 """INSERT INTO analysis_chunks(
                     job_id, chunk_id, manifest_id, source_id,
                     source_start, source_end, data_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(chunk_id) DO UPDATE SET
-                    source_id=excluded.source_id,
-                    source_start=excluded.source_start,
-                    source_end=excluded.source_end,
-                    data_json=excluded.data_json""",
+                ON CONFLICT(chunk_id) DO UPDATE SET data_json=excluded.data_json""",
                 (
                     job_id,
                     chunk_id,
                     manifest_id,
-                    source_id,
-                    format(source_start, "f"),
-                    format(source_end, "f"),
-                    _json(data),
+                    source_range.source_id,
+                    format(source_range.start, "f"),
+                    format(source_range.end, "f"),
+                    data_json,
                 ),
             )
 
@@ -643,15 +709,35 @@ class JobStore:
         validated: bool,
     ) -> None:
         """Persist one provider-neutral normalized analysis result."""
+        data_json = _json_without_secrets(data)
         with self._transaction() as connection:
             self._job_exists(connection, job_id)
+            chunk = connection.execute(
+                "SELECT job_id FROM analysis_chunks WHERE chunk_id = ?",
+                (chunk_id,),
+            ).fetchone()
+            if chunk is None:
+                raise KeyError(f"unknown analysis chunk: {chunk_id}")
+            if chunk["job_id"] != job_id:
+                raise ValueError("analysis chunk belongs to another job")
+            conflicting = connection.execute(
+                """SELECT result_id, job_id, cache_key FROM analysis_results
+                WHERE result_id = ? OR (job_id = ? AND cache_key = ?)""",
+                (result_id, job_id, cache_key),
+            ).fetchall()
+            if conflicting and any(
+                row["result_id"] != result_id
+                or row["job_id"] != job_id
+                or row["cache_key"] != cache_key
+                for row in conflicting
+            ):
+                raise ValueError("result ID or cache key is already assigned")
             connection.execute(
                 """INSERT INTO analysis_results(
                     result_id, job_id, cache_key, chunk_id, mode,
                     validated, data_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(job_id, cache_key) DO UPDATE SET
-                    result_id=excluded.result_id,
                     chunk_id=excluded.chunk_id,
                     mode=excluded.mode,
                     validated=excluded.validated,
@@ -663,7 +749,7 @@ class JobStore:
                     chunk_id,
                     mode,
                     int(validated),
-                    _json(data),
+                    data_json,
                 ),
             )
 
