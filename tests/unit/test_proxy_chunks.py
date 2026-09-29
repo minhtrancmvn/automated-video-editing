@@ -155,8 +155,8 @@ def test_chunk_ranges_cover_source_once_and_split_near_safe_boundaries() -> None
 
     assert ranges == [
         (D("0"), D("710")),
-        (D("710"), D("1430")),
-        (D("1430"), D("2000")),
+        (D("710"), D("1400")),
+        (D("1400"), D("2000")),
     ]
     assert ranges[0][0] == D("0")
     assert ranges[-1][1] == D("2000")
@@ -196,6 +196,13 @@ def test_chunk_ranges_choose_boundary_that_leaves_valid_final_remainder() -> Non
 
 def test_chunk_ranges_balance_fixed_split_to_avoid_short_final_remainder() -> None:
     assert plan_chunk_ranges(D("1250"), [], CloudProxySettings()) == [
+        (D("0"), D("650")),
+        (D("650"), D("1250")),
+    ]
+
+
+def test_chunk_ranges_ignore_safe_boundary_that_leaves_avoidable_short_tail() -> None:
+    assert plan_chunk_ranges(D("1250"), [D("700")], CloudProxySettings()) == [
         (D("0"), D("650")),
         (D("650"), D("1250")),
     ]

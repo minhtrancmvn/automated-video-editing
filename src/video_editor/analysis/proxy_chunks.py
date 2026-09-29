@@ -148,10 +148,9 @@ def plan_chunk_ranges(
             for boundary in boundaries
             if can_partition(source_duration - boundary)
         ]
-        eligible = partitioned or boundaries
         end = (
-            min(eligible, key=lambda value: (abs(value - target), value))
-            if eligible
+            min(partitioned, key=lambda value: (abs(value - target), value))
+            if partitioned
             else fixed_end(start)
         )
         if end <= start or end >= source_duration:
