@@ -6,12 +6,17 @@ import inspect
 import json
 import sqlite3
 import uuid
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
+
+from video_editor.analysis.models import BudgetState, RequestReservation
+from video_editor.errors import ErrorCategory, VideoEditorError
+from video_editor.persistence.migrations import run_migrations
 
 
 class JobStatus(StrEnum):
@@ -53,6 +58,23 @@ def _row_json(value: str | None) -> Any:
     return json.loads(value)
 
 
+_MICRO_USD = Decimal(1000000)
+_SQLITE_MAX_INTEGER = 2**63 - 1
+
+
+def _usd_to_microusd(amount: Decimal, rounding: str) -> int:
+    if not amount.is_finite() or amount < 0:
+        raise ValueError("USD amount must be finite and non-negative")
+    microusd = int((amount * _MICRO_USD).to_integral_value(rounding=rounding))
+    if microusd > _SQLITE_MAX_INTEGER:
+        raise OverflowError("USD amount exceeds SQLite integer range")
+    return microusd
+
+
+def _microusd_to_usd(amount: int) -> Decimal:
+    return Decimal(amount) / _MICRO_USD
+
+
 class JobStore:
     """Context manager and repository for persistent job state."""
 
@@ -68,9 +90,10 @@ class JobStore:
 
     def __enter__(self) -> JobStore:  # noqa: PYI034
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._connection = sqlite3.connect(self.db_path)
+        self._connection = sqlite3.connect(self.db_path, timeout=30)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA foreign_keys = ON")
+        self._connection.execute("PRAGMA busy_timeout = 30000")
         self._create_schema()
         return self
 
@@ -181,6 +204,17 @@ class JobStore:
                 "INSERT OR IGNORE INTO schema_metadata(key, value) VALUES (?, ?)",
                 ("migration_version", "1"),
             )
+        run_migrations(self.connection)
+
+    def migration_version(self) -> int:
+        """Return current ordered schema migration version."""
+        row = self.connection.execute(
+            "SELECT value FROM schema_metadata WHERE key = ?",
+            ("migration_version",),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("database is missing migration version metadata")
+        return int(row["value"])
 
     def create_job(self, config_json: Any, volume_json: Any) -> str:
         job_id = str(uuid.uuid4())
@@ -527,6 +561,369 @@ class JobStore:
             "artifacts": checked,
         }
 
+    def save_proxy_manifest(
+        self,
+        job_id: str,
+        manifest_id: str,
+        digest: str,
+        data: Any,
+    ) -> None:
+        """Persist one generated proxy manifest for later upload validation."""
+        with self._transaction() as connection:
+            self._job_exists(connection, job_id)
+            connection.execute(
+                """INSERT INTO proxy_manifests(
+                    job_id, manifest_id, digest, data_json, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(manifest_id) DO UPDATE SET
+                    digest=excluded.digest,
+                    data_json=excluded.data_json,
+                    created_at=excluded.created_at""",
+                (job_id, manifest_id, digest, _json(data), _now()),
+            )
+
+    def save_analysis_chunk(
+        self,
+        job_id: str,
+        chunk_id: str,
+        manifest_id: str,
+        *,
+        source_id: str,
+        source_start: Decimal,
+        source_end: Decimal,
+        data: Any,
+    ) -> None:
+        """Persist one source-mapped analysis chunk."""
+        if source_start < 0 or source_end <= source_start:
+            raise ValueError("analysis chunk requires an increasing source range")
+        with self._transaction() as connection:
+            self._job_exists(connection, job_id)
+            connection.execute(
+                """INSERT INTO analysis_chunks(
+                    job_id, chunk_id, manifest_id, source_id,
+                    source_start, source_end, data_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(chunk_id) DO UPDATE SET
+                    source_id=excluded.source_id,
+                    source_start=excluded.source_start,
+                    source_end=excluded.source_end,
+                    data_json=excluded.data_json""",
+                (
+                    job_id,
+                    chunk_id,
+                    manifest_id,
+                    source_id,
+                    format(source_start, "f"),
+                    format(source_end, "f"),
+                    _json(data),
+                ),
+            )
+
+    def save_analysis_result(
+        self,
+        result_id: str,
+        job_id: str,
+        cache_key: str,
+        chunk_id: str,
+        mode: Literal["broad", "candidate"],
+        data: Any,
+        *,
+        validated: bool,
+    ) -> None:
+        """Persist one provider-neutral normalized analysis result."""
+        with self._transaction() as connection:
+            self._job_exists(connection, job_id)
+            connection.execute(
+                """INSERT INTO analysis_results(
+                    result_id, job_id, cache_key, chunk_id, mode,
+                    validated, data_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(job_id, cache_key) DO UPDATE SET
+                    result_id=excluded.result_id,
+                    chunk_id=excluded.chunk_id,
+                    mode=excluded.mode,
+                    validated=excluded.validated,
+                    data_json=excluded.data_json""",
+                (
+                    result_id,
+                    job_id,
+                    cache_key,
+                    chunk_id,
+                    mode,
+                    int(validated),
+                    _json(data),
+                ),
+            )
+
+    def find_analysis_result(
+        self, job_id: str, cache_key: str
+    ) -> dict[str, Any] | None:
+        """Return one cached analysis result regardless of validation state."""
+        row = self.connection.execute(
+            "SELECT * FROM analysis_results WHERE job_id = ? AND cache_key = ?",
+            (job_id, cache_key),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "result_id": row["result_id"],
+            "job_id": row["job_id"],
+            "cache_key": row["cache_key"],
+            "chunk_id": row["chunk_id"],
+            "mode": row["mode"],
+            "validated": bool(row["validated"]),
+            "data": _row_json(row["data_json"]),
+        }
+
+    def initialize_budget(self, job_id: str, limit_usd: Decimal) -> None:
+        """Create an exact job budget without mutating an existing account."""
+        limit_microusd = _usd_to_microusd(limit_usd, ROUND_FLOOR)
+        with self._transaction() as connection:
+            self._job_exists(connection, job_id)
+            row = connection.execute(
+                "SELECT limit_microusd FROM budget_accounts WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is not None:
+                if int(row["limit_microusd"]) != limit_microusd:
+                    raise ValueError("job budget is already initialized")
+                return
+            connection.execute(
+                "INSERT INTO budget_accounts(job_id, limit_microusd) VALUES (?, ?)",
+                (job_id, limit_microusd),
+            )
+
+    def _reserve_request(
+        self,
+        connection: sqlite3.Connection,
+        reservation: RequestReservation,
+    ) -> str | None:
+        cached = connection.execute(
+            """SELECT 1 FROM analysis_results
+            WHERE job_id = ? AND cache_key = ? AND validated = 1""",
+            (reservation.job_id, reservation.cache_key),
+        ).fetchone()
+        if cached is not None:
+            return None
+        existing = connection.execute(
+            """SELECT request_id, status FROM analysis_requests
+            WHERE job_id = ? AND cache_key = ?""",
+            (reservation.job_id, reservation.cache_key),
+        ).fetchone()
+        if existing is not None:
+            if existing["request_id"] != reservation.request_id:
+                raise ValueError("cache key is already assigned to another request")
+            if existing["status"] in {
+                "reserved",
+                "dispatched",
+                "billing_unknown",
+                "completed",
+            }:
+                return str(existing["request_id"])
+        account = connection.execute(
+            """SELECT limit_microusd, spent_microusd, reserved_microusd
+            FROM budget_accounts WHERE job_id = ?""",
+            (reservation.job_id,),
+        ).fetchone()
+        if account is None:
+            raise KeyError(f"budget is not initialized: {reservation.job_id}")
+        maximum = _usd_to_microusd(reservation.maximum_cost_usd, ROUND_CEILING)
+        if (
+            account["spent_microusd"] + account["reserved_microusd"] + maximum
+            > account["limit_microusd"]
+        ):
+            raise VideoEditorError(
+                ErrorCategory.BUDGET,
+                "request exceeds job budget",
+                code="budget_exhausted",
+            )
+        if existing is not None:
+            connection.execute(
+                """UPDATE analysis_requests SET
+                    status = 'reserved', maximum_cost_microusd = ?,
+                    actual_cost_microusd = NULL, data_json = ?
+                WHERE request_id = ?""",
+                (maximum, reservation.model_dump_json(), reservation.request_id),
+            )
+        else:
+            connection.execute(
+                """INSERT INTO analysis_requests(
+                    request_id, job_id, cache_key, mode, status,
+                    maximum_cost_microusd, actual_cost_microusd, data_json
+                ) VALUES (?, ?, ?, ?, 'reserved', ?, NULL, ?)""",
+                (
+                    reservation.request_id,
+                    reservation.job_id,
+                    reservation.cache_key,
+                    reservation.mode,
+                    maximum,
+                    reservation.model_dump_json(),
+                ),
+            )
+        connection.execute(
+            """UPDATE budget_accounts
+            SET reserved_microusd = reserved_microusd + ? WHERE job_id = ?""",
+            (maximum, reservation.job_id),
+        )
+        return reservation.request_id
+
+    def reserve_request(self, reservation: RequestReservation) -> str | None:
+        """Reserve a request maximum under an immediate SQLite write lock."""
+        connection = self.connection
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            request_id = self._reserve_request(connection, reservation)
+        except BaseException:
+            connection.rollback()
+            raise
+        else:
+            connection.commit()
+            return request_id
+
+    def reserve_request_batch(
+        self,
+        job_id: str,
+        requests: Sequence[RequestReservation],
+    ) -> tuple[str, ...]:
+        """Atomically reserve all uncached broad requests for one job."""
+        if any(request.job_id != job_id for request in requests):
+            raise ValueError("all reservations must belong to the requested job")
+        if any(request.mode != "broad" for request in requests):
+            raise ValueError("batch preflight accepts only broad requests")
+        connection = self.connection
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            request_ids = tuple(
+                request_id
+                for request in requests
+                if (request_id := self._reserve_request(connection, request))
+                is not None
+            )
+        except BaseException:
+            connection.rollback()
+            raise
+        else:
+            connection.commit()
+            return request_ids
+
+    def _request_for_update(
+        self, connection: sqlite3.Connection, request_id: str
+    ) -> sqlite3.Row:
+        row = connection.execute(
+            "SELECT * FROM analysis_requests WHERE request_id = ?", (request_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown analysis request: {request_id}")
+        return cast(sqlite3.Row, row)
+
+    def mark_request_dispatched(self, request_id: str) -> None:
+        """Record that provider dispatch began while preserving reservation."""
+        with self._transaction() as connection:
+            row = self._request_for_update(connection, request_id)
+            if row["status"] != "reserved":
+                raise ValueError("only a reserved request can be dispatched")
+            connection.execute(
+                "UPDATE analysis_requests SET status = 'dispatched' WHERE request_id = ?",
+                (request_id,),
+            )
+
+    def mark_request_billing_unknown(self, request_id: str) -> None:
+        """Retain reservation when provider billing outcome is unknown."""
+        with self._transaction() as connection:
+            row = self._request_for_update(connection, request_id)
+            if row["status"] not in {"reserved", "dispatched"}:
+                raise ValueError("request billing outcome cannot become unknown")
+            connection.execute(
+                """UPDATE analysis_requests SET status = 'billing_unknown'
+                WHERE request_id = ?""",
+                (request_id,),
+            )
+
+    def settle_request(self, request_id: str, actual_cost_usd: Decimal) -> None:
+        """Replace full reservation with provider-confirmed actual cost."""
+        actual = _usd_to_microusd(actual_cost_usd, ROUND_CEILING)
+        with self._transaction() as connection:
+            row = self._request_for_update(connection, request_id)
+            if row["status"] not in {"reserved", "dispatched", "billing_unknown"}:
+                raise ValueError("request cannot be settled from its current state")
+            maximum = int(row["maximum_cost_microusd"])
+            if actual > maximum:
+                raise VideoEditorError(
+                    ErrorCategory.BUDGET,
+                    "actual request cost exceeds reservation",
+                    code="actual_cost_exceeds_reservation",
+                )
+            connection.execute(
+                """UPDATE budget_accounts
+                SET reserved_microusd = reserved_microusd - ?,
+                    spent_microusd = spent_microusd + ?
+                WHERE job_id = ?""",
+                (maximum, actual, row["job_id"]),
+            )
+            connection.execute(
+                """UPDATE analysis_requests
+                SET status = 'completed', actual_cost_microusd = ?
+                WHERE request_id = ?""",
+                (actual, request_id),
+            )
+
+    def release_confirmed_nonbillable(self, request_id: str) -> None:
+        """Release reservation after confirmed non-billable provider failure."""
+        with self._transaction() as connection:
+            row = self._request_for_update(connection, request_id)
+            if row["status"] not in {"reserved", "dispatched", "billing_unknown"}:
+                raise ValueError("request cannot be released from its current state")
+            connection.execute(
+                """UPDATE budget_accounts
+                SET reserved_microusd = reserved_microusd - ? WHERE job_id = ?""",
+                (row["maximum_cost_microusd"], row["job_id"]),
+            )
+            connection.execute(
+                """UPDATE analysis_requests
+                SET status = 'released', actual_cost_microusd = 0
+                WHERE request_id = ?""",
+                (request_id,),
+            )
+
+    def reconcile_unknown_request(
+        self,
+        request_id: str,
+        *,
+        provider_confirmed_actual_cost_usd: Decimal | None = None,
+        confirmed_nonbillable: bool = False,
+    ) -> None:
+        """Resolve unknown billing from exactly one provider-confirmed outcome."""
+        if (provider_confirmed_actual_cost_usd is None) == (not confirmed_nonbillable):
+            raise ValueError("exactly one confirmed billing outcome is required")
+        row = self.connection.execute(
+            "SELECT status FROM analysis_requests WHERE request_id = ?", (request_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown analysis request: {request_id}")
+        if row["status"] != "billing_unknown":
+            raise ValueError("only billing_unknown requests can be reconciled")
+        if provider_confirmed_actual_cost_usd is not None:
+            self.settle_request(request_id, provider_confirmed_actual_cost_usd)
+        else:
+            self.release_confirmed_nonbillable(request_id)
+
+    def budget_state(self, job_id: str) -> BudgetState:
+        """Return exact budget totals for one job."""
+        row = self.connection.execute(
+            "SELECT * FROM budget_accounts WHERE job_id = ?", (job_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"budget is not initialized: {job_id}")
+        limit = int(row["limit_microusd"])
+        spent = int(row["spent_microusd"])
+        reserved = int(row["reserved_microusd"])
+        return BudgetState(
+            limit_usd=_microusd_to_usd(limit),
+            spent_usd=_microusd_to_usd(spent),
+            reserved_usd=_microusd_to_usd(reserved),
+            remaining_usd=_microusd_to_usd(limit - spent - reserved),
+        )
+
     def get_job(self, job_id: str) -> dict[str, Any]:
         job = self.connection.execute(
             "SELECT * FROM jobs WHERE id = ?", (job_id,)
@@ -545,6 +942,13 @@ class JobStore:
         ).fetchall()
         artifacts = self.connection.execute(
             "SELECT * FROM artifacts WHERE job_id = ? ORDER BY id", (job_id,)
+        ).fetchall()
+        proxy_manifests = self.connection.execute(
+            "SELECT * FROM proxy_manifests WHERE job_id = ? ORDER BY id", (job_id,)
+        ).fetchall()
+        analysis_results = self.connection.execute(
+            "SELECT * FROM analysis_results WHERE job_id = ? ORDER BY rowid",
+            (job_id,),
         ).fetchall()
         return {
             "job_id": job["id"],
@@ -576,5 +980,25 @@ class JobStore:
                     "metadata": _row_json(row["metadata_json"]),
                 }
                 for row in artifacts
+            ],
+            "proxy_manifests": [
+                {
+                    "manifest_id": row["manifest_id"],
+                    "digest": row["digest"],
+                    "data": _row_json(row["data_json"]),
+                    "created_at": row["created_at"],
+                }
+                for row in proxy_manifests
+            ],
+            "analysis_results": [
+                {
+                    "result_id": row["result_id"],
+                    "cache_key": row["cache_key"],
+                    "chunk_id": row["chunk_id"],
+                    "mode": row["mode"],
+                    "validated": bool(row["validated"]),
+                    "data": _row_json(row["data_json"]),
+                }
+                for row in analysis_results
             ],
         }

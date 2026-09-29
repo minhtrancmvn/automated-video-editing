@@ -1,9 +1,14 @@
+import json
+import sqlite3
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
+from video_editor.analysis.models import RequestReservation
 from video_editor.media.discovery import SourceCandidate
 from video_editor.media.sequencing import sequence_sources
 from video_editor.persistence.database import JobStatus, JobStore, StageStatus
+from video_editor.persistence.migrations import LATEST_MIGRATION_VERSION
 
 
 def test_failed_stage_retains_prior_completed_stage(tmp_path: Path) -> None:
@@ -308,3 +313,214 @@ def test_complete_job_requires_all_stages_completed(tmp_path: Path) -> None:
         store.complete_stage(job, "inspect")
         store.complete_job(job)
         assert store.get_job(job)["status"] == JobStatus.COMPLETED
+
+
+def _create_version_one_fixture(db_path: Path) -> None:
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE schema_metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE jobs (
+                id TEXT PRIMARY KEY,
+                config_json TEXT NOT NULL,
+                volume_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE job_stages (
+                id INTEGER PRIMARY KEY,
+                job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                input_fingerprint TEXT NOT NULL,
+                settings_hash TEXT NOT NULL,
+                implementation_version TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at TEXT,
+                completed_at TEXT,
+                error_json TEXT,
+                result_json TEXT,
+                UNIQUE(job_id, name)
+            );
+            CREATE TABLE sources (
+                id INTEGER PRIMARY KEY,
+                job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                source_id TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                UNIQUE(job_id, source_id)
+            );
+            CREATE TABLE chronology_groups (
+                id INTEGER PRIMARY KEY,
+                job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                group_id TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                UNIQUE(job_id, group_id)
+            );
+            CREATE TABLE artifacts (
+                id INTEGER PRIMARY KEY,
+                job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                stage_name TEXT NOT NULL,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL,
+                metadata_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(job_id, stage_name, name)
+            );
+            INSERT INTO schema_metadata(key, value)
+            VALUES ('migration_version', '1');
+            INSERT INTO jobs(
+                id, config_json, volume_json, status, created_at, updated_at
+            ) VALUES (
+                'existing', '{"phase":1}', '{}', 'completed',
+                '2026-09-28T00:00:00+00:00', '2026-09-28T00:00:00+00:00'
+            );
+            """
+        )
+
+
+def test_version_one_database_migrates_without_losing_jobs(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.db"
+    _create_version_one_fixture(db_path)
+
+    with JobStore(db_path) as store:
+        assert store.migration_version() == LATEST_MIGRATION_VERSION
+        assert store.get_job("existing")["status"] == "completed"
+        assert store.get_job("existing")["config"] == {"phase": 1}
+
+
+def test_new_database_has_latest_schema_without_rewriting_phase_one_tables(
+    tmp_path: Path,
+) -> None:
+    with JobStore(tmp_path / "state.db") as store:
+        assert store.migration_version() == LATEST_MIGRATION_VERSION
+        columns = store.connection.execute("PRAGMA table_info(jobs)").fetchall()
+
+    assert [column["name"] for column in columns] == [
+        "id",
+        "config_json",
+        "volume_json",
+        "status",
+        "created_at",
+        "updated_at",
+    ]
+
+
+def test_analysis_manifest_chunk_and_result_round_trip(tmp_path: Path) -> None:
+    with JobStore(tmp_path / "state.db") as store:
+        job_id = store.create_job("{}", "{}")
+        store.save_proxy_manifest(
+            job_id,
+            "manifest-1",
+            "sha256:abc",
+            {"path": "/generated/chunk.mp4", "mapping_version": "v1"},
+        )
+        store.save_analysis_chunk(
+            job_id,
+            "chunk-1",
+            "manifest-1",
+            source_id="source-1",
+            source_start=Decimal("1.25"),
+            source_end=Decimal("10.5"),
+            data={"fps": "0.5"},
+        )
+        store.save_analysis_result(
+            "result-1",
+            job_id,
+            "cache-1",
+            "chunk-1",
+            "broad",
+            {"scenes": []},
+            validated=True,
+        )
+
+        assert store.find_analysis_result(job_id, "cache-1") == {
+            "result_id": "result-1",
+            "job_id": job_id,
+            "cache_key": "cache-1",
+            "chunk_id": "chunk-1",
+            "mode": "broad",
+            "validated": True,
+            "data": {"scenes": []},
+        }
+        state = store.get_job(job_id)
+
+    assert state["proxy_manifests"][0]["manifest_id"] == "manifest-1"
+    assert state["analysis_results"][0]["result_id"] == "result-1"
+
+
+def test_failed_migration_does_not_advance_version(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.db"
+    _create_version_one_fixture(db_path)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "CREATE TABLE proxy_manifests (id INTEGER PRIMARY KEY, marker TEXT)"
+        )
+
+    try:
+        with JobStore(db_path):
+            pass
+    except sqlite3.OperationalError:
+        pass
+    else:
+        raise AssertionError("conflicting migration unexpectedly succeeded")
+
+    with sqlite3.connect(db_path) as connection:
+        version = connection.execute(
+            "SELECT value FROM schema_metadata WHERE key = 'migration_version'"
+        ).fetchone()
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+
+    assert version == ("1",)
+    assert "analysis_chunks" not in tables
+
+
+def test_analysis_records_never_add_api_key_columns(tmp_path: Path) -> None:
+    with JobStore(tmp_path / "state.db") as store:
+        tables = [
+            "proxy_manifests",
+            "analysis_chunks",
+            "analysis_requests",
+            "analysis_results",
+            "budget_accounts",
+        ]
+        columns = {
+            table: [
+                row["name"]
+                for row in store.connection.execute(f"PRAGMA table_info({table})")
+            ]
+            for table in tables
+        }
+
+    assert "api_key" not in json.dumps(columns).lower()
+
+
+def test_budget_uses_integer_microusd_storage(tmp_path: Path) -> None:
+    with JobStore(tmp_path / "state.db") as store:
+        job_id = store.create_job("{}", "{}")
+        store.initialize_budget(job_id, Decimal("1.0000009"))
+        request_id = store.reserve_request(
+            RequestReservation(
+                request_id="request-1",
+                job_id=job_id,
+                cache_key="cache-1",
+                mode="broad",
+                maximum_cost_usd=Decimal("0.1000001"),
+            )
+        )
+        assert request_id == "request-1"
+        account = store.connection.execute(
+            "SELECT limit_microusd, reserved_microusd FROM budget_accounts WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+
+        assert account is not None
+        assert tuple(account) == (1_000_000, 100_001)
+        assert store.budget_state(job_id).reserved_usd == Decimal("0.100001")
