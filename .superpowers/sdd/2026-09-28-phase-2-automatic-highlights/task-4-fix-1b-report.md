@@ -166,3 +166,120 @@ Build outputs were removed afterward. Full suite is offline/non-live; no Gemini 
 - `create_cloud_proxy_chunk` keeps `store` optional for backward compatibility with existing direct callers. Upload remains fail-closed and always requires persisted Phase 1 evidence. Callers that require creation-time persisted validation must supply `store`; current registered Task 4 path does.
 - AAC `bit_rate` from ffprobe measures observed average, not encoder option. Silent media encoded with `-b:a 64k` reports far below 64 kbps. Exact observed equality to 64000 would reject valid output, so encoder target and observed upper bound are validated separately.
 - GitNexus refresh generated unrelated tracked/untracked instruction files in isolated worktree. They were intentionally excluded from Task 4 commit.
+
+## Round 1B.1 Remediation
+
+Date: 2026-09-30
+
+### Status
+
+Complete. Closed three remaining Important findings without weakening descriptor-bound authorization or job-scoped reads. No network/live Gemini use. No subagents dispatched.
+
+### Pre-Edit GitNexus Impact
+
+- `_parse_probe_payload`: `UNKNOWN`; exact text references confirmed local generation/registration parser usage.
+- `register_proxy_manifest`: LOW; 0 direct indexed callers; 0 affected processes.
+- `_validate_candidate_path`: LOW; 1 direct caller (`validate_upload_candidate`); 1 affected process.
+- `validate_upload_candidate`: LOW; 0 indexed callers/processes; test callers confirmed by text search.
+- `create_cloud_proxy_chunk`: LOW; 0 indexed callers/processes; direct test callers confirmed by text search.
+- `ProxyManifest`: LOW; 0 indexed dependants/processes; construction references confirmed by text search.
+- No HIGH or CRITICAL result occurred.
+
+### Exact Observed RED Evidence
+
+All required regressions failed before production edits:
+
+```text
+uv run pytest tests/unit/test_proxy_chunks.py::test_upload_capable_creation_requires_persisted_phase1_store -q
+FAILED: DID NOT RAISE any of (TypeError, VideoEditorError)
+
+uv run pytest tests/unit/test_proxy_chunks.py::test_registration_rejects_generated_media_with_extra_subtitle_stream -q
+FAILED: DID NOT RAISE VideoEditorError
+
+uv run pytest tests/unit/test_proxy_chunks.py::test_registration_rejects_caller_forged_32kbps_media -q
+FAILED: DID NOT RAISE VideoEditorError
+
+uv run pytest tests/unit/test_proxy_chunks.py::test_missing_cross_job_source_copy_is_globally_protected -q
+FAILED: DID NOT RAISE VideoEditorError
+
+uv run pytest tests/unit/test_proxy_chunks.py::test_malformed_persisted_source_identity_fails_closed -q
+FAILED: DID NOT RAISE VideoEditorError
+```
+
+### GREEN Changes
+
+- Exact stream policy now requires exactly two total streams: one video and one audio. Subtitle, attachment, data, and other extra streams fail registration.
+- Generation records an HMAC proof in a private weak identity registry, bound to manifest ID, SHA-256 digest, device, inode, and size. Registration consumes this process-private proof after descriptor-bound media checks. Proof is not exposed on caller-visible manifest, so caller-reconstructed manifests, including 32 kbps media claiming a 64 kbps target, cannot register.
+- Observed AAC bitrate remains content-sensitive and is not compared for exact equality with 64000, preserving silent VBR support.
+- Upload parses every persisted source record. Path, fingerprint, identity version, and size must be complete and valid; malformed records fail closed.
+- Upload computes bounded fingerprint from already-open candidate descriptor and rejects matches against every persisted source fingerprint, including deleted/missing-path records and copied bytes under new inode/path.
+- Upload-capable `create_cloud_proxy_chunk` now requires `JobStore`; persisted Phase 1 mapping verification is unconditional before generation.
+- Existing one-open/no-follow digest, ffprobe, and uploader-stream contract remains intact. Expected-job SQL scoping remains intact.
+
+Direct regression GREEN:
+
+```text
+5 passed in 0.93s
+```
+
+Focused GREEN:
+
+```text
+uv run pytest tests/unit/test_proxy_chunks.py tests/unit/test_proxies.py -q
+117 passed in 8.99s
+```
+
+### Final Verification
+
+```text
+uv run pytest -q
+505 passed in 71.02s
+
+uv run mypy src
+Success: no issues found in 27 source files
+
+uv run ruff check .
+All checks passed!
+
+uv run ruff format --check src tests
+51 files already formatted
+
+uv build
+Successfully built dist/video_editor-0.1.0.tar.gz
+Successfully built dist/video_editor-0.1.0-py3-none-any.whl
+
+git diff --check
+passed with no output
+```
+
+Build outputs removed after verification.
+
+GitNexus compare against `main`:
+
+```text
+changed_count: 114
+changed_files: 29
+affected_count: 0
+risk_level: low
+affected_processes: []
+partial/truncated: false
+```
+
+Comparison includes all Phase 2 feature changes since `main`, not only round 1B.1.
+
+### Files Changed
+
+- `src/video_editor/analysis/proxy_chunks.py`
+- `tests/unit/test_proxy_chunks.py`
+- `.superpowers/sdd/2026-09-28-phase-2-automatic-highlights/task-4-fix-1b-report.md`
+
+`task_plan.md` remains an uncommitted execution artifact. GitNexus-generated instruction/skill changes remain excluded.
+
+### Self-Review and Concerns
+
+- Trusted proof is intentionally process-private and ephemeral. A manifest generated in one process must register in that same process. Weak object identity permits transactional registration retry while preventing caller-reconstructed objects from inheriting trust. Persisted registration remains durable for later upload authorization.
+- Proof stays outside caller-visible manifest in a private weak identity registry; verification uses constant-time `hmac.compare_digest` and binds exact inspected file identity/facts.
+- Every persisted source record now participates in global deny checks even when its path no longer resolves.
+- Missing unrelated but complete source records remain upload-compatible unless candidate fingerprint matches.
+- Fail-closed malformed legacy source records block upload. No implicit legacy bypass exists.
+- No remaining known round 1B.1 concern.

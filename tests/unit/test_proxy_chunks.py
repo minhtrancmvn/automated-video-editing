@@ -50,6 +50,25 @@ class RegisteredChunk:
     source: Path
 
 
+@dataclass(frozen=True)
+class PersistedMappingStore:
+    mapping: ProxyMapping
+
+    def get_proxy_artifact_metadata(
+        self, job_id: str, source_id: str
+    ) -> dict[str, object]:
+        assert source_id == self.mapping.source_id
+        return {
+            "source_identity": self.mapping.source_identity,
+            "settings_hash": self.mapping.settings_hash,
+            "tool_version": self.mapping.tool_version,
+            "mapping": {
+                key: str(value) if isinstance(value, Decimal) else value
+                for key, value in self.mapping.__dict__.items()
+            },
+        }
+
+
 def _paths(tmp_path: Path) -> PathSettings:
     return PathSettings(
         input_dir=tmp_path / "input",
@@ -481,6 +500,38 @@ def test_creation_rejects_mapping_that_differs_from_persisted_phase1(
             )
 
 
+def test_upload_capable_creation_requires_persisted_phase1_store(
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    source = create_media_fixture(
+        paths.input_dir / "source.mp4", with_audio=True, duration_seconds=2
+    )
+    fingerprint = bounded_fingerprint(source)
+    mapping = ProxyMapping(
+        source_id="source-1",
+        source_start=D("0"),
+        source_end=D("2"),
+        proxy_start=D("0"),
+        proxy_end=D("2"),
+        source_identity=f"{IDENTITY_VERSION}:{fingerprint}",
+        settings_hash="phase1-settings",
+        tool_version="ffmpeg-test",
+    )
+
+    with pytest.raises((TypeError, VideoEditorError), match="store|persisted"):
+        create_cloud_proxy_chunk(
+            source,
+            paths.cache_dir / "job-1",
+            mapping,
+            D("0"),
+            D("1.5"),
+            job_id="job-1",
+            source_fingerprint=fingerprint,
+            paths=paths,
+        )
+
+
 def test_generation_ignores_predictable_partial_links_and_preserves_source(
     tmp_path: Path,
 ) -> None:
@@ -519,6 +570,7 @@ def test_generation_ignores_predictable_partial_links_and_preserves_source(
         job_id="job-1",
         source_fingerprint=fingerprint,
         paths=paths,
+        store=PersistedMappingStore(mapping),  # type: ignore[arg-type]
     )
 
     assert source.read_bytes() == original
@@ -560,6 +612,7 @@ def test_generation_rejects_hardlinked_source_without_modifying_it(
             job_id="job-1",
             source_fingerprint=fingerprint,
             paths=paths,
+            store=PersistedMappingStore(mapping),  # type: ignore[arg-type]
         )
 
     assert source.read_bytes() == original
@@ -634,6 +687,7 @@ def test_generation_keeps_private_random_temp_open_during_ffmpeg(
         job_id="job-1",
         source_fingerprint=fingerprint,
         paths=paths,
+        store=PersistedMappingStore(mapping),  # type: ignore[arg-type]
     )
 
     args = captured["args"]
@@ -707,6 +761,7 @@ def test_generation_uses_no_overwrite_for_private_random_temp(
         job_id="job-1",
         source_fingerprint=fingerprint,
         paths=paths,
+        store=PersistedMappingStore(mapping),  # type: ignore[arg-type]
     )
 
     args = captured["args"]
@@ -793,6 +848,7 @@ def test_generation_does_not_overwrite_existing_final_proxy(
             job_id="job-1",
             source_fingerprint=fingerprint,
             paths=paths,
+            store=PersistedMappingStore(mapping),  # type: ignore[arg-type]
         )
 
     final_files = list(generated_root.glob("*.cloud-proxy.mp4"))
@@ -835,6 +891,7 @@ def test_generation_does_not_overwrite_existing_random_temp(
             job_id="job-1",
             source_fingerprint=fingerprint,
             paths=paths,
+            store=PersistedMappingStore(mapping),  # type: ignore[arg-type]
         )
 
     assert existing.read_bytes() == b"do not overwrite"
@@ -870,6 +927,7 @@ def test_generation_requires_job_root_directly_under_configured_generated_root(
             job_id="job-1",
             source_fingerprint=fingerprint,
             paths=paths,
+            store=PersistedMappingStore(mapping),  # type: ignore[arg-type]
         )
 
 
@@ -908,6 +966,7 @@ def test_generation_rejects_configured_generated_root_containing_input_root(
             job_id="job-1",
             source_fingerprint=fingerprint,
             paths=paths,
+            store=PersistedMappingStore(mapping),  # type: ignore[arg-type]
         )
 
 
@@ -948,6 +1007,7 @@ def test_generation_rejects_root_overlapping_input_or_source_parent(
                 job_id="job-1",
                 source_fingerprint=fingerprint,
                 paths=paths,
+                store=PersistedMappingStore(mapping),  # type: ignore[arg-type]
             )
 
 
@@ -1111,6 +1171,7 @@ def test_generation_and_registration_share_media_evidence_parser(
         job_id="job-1",
         source_fingerprint=fingerprint,
         paths=paths,
+        store=PersistedMappingStore(mapping),  # type: ignore[arg-type]
     )
     assert manifest.data.video_codec == "h264"
     assert calls == 1
@@ -1294,6 +1355,75 @@ def test_missing_unrelated_persisted_source_does_not_block_upload(
         registered.store.__exit__(None, None, None)
 
 
+def test_missing_cross_job_source_copy_is_globally_protected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registered = _registered_chunk(tmp_path)
+    try:
+        copied_source = registered.manifest.path.with_name("copied-source.mp4")
+        shutil.copyfile(registered.source, copied_source)
+        missing = registered.paths.input_dir / "deleted-cross-job-source.mp4"
+        other_job = registered.store.create_job(
+            {"input_path": str(registered.paths.input_dir)}, {}
+        )
+        registered.store.save_sources(
+            other_job,
+            [
+                {
+                    "source_id": "deleted-source",
+                    "path": str(missing),
+                    "size_bytes": registered.source.stat().st_size,
+                    "fingerprint": bounded_fingerprint(registered.source),
+                    "identity_version": IDENTITY_VERSION,
+                }
+            ],
+        )
+        _retarget_manifest_file(registered, copied_source)
+        monkeypatch.setattr(
+            "video_editor.analysis.proxy_chunks._validate_probe",
+            lambda path, manifest, *, ffprobe, pass_fds=(): None,
+        )
+
+        with pytest.raises(VideoEditorError, match="original source"):
+            validate_upload_candidate(
+                registered.manifest.manifest_id,
+                registered.manifest.job_id,
+                registered.store,
+                registered.paths,
+            )
+    finally:
+        registered.store.__exit__(None, None, None)
+
+
+def test_malformed_persisted_source_identity_fails_closed(tmp_path: Path) -> None:
+    registered = _registered_chunk(tmp_path)
+    try:
+        other_job = registered.store.create_job(
+            {"input_path": str(registered.paths.input_dir)}, {}
+        )
+        registered.store.save_sources(
+            other_job,
+            [
+                {
+                    "source_id": "malformed-source",
+                    "path": str(registered.paths.input_dir / "missing.mp4"),
+                    "size_bytes": 123,
+                    "identity_version": IDENTITY_VERSION,
+                }
+            ],
+        )
+
+        with pytest.raises(VideoEditorError, match="persisted source identity"):
+            validate_upload_candidate(
+                registered.manifest.manifest_id,
+                registered.manifest.job_id,
+                registered.store,
+                registered.paths,
+            )
+    finally:
+        registered.store.__exit__(None, None, None)
+
+
 def test_cross_job_source_alias_is_globally_protected(tmp_path: Path) -> None:
     registered = _registered_chunk(tmp_path)
     try:
@@ -1465,6 +1595,153 @@ def test_registration_rejects_forged_generated_media_profile(
         )
 
         with pytest.raises(VideoEditorError, match=message):
+            register_proxy_manifest(forged_manifest, registered.store)
+    finally:
+        registered.store.__exit__(None, None, None)
+
+
+def test_registration_rejects_caller_forged_32kbps_media(
+    tmp_path: Path,
+) -> None:
+    registered = _registered_chunk(tmp_path)
+    try:
+        forged = registered.manifest.path.with_name("forged-32kbps.mp4")
+        completed = subprocess.run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                (
+                    "color=c=black:s="
+                    f"{registered.manifest.data.video_width}x"
+                    f"{registered.manifest.data.video_height}:r=15"
+                ),
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=1000:sample_rate=16000",
+                "-t",
+                "1.5",
+                "-c:v",
+                "libx264",
+                "-c:a",
+                "aac",
+                "-ac",
+                "1",
+                "-b:a",
+                "32k",
+                "-shortest",
+                str(forged),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode == 0, completed.stderr
+        probe = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=bit_rate",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(forged),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        observed_bitrate = int(probe.stdout.strip())
+        assert observed_bitrate < 60_000
+        file_stat = forged.stat()
+        digest = hashlib.sha256(forged.read_bytes()).hexdigest()
+        forged_data = registered.manifest.data.model_copy(
+            update={
+                "artifact_path": str(forged),
+                "file_size_bytes": file_stat.st_size,
+                "file_digest_sha256": digest,
+                "file_device": file_stat.st_dev,
+                "file_inode": file_stat.st_ino,
+                "audio_bitrate_bps": 64_000,
+                "audio_probe_bitrate_bps": observed_bitrate,
+            }
+        )
+        forged_manifest = replace(
+            registered.manifest,
+            path=forged,
+            digest=digest,
+            data=forged_data,
+        )
+
+        with pytest.raises(VideoEditorError, match="trusted generation"):
+            register_proxy_manifest(forged_manifest, registered.store)
+    finally:
+        registered.store.__exit__(None, None, None)
+
+
+def test_registration_rejects_generated_media_with_extra_subtitle_stream(
+    tmp_path: Path,
+) -> None:
+    registered = _registered_chunk(tmp_path)
+    try:
+        forged = registered.manifest.path.with_name("extra-subtitle.mp4")
+        subtitle = tmp_path / "extra.srt"
+        subtitle.write_text("1\n00:00:00,000 --> 00:00:01,000\nextra\n")
+        completed = subprocess.run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-y",
+                "-i",
+                str(registered.manifest.path),
+                "-i",
+                str(subtitle),
+                "-map",
+                "0:v",
+                "-map",
+                "0:a",
+                "-map",
+                "1:s",
+                "-c:v",
+                "copy",
+                "-c:a",
+                "copy",
+                "-c:s",
+                "mov_text",
+                str(forged),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode == 0, completed.stderr
+        file_stat = forged.stat()
+        forged_data = registered.manifest.data.model_copy(
+            update={
+                "artifact_path": str(forged),
+                "file_size_bytes": file_stat.st_size,
+                "file_digest_sha256": hashlib.sha256(forged.read_bytes()).hexdigest(),
+                "file_device": file_stat.st_dev,
+                "file_inode": file_stat.st_ino,
+            }
+        )
+        forged_manifest = replace(
+            registered.manifest,
+            path=forged,
+            digest=forged_data.file_digest_sha256,
+            data=forged_data,
+        )
+
+        with pytest.raises(VideoEditorError, match="stream count"):
             register_proxy_manifest(forged_manifest, registered.store)
     finally:
         registered.store.__exit__(None, None, None)

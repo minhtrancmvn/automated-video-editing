@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import secrets
 import stat
 import subprocess
+import weakref
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from itertools import pairwise
@@ -31,6 +33,7 @@ from video_editor.persistence.database import JobStore
 _IMPLEMENTATION_VERSION = "cloud-proxy-v1"
 _MAPPING_VERSION = "cloud-proxy-mapping-v1"
 _DURATION_TOLERANCE = Decimal("0.2")
+_GENERATION_AUTHORITY = secrets.token_bytes(32)
 
 
 @dataclass(frozen=True)
@@ -78,6 +81,11 @@ class ProxyManifest:
     digest: str
     data: ProxyManifestData
     chunk_data: AnalysisChunkData
+
+
+_GENERATION_PROOFS: weakref.WeakKeyDictionary[ProxyManifest, bytes] = (
+    weakref.WeakKeyDictionary()
+)
 
 
 class AuthorizedUpload:
@@ -433,6 +441,21 @@ def _validate_generation_inputs(
     return source_resolved, generated_root.resolve(strict=True)
 
 
+def _generation_proof(
+    manifest_id: str, digest: str, file_stat: os.stat_result
+) -> bytes:
+    payload = "\0".join(
+        (
+            manifest_id,
+            digest,
+            str(file_stat.st_dev),
+            str(file_stat.st_ino),
+            str(file_stat.st_size),
+        )
+    ).encode()
+    return hmac.digest(_GENERATION_AUTHORITY, payload, "sha256")
+
+
 def create_cloud_proxy_chunk(
     source: Path,
     generated_root: Path,
@@ -443,26 +466,25 @@ def create_cloud_proxy_chunk(
     job_id: str,
     source_fingerprint: str,
     paths: PathSettings,
-    store: JobStore | None = None,
+    store: JobStore,
     settings: CloudProxySettings | None = None,
     ffmpeg: str = "ffmpeg",
     ffprobe: str = "ffprobe",
 ) -> ProxyManifest:
     """Create, inspect, hash, and describe one cloud proxy chunk."""
     active = settings or CloudProxySettings()
-    if store is not None:
-        metadata = store.get_proxy_artifact_metadata(job_id, mapping.source_id)
-        mapping_manifest = ProxyManifestData.model_construct(
-            source_id=mapping.source_id,
-            source_identity=mapping.source_identity,
-            upstream_settings_hash=mapping.settings_hash,
-            upstream_tool_version=mapping.tool_version,
-            source_start=source_start,
-            source_end=source_end,
-            proxy_start=Decimal(0),
-            proxy_end=source_end - source_start,
-        )
-        _validate_upstream_mapping(metadata, mapping_manifest)
+    metadata = store.get_proxy_artifact_metadata(job_id, mapping.source_id)
+    mapping_manifest = ProxyManifestData.model_construct(
+        source_id=mapping.source_id,
+        source_identity=mapping.source_identity,
+        upstream_settings_hash=mapping.settings_hash,
+        upstream_tool_version=mapping.tool_version,
+        source_start=source_start,
+        source_end=source_end,
+        proxy_start=Decimal(0),
+        proxy_end=source_end - source_start,
+    )
+    _validate_upstream_mapping(metadata, mapping_manifest)
     if generated_root.name != job_id:
         raise VideoEditorError(
             ErrorCategory.STORAGE, "generated root must be job-specific"
@@ -674,7 +696,7 @@ def create_cloud_proxy_chunk(
         boundary_kind=AnalysisBoundaryKind.SCENE,
         implementation_version=_IMPLEMENTATION_VERSION,
     )
-    return ProxyManifest(
+    manifest = ProxyManifest(
         manifest_id=manifest_id,
         chunk_id=chunk_id,
         job_id=job_id,
@@ -684,6 +706,10 @@ def create_cloud_proxy_chunk(
         data=manifest_data,
         chunk_data=chunk_data,
     )
+    _GENERATION_PROOFS[manifest] = _generation_proof(
+        manifest_id, manifest_data.file_digest_sha256, file_stat
+    )
+    return manifest
 
 
 def register_proxy_manifest(
@@ -729,6 +755,14 @@ def register_proxy_manifest(
             evidence, manifest.data.proxy_end - manifest.data.proxy_start
         )
         _match_manifest_media(evidence, manifest.data)
+        expected_proof = _generation_proof(
+            manifest.manifest_id, manifest.data.file_digest_sha256, opened_stat
+        )
+        generation_proof = _GENERATION_PROOFS.get(manifest)
+        if generation_proof is None or not hmac.compare_digest(
+            generation_proof, expected_proof
+        ):
+            raise _upload_error("generated media lacks trusted generation evidence")
         if not _same_identity(opened_stat, os.fstat(descriptor)):
             raise _upload_error("generated media descriptor identity changed")
     finally:
@@ -922,6 +956,35 @@ def _validate_candidate_path(
     return resolved, candidate_stat
 
 
+def _persisted_source_facts(
+    records: list[dict[str, Any]],
+) -> tuple[list[Path], set[str]]:
+    paths: list[Path] = []
+    fingerprints: set[str] = set()
+    for record in records:
+        data = record.get("data")
+        if not isinstance(data, dict):
+            raise _upload_error("persisted source identity is invalid")
+        source_path = data.get("path")
+        fingerprint = data.get("fingerprint")
+        identity_version = data.get("identity_version")
+        size_bytes = data.get("size_bytes")
+        if (
+            not isinstance(source_path, str)
+            or not source_path
+            or not isinstance(fingerprint, str)
+            or not fingerprint
+            or identity_version != IDENTITY_VERSION
+            or not isinstance(size_bytes, int)
+            or isinstance(size_bytes, bool)
+            or size_bytes < 0
+        ):
+            raise _upload_error("persisted source identity is invalid")
+        paths.append(Path(source_path))
+        fingerprints.add(fingerprint)
+    return paths, fingerprints
+
+
 def _validate_file_facts(
     path: Path,
     file_stat: os.stat_result,
@@ -1002,7 +1065,7 @@ def _parse_probe_payload(path: Path, raw: str) -> _MediaEvidence:
         format_data = payload["format"]
         videos = [item for item in streams if item.get("codec_type") == "video"]
         audios = [item for item in streams if item.get("codec_type") == "audio"]
-        if len(videos) != 1 or len(audios) != 1:
+        if len(streams) != 2 or len(videos) != 1 or len(audios) != 1:
             raise _upload_error(
                 "generated media must contain exactly one video and one audio stream count"
             )
@@ -1165,12 +1228,9 @@ def validate_upload_candidate(
     job = store.get_job(expected_job_id)
     source = _stored_source(job, manifest.source_id)
     source_path = _validate_source_identity(source, manifest)
-    source_paths = [
-        Path(data["path"])
-        for record_source in store.list_persisted_sources()
-        if isinstance((data := record_source.get("data")), dict)
-        and isinstance(data.get("path"), str)
-    ]
+    source_paths, source_fingerprints = _persisted_source_facts(
+        store.list_persisted_sources()
+    )
     path, file_stat = _validate_candidate_path(
         Path(manifest.artifact_path),
         manifest,
@@ -1189,6 +1249,8 @@ def validate_upload_candidate(
             raise _upload_error("upload candidate file identity changed")
         descriptor_path = Path(f"/dev/fd/{stream.fileno()}")
         _validate_file_facts(descriptor_path, opened_stat, record, manifest)
+        if _bounded_fingerprint_fd(stream.fileno()) in source_fingerprints:
+            raise _upload_error("upload candidate is original source media")
         _validate_probe(
             descriptor_path,
             manifest,
