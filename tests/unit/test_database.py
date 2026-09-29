@@ -16,7 +16,12 @@ from video_editor.analysis.models import (
 )
 from video_editor.media.discovery import SourceCandidate
 from video_editor.media.sequencing import sequence_sources
-from video_editor.persistence.database import JobStatus, JobStore, StageStatus
+from video_editor.persistence.database import (
+    JobStatus,
+    JobStore,
+    StageStatus,
+    _json_without_secrets,
+)
 from video_editor.persistence.migrations import LATEST_MIGRATION_VERSION
 
 
@@ -559,6 +564,77 @@ def test_analysis_save_methods_reject_untyped_payloads(
                 payload,
                 validated=True,
             )
+
+
+@pytest.mark.parametrize(
+    ("model_type", "data"),
+    [
+        (ProxyManifestData, _proxy_manifest_data()),
+        (AnalysisChunkData, _analysis_chunk_data()),
+        (AnalysisResultData, _analysis_result_data()),
+    ],
+)
+def test_analysis_save_methods_reject_subclasses_before_serialization(
+    tmp_path: Path,
+    model_type: type[ProxyManifestData | AnalysisChunkData | AnalysisResultData],
+    data: ProxyManifestData | AnalysisChunkData | AnalysisResultData,
+) -> None:
+    class MaliciousPayload(model_type):
+        def model_dump(self, **_: object) -> dict[str, object]:
+            raise AssertionError("model_dump must not run for subclasses")
+
+    malicious = MaliciousPayload.model_construct(**data.model_dump())
+    with JobStore(tmp_path / "state.db") as store:
+        job_id = store.create_job("{}", "{}")
+        if type(data) is ProxyManifestData:
+            with pytest.raises(TypeError, match="exact ProxyManifestData"):
+                store.save_proxy_manifest(job_id, "manifest-1", "digest", malicious)
+        elif type(data) is AnalysisChunkData:
+            store.save_proxy_manifest(
+                job_id, "manifest-1", "digest", _proxy_manifest_data()
+            )
+            with pytest.raises(TypeError, match="exact AnalysisChunkData"):
+                store.save_analysis_chunk(
+                    job_id,
+                    "chunk-1",
+                    "manifest-1",
+                    source_id="source-1",
+                    source_start=Decimal(0),
+                    source_end=Decimal(1),
+                    data=malicious,
+                )
+        else:
+            store.save_proxy_manifest(
+                job_id, "manifest-1", "digest", _proxy_manifest_data()
+            )
+            store.save_analysis_chunk(
+                job_id,
+                "chunk-1",
+                "manifest-1",
+                source_id="source-1",
+                source_start=Decimal(0),
+                source_end=Decimal(1),
+                data=_analysis_chunk_data(),
+            )
+            with pytest.raises(TypeError, match="exact AnalysisResultData"):
+                store.save_analysis_result(
+                    "result-1",
+                    job_id,
+                    "cache-1",
+                    "chunk-1",
+                    "broad",
+                    malicious,
+                    validated=True,
+                )
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["access_token", "client_secret", "private_key", "x_api_key", "x-api-key"],
+)
+def test_analysis_payload_denylist_rejects_normalized_secret_aliases(key: str) -> None:
+    with pytest.raises(ValueError, match="secret-like key"):
+        _json_without_secrets({key: "secret"})
 
 
 def test_analysis_payload_persistence_contains_only_declared_model_fields(

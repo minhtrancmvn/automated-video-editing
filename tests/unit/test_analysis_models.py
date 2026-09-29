@@ -187,3 +187,24 @@ def test_analysis_timed_payload_models_reject_invalid_ranges(
     payload["proxy_end"] = "NaN"
     with pytest.raises(ValidationError):
         model_type(**payload)
+
+
+def test_analysis_models_are_immutable_after_validation() -> None:
+    data = AnalysisResultData(
+        schema_version=1,
+        provider="provider",
+        model="model",
+        request_id="request-1",
+        prompt_version="v1",
+        response_schema_version="v1",
+        implementation_version="v1",
+        token_count=3,
+        request_token_count=2,
+        output_token_count=1,
+        normalized_record_ids=("record-1",),
+    )
+
+    with pytest.raises(ValidationError, match="frozen_instance"):
+        data.token_count = 4
+
+    assert isinstance(data.normalized_record_ids, tuple)

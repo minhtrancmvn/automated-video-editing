@@ -68,6 +68,10 @@ def _row_json(value: str | None) -> Any:
 _SECRET_KEYS = frozenset(
     {
         "api_key",
+        "access_token",
+        "client_secret",
+        "private_key",
+        "x_api_key",
         "key",
         "token",
         "authorization",
@@ -626,8 +630,8 @@ class JobStore:
         data: ProxyManifestData,
     ) -> None:
         """Persist one generated proxy manifest for later upload validation."""
-        if not isinstance(data, ProxyManifestData):
-            raise TypeError("data must be ProxyManifestData")
+        if type(data) is not ProxyManifestData:
+            raise TypeError("data must be exact ProxyManifestData")
         data_json = _json_without_secrets(data.model_dump(mode="json"))
         with self._transaction() as connection:
             self._job_exists(connection, job_id)
@@ -660,8 +664,8 @@ class JobStore:
         data: AnalysisChunkData,
     ) -> None:
         """Persist one source-mapped analysis chunk."""
-        if not isinstance(data, AnalysisChunkData):
-            raise TypeError("data must be AnalysisChunkData")
+        if type(data) is not AnalysisChunkData:
+            raise TypeError("data must be exact AnalysisChunkData")
         source_range = SourceRange(
             source_id=source_id,
             start=source_start,
@@ -720,8 +724,8 @@ class JobStore:
         validated: bool,
     ) -> None:
         """Persist one provider-neutral normalized analysis result."""
-        if not isinstance(data, AnalysisResultData):
-            raise TypeError("data must be AnalysisResultData")
+        if type(data) is not AnalysisResultData:
+            raise TypeError("data must be exact AnalysisResultData")
         data_json = _json_without_secrets(data.model_dump(mode="json"))
         with self._transaction() as connection:
             self._job_exists(connection, job_id)

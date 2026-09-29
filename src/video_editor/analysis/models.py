@@ -15,7 +15,7 @@ NonEmptyString = Annotated[str, StringConstraints(min_length=1)]
 class AnalysisModel(BaseModel):
     """Base model that rejects unknown persistence fields."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
 
 class SourceRange(AnalysisModel):
