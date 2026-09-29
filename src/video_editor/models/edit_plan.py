@@ -12,6 +12,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictBool,
     ValidationError,
     field_validator,
     model_validator,
@@ -58,6 +59,7 @@ class _PlanModel(BaseModel):
         nonnegative = rf"^\+?{decimal}$"
         field_patterns = {
             "PlanSource": {"duration": positive},
+            "PlanSourceV2": {"duration": positive},
             "TimelineClip": {
                 "source_start": nonnegative,
                 "source_end": positive,
@@ -72,10 +74,12 @@ class _PlanModel(BaseModel):
                 "center_x": r"^(?:\+?(?:0+(?:\.\d+)?|\.\d+|1(?:\.0*)?))$",
                 "center_y": r"^(?:\+?(?:0+(?:\.\d+)?|\.\d+|1(?:\.0*)?))$",
             },
-            "ScoreBreakdown": {
-                "positive": nonnegative,
-                "penalties": nonnegative,
-            },
+            "PositiveScores": {name: nonnegative for name in cls.model_fields}
+            if cls.__name__ == "PositiveScores"
+            else {},
+            "PenaltyScores": {name: nonnegative for name in cls.model_fields}
+            if cls.__name__ == "PenaltyScores"
+            else {},
             "TimelineClipV2": {
                 "source_start": nonnegative,
                 "source_end": positive,
@@ -116,21 +120,124 @@ class _PlanModel(BaseModel):
                     tighten(child, field_name)
 
         tighten(schema)
-        if cls.__name__ == "FramingV2":
-            schema["allOf"] = [
-                {
-                    "if": {"properties": {"mode": {"const": "tracked_crop"}}},
-                    "then": {
-                        "properties": {"keyframes": {"minItems": 1}},
-                        "required": [
-                            "track_id",
-                            "track_clip_id",
-                            "track_source_identity",
-                        ],
-                    },
+        match cls.__name__:
+            case "FramingV2":
+                unused_track_fields = {
+                    "properties": {
+                        "background": {"type": "null"},
+                        "track_id": {"type": "null"},
+                        "track_clip_id": {"type": "null"},
+                        "track_source_identity": {"type": "null"},
+                        "keyframes": {"maxItems": 0},
+                    }
                 }
-            ]
+                schema["allOf"] = [
+                    {
+                        "if": {"properties": {"mode": {"const": "center_crop"}}},
+                        "then": unused_track_fields,
+                    },
+                    {
+                        "if": {"properties": {"mode": {"const": "fit_background"}}},
+                        "then": {
+                            "properties": {
+                                "background": {"type": "string"},
+                                "track_id": {"type": "null"},
+                                "track_clip_id": {"type": "null"},
+                                "track_source_identity": {"type": "null"},
+                                "keyframes": {"maxItems": 0},
+                            },
+                            "required": ["background"],
+                        },
+                    },
+                    {
+                        "if": {"properties": {"mode": {"const": "tracked_crop"}}},
+                        "then": {
+                            "properties": {
+                                "background": {"type": "null"},
+                                "track_id": {"minLength": 1, "type": "string"},
+                                "track_clip_id": {"minLength": 1, "type": "string"},
+                                "track_source_identity": {
+                                    "minLength": 1,
+                                    "type": "string",
+                                },
+                                "keyframes": {"minItems": 1},
+                            },
+                            "required": [
+                                "track_id",
+                                "track_clip_id",
+                                "track_source_identity",
+                            ],
+                        },
+                    },
+                ]
+            case "TransitionV2":
+                schema["allOf"] = [
+                    {
+                        "if": {"properties": {"kind": {"const": kind}}},
+                        "then": {
+                            "properties": {
+                                "duration": {
+                                    "anyOf": [
+                                        (
+                                            {
+                                                "maximum": 0,
+                                                "minimum": 0,
+                                                "type": "number",
+                                            }
+                                            if kind == "cut"
+                                            else {
+                                                "exclusiveMinimum": 0,
+                                                "type": "number",
+                                            }
+                                        ),
+                                        {
+                                            "pattern": (
+                                                r"^\+?0+(?:\.0*)?$"
+                                                if kind == "cut"
+                                                else positive
+                                            ),
+                                            "type": "string",
+                                        },
+                                    ]
+                                },
+                                "relation": {
+                                    "enum": sorted(_ALLOWED_TRANSITIONS[kind])
+                                },
+                            }
+                        },
+                    }
+                    for kind in _ALLOWED_TRANSITIONS
+                ]
+            case "OutputSpecV2":
+                schema["allOf"] = [
+                    {
+                        "if": {"properties": {"kind": {"const": "short"}}},
+                        "then": {
+                            "properties": {
+                                "filename": {
+                                    "pattern": r"^short-(?:0[1-9]|[1-9][0-9])\.mp4$"
+                                },
+                                "height": {"const": 1920},
+                                "width": {"const": 1080},
+                            }
+                        },
+                    },
+                    {
+                        "if": {"properties": {"kind": {"const": "long"}}},
+                        "then": {
+                            "properties": {
+                                "filename": {"const": "long.mp4"},
+                                "height": {"const": 1080},
+                                "width": {"const": 1920},
+                            }
+                        },
+                    },
+                ]
         return cast(dict[str, Any], schema)
+
+
+class _V2PlanModel(_PlanModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
 
 
 class PlanSource(_PlanModel):
@@ -145,6 +252,22 @@ class PlanSource(_PlanModel):
     @field_validator("duration", mode="before")
     @classmethod
     def validate_duration(cls, value: Any) -> Decimal:
+        return _decimal(value)
+
+
+class PlanSourceV2(_PlanModel):
+    """Version 2 source with strict scalar fields and JSON path support."""
+
+    id: str = Field(min_length=1, strict=True)
+    path: Path
+    identity: str = Field(min_length=1, strict=True)
+    duration: Decimal = Field(gt=0)
+    has_audio: StrictBool = True
+
+    @field_validator("duration", mode="before")
+    @classmethod
+    def validate_duration(cls, value: Any) -> Decimal:
+        """Parse source duration with exact finite decimal rules."""
         return _decimal(value)
 
 
@@ -316,7 +439,7 @@ class EditPlan(_PlanModel):
         return self
 
 
-class CropKeyframe(_PlanModel):
+class CropKeyframe(_V2PlanModel):
     """One exact clip-local crop-center sample."""
 
     time: Decimal = Field(ge=0)
@@ -332,7 +455,7 @@ class CropKeyframe(_PlanModel):
         return _decimal(value)
 
 
-class FramingV2(_PlanModel):
+class FramingV2(_V2PlanModel):
     """Version 2 output framing, including identity-bound tracked crops."""
 
     mode: Literal["center_crop", "fit_background", "tracked_crop"]
@@ -381,7 +504,7 @@ class FramingV2(_PlanModel):
         return self
 
 
-class PositiveScores(_PlanModel):
+class PositiveScores(_V2PlanModel):
     """Positive highlight dimensions retained for auditability."""
 
     action: Decimal = Field(ge=0)
@@ -402,7 +525,7 @@ class PositiveScores(_PlanModel):
         return _decimal(value)
 
 
-class PenaltyScores(_PlanModel):
+class PenaltyScores(_V2PlanModel):
     """Highlight penalties retained separately from positive scores."""
 
     blur_exposure: Decimal = Field(ge=0)
@@ -419,14 +542,14 @@ class PenaltyScores(_PlanModel):
         return _decimal(value)
 
 
-class ScoreBreakdown(_PlanModel):
+class ScoreBreakdown(_V2PlanModel):
     """Typed positive and penalty score dimensions."""
 
     positive: PositiveScores
     penalties: PenaltyScores
 
 
-class TimelineClipV2(_PlanModel):
+class TimelineClipV2(_V2PlanModel):
     """Version 2 source interval with score, evidence, and identity metadata."""
 
     clip_id: str = Field(min_length=1)
@@ -481,7 +604,7 @@ class TimelineClipV2(_PlanModel):
         return self
 
 
-class TransitionV2(_PlanModel):
+class TransitionV2(_V2PlanModel):
     """Semantic transition between adjacent version 2 clips."""
 
     from_clip: int = Field(ge=0)
@@ -515,10 +638,14 @@ class TransitionV2(_PlanModel):
             raise ValueError(
                 f"transition {self.kind} is not allowed for relation {self.relation}"
             )
+        if self.kind == "cut" and self.duration != _D0:
+            raise ValueError("cut transition duration must be zero")
+        if self.kind != "cut" and self.duration <= _D0:
+            raise ValueError("non-cut transition duration must be positive")
         return self
 
 
-class OutputSpecV2(_PlanModel):
+class OutputSpecV2(_V2PlanModel):
     """Collision-proof version 2 output identity and media properties."""
 
     plan_id: str = Field(min_length=1)
@@ -563,13 +690,13 @@ class OutputSpecV2(_PlanModel):
         return self
 
 
-class EditPlanV2(_PlanModel):
+class EditPlanV2(_V2PlanModel):
     """Version 2 edit plan with evidence and explicit output identity."""
 
     schema_version: Literal[2]
     planner_version: str = Field(min_length=1)
     analysis_version: str = Field(min_length=1)
-    sources: list[PlanSource] = Field(min_length=1)
+    sources: list[PlanSourceV2] = Field(min_length=1)
     clips: list[TimelineClipV2] = Field(min_length=1)
     transitions: list[TransitionV2] = Field(default_factory=list)
     output: OutputSpecV2
@@ -624,13 +751,28 @@ class EditPlanV2(_PlanModel):
                 raise ValueError("transition references missing clip")
             if transition.to_clip != transition.from_clip + 1:
                 raise ValueError("transitions must join adjacent clips")
-            if transition.kind == "cut" and transition.duration != _D0:
-                raise ValueError("cut transition duration must be zero")
-            if transition.duration > min(
-                _clip_duration(self.clips[transition.from_clip]),
-                _clip_duration(self.clips[transition.to_clip]),
+            if (
+                transition.duration
+                >= min(
+                    _clip_duration(self.clips[transition.from_clip]),
+                    _clip_duration(self.clips[transition.to_clip]),
+                )
+                and transition.kind != "cut"
             ):
-                raise ValueError("transition duration exceeds clip interval")
+                raise ValueError(
+                    "non-cut transition duration must be strictly shorter than adjacent clips"
+                )
+
+        for index, clip in enumerate(self.clips[1:-1], start=1):
+            incoming = _transition_for(self.transitions, index - 1, index)
+            outgoing = _transition_for(self.transitions, index, index + 1)
+            overlap = (incoming.duration if incoming else _D0) + (
+                outgoing.duration if outgoing else _D0
+            )
+            if overlap > _clip_duration(clip):
+                raise ValueError(
+                    "incoming and outgoing transition windows exceed interior clip duration"
+                )
 
         duration = timeline_duration(self)
         if duration <= _D0:
@@ -650,7 +792,7 @@ class EditPlanV2(_PlanModel):
         return self
 
 
-class AnchorMoment(_PlanModel):
+class AnchorMoment(_V2PlanModel):
     """Recorded exception allowing one moment in at most two shorts."""
 
     source_identity: str = Field(min_length=1)
@@ -658,6 +800,14 @@ class AnchorMoment(_PlanModel):
     source_end: Decimal = Field(gt=0)
     dedup_group: str = Field(min_length=1)
     rationale: str = Field(min_length=1)
+
+    @field_validator("rationale")
+    @classmethod
+    def validate_rationale(cls, value: str) -> str:
+        """Reject rationale containing only whitespace."""
+        if not value.strip():
+            raise ValueError("rationale must contain non-whitespace text")
+        return value
 
     @field_validator("source_start", "source_end", mode="before")
     @classmethod
@@ -673,10 +823,10 @@ class AnchorMoment(_PlanModel):
         return self
 
 
-class PlanSetPolicy(_PlanModel):
+class PlanSetPolicy(_V2PlanModel):
     """Cross-output limits for one edit plan set."""
 
-    max_shorts: int = Field(default=5, ge=0)
+    max_shorts: int = Field(default=5, ge=0, le=5)
     anchor: AnchorMoment | None = None
 
 

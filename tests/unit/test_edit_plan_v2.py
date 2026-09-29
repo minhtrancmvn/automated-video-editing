@@ -519,3 +519,227 @@ def test_v2_schema_and_model_reject_same_invalid_decimal_values(
     assert schema_errors
     with pytest.raises(ValidationError):
         EditPlanV2.model_validate(data)
+
+
+def _transition_plan(
+    *,
+    kind: str = "dissolve",
+    relation: str = "same_event",
+    duration: str = "0.5",
+) -> dict[str, Any]:
+    data = valid_plan()
+    data["sources"][0]["duration"] = 30
+    data["clips"] = [
+        clip(end=10),
+        clip(
+            clip_id="clip-b",
+            start=10,
+            end=20,
+            timeline_start=str(Decimal(10) - Decimal(duration)),
+            dedup_group="group-b",
+        ),
+    ]
+    data["transitions"] = [
+        {
+            "from_clip": 0,
+            "to_clip": 1,
+            "kind": kind,
+            "duration": duration,
+            "relation": relation,
+            "reason": "semantic boundary",
+            "confidence": "0.9",
+            "audio_policy": "cut" if kind == "cut" else "crossfade",
+        }
+    ]
+    return data
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "with_transition"),
+    [
+        (("output", "width"), "1080", False),
+        (("output", "height"), 1920.0, False),
+        (("transitions", 0, "from_clip"), "0", True),
+        (("transitions", 0, "to_clip"), 1.0, True),
+        (("sources", 0, "has_audio"), "true", False),
+        (("sources", 0, "has_audio"), 1, False),
+    ],
+)
+def test_v2_strict_integer_fields_reject_coercive_values(
+    path: tuple[str | int, ...], value: object, with_transition: bool
+) -> None:
+    data = _transition_plan() if with_transition else valid_plan()
+    target: Any = data
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+
+    with pytest.raises(ValidationError):
+        EditPlanV2.model_validate(data)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "short_dimensions",
+        "short_filename",
+        "long_dimensions",
+        "long_filename",
+        "center_background",
+        "center_track_identity",
+        "fit_missing_background",
+        "fit_track_data",
+        "tracked_null_identity",
+        "tracked_background",
+        "forbidden_relation",
+        "cut_positive_duration",
+        "noncut_zero_duration",
+        "negative_positive_score",
+        "negative_penalty_score",
+    ],
+)
+def test_v2_semantic_constraints_have_schema_runtime_parity(case: str) -> None:
+    data = valid_plan()
+    match case:
+        case "short_dimensions":
+            data["output"].update(width=1920, height=1080)
+        case "short_filename":
+            data["output"]["filename"] = "short.mp4"
+        case "long_dimensions":
+            data = valid_plan(kind="long", filename="long.mp4", plan_id="plan-long")
+            data["output"].update(width=1080, height=1920)
+        case "long_filename":
+            data = valid_plan(kind="long", filename="long.mp4", plan_id="plan-long")
+            data["output"]["filename"] = "other.mp4"
+        case "center_background":
+            data["clips"][0]["framing"]["background"] = "blur"
+        case "center_track_identity":
+            data["clips"][0]["framing"]["track_id"] = "track-1"
+        case "fit_missing_background":
+            data["clips"][0]["framing"] = {"mode": "fit_background"}
+        case "fit_track_data":
+            data["clips"][0]["framing"] = {
+                "mode": "fit_background",
+                "background": "blur",
+                "track_id": "track-1",
+            }
+        case "tracked_null_identity":
+            data["clips"][0]["framing"] = {
+                "mode": "tracked_crop",
+                "track_id": None,
+                "track_clip_id": "clip-a",
+                "track_source_identity": "sha256:source-a",
+                "keyframes": [
+                    {
+                        "time": "0",
+                        "center_x": "0.5",
+                        "center_y": "0.5",
+                        "subject_box_id": None,
+                        "fallback": "tracked",
+                    }
+                ],
+            }
+        case "tracked_background":
+            data["clips"][0]["framing"] = {
+                "mode": "tracked_crop",
+                "background": "blur",
+                "track_id": "track-1",
+                "track_clip_id": "clip-a",
+                "track_source_identity": "sha256:source-a",
+                "keyframes": [
+                    {
+                        "time": "0",
+                        "center_x": "0.5",
+                        "center_y": "0.5",
+                        "subject_box_id": None,
+                        "fallback": "tracked",
+                    }
+                ],
+            }
+        case "forbidden_relation":
+            data = _transition_plan(kind="dissolve", relation="time_jump")
+        case "cut_positive_duration":
+            data = _transition_plan(kind="cut", relation="same_event", duration="0.5")
+        case "noncut_zero_duration":
+            data = _transition_plan(duration="0")
+        case "negative_positive_score":
+            data["clips"][0]["score_breakdown"]["positive"]["action"] = "-0.1"
+        case "negative_penalty_score":
+            data["clips"][0]["score_breakdown"]["penalties"]["overlap"] = "-0.1"
+        case _:
+            raise AssertionError(f"unhandled test case: {case}")
+
+    schema = Draft202012Validator(json.loads(SCHEMA_PATH.read_text()))
+    assert list(schema.iter_errors(data)), case
+    with pytest.raises(ValidationError):
+        EditPlanV2.model_validate(data)
+
+
+def test_v2_rejects_triple_overlap_across_interior_clip() -> None:
+    data = valid_plan()
+    data["sources"][0]["duration"] = 30
+    data["clips"] = [
+        clip(end=10),
+        clip(
+            clip_id="clip-b",
+            start=10,
+            end=20,
+            timeline_start=4,
+            dedup_group="group-b",
+        ),
+        clip(
+            clip_id="clip-c",
+            start=20,
+            end=30,
+            timeline_start=8,
+            dedup_group="group-c",
+        ),
+    ]
+    data["transitions"] = [
+        {
+            "from_clip": 0,
+            "to_clip": 1,
+            "kind": "dissolve",
+            "duration": "6",
+            "relation": "same_event",
+            "reason": "incoming",
+            "confidence": "0.9",
+            "audio_policy": "crossfade",
+        },
+        {
+            "from_clip": 1,
+            "to_clip": 2,
+            "kind": "dissolve",
+            "duration": "6",
+            "relation": "same_event",
+            "reason": "outgoing",
+            "confidence": "0.9",
+            "audio_policy": "crossfade",
+        },
+    ]
+
+    with pytest.raises(ValidationError, match="transition windows"):
+        EditPlanV2.model_validate(data)
+
+
+def test_v2_rejects_noncut_transition_as_long_as_adjacent_clip() -> None:
+    data = _transition_plan(duration="10")
+
+    with pytest.raises(ValidationError, match="strictly shorter"):
+        EditPlanV2.model_validate(data)
+
+
+def test_plan_set_policy_rejects_more_than_five_shorts() -> None:
+    with pytest.raises(ValidationError, match="less than or equal to 5"):
+        PlanSetPolicy(max_shorts=6)
+
+
+def test_anchor_rationale_rejects_whitespace_only_text() -> None:
+    with pytest.raises(ValidationError, match="rationale"):
+        AnchorMoment(
+            source_identity="sha256:source-a",
+            source_start="0",
+            source_end="10",
+            dedup_group="group-a",
+            rationale="   ",
+        )

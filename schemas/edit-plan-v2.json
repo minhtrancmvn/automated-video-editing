@@ -84,14 +84,88 @@
           "if": {
             "properties": {
               "mode": {
+                "const": "center_crop"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "background": {
+                "type": "null"
+              },
+              "keyframes": {
+                "maxItems": 0
+              },
+              "track_clip_id": {
+                "type": "null"
+              },
+              "track_id": {
+                "type": "null"
+              },
+              "track_source_identity": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "fit_background"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "background": {
+                "type": "string"
+              },
+              "keyframes": {
+                "maxItems": 0
+              },
+              "track_clip_id": {
+                "type": "null"
+              },
+              "track_id": {
+                "type": "null"
+              },
+              "track_source_identity": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "background"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "mode": {
                 "const": "tracked_crop"
               }
             }
           },
           "then": {
             "properties": {
+              "background": {
+                "type": "null"
+              },
               "keyframes": {
                 "minItems": 1
+              },
+              "track_clip_id": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "track_id": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "track_source_identity": {
+                "minLength": 1,
+                "type": "string"
               }
             },
             "required": [
@@ -177,6 +251,52 @@
     },
     "OutputSpecV2": {
       "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "short"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "filename": {
+                "pattern": "^short-(?:0[1-9]|[1-9][0-9])\\.mp4$"
+              },
+              "height": {
+                "const": 1920
+              },
+              "width": {
+                "const": 1080
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "long"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "filename": {
+                "const": "long.mp4"
+              },
+              "height": {
+                "const": 1080
+              },
+              "width": {
+                "const": 1920
+              }
+            }
+          }
+        }
+      ],
       "description": "Collision-proof version 2 output identity and media properties.",
       "properties": {
         "audio": {
@@ -272,7 +392,7 @@
               "type": "number"
             },
             {
-              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "pattern": "^\\+?(?:\\d+(?:\\.\\d*)?|\\.\\d+)$",
               "type": "string"
             }
           ],
@@ -285,7 +405,7 @@
               "type": "number"
             },
             {
-              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "pattern": "^\\+?(?:\\d+(?:\\.\\d*)?|\\.\\d+)$",
               "type": "string"
             }
           ],
@@ -298,7 +418,7 @@
               "type": "number"
             },
             {
-              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "pattern": "^\\+?(?:\\d+(?:\\.\\d*)?|\\.\\d+)$",
               "type": "string"
             }
           ],
@@ -311,7 +431,7 @@
               "type": "number"
             },
             {
-              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "pattern": "^\\+?(?:\\d+(?:\\.\\d*)?|\\.\\d+)$",
               "type": "string"
             }
           ],
@@ -324,7 +444,7 @@
               "type": "number"
             },
             {
-              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "pattern": "^\\+?(?:\\d+(?:\\.\\d*)?|\\.\\d+)$",
               "type": "string"
             }
           ],
@@ -337,7 +457,7 @@
               "type": "number"
             },
             {
-              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "pattern": "^\\+?(?:\\d+(?:\\.\\d*)?|\\.\\d+)$",
               "type": "string"
             }
           ],
@@ -355,9 +475,9 @@
       "title": "PenaltyScores",
       "type": "object"
     },
-    "PlanSource": {
+    "PlanSourceV2": {
       "additionalProperties": false,
-      "description": "Source identity and media facts referenced by an edit plan.",
+      "description": "Version 2 source with strict scalar fields and JSON path support.",
       "properties": {
         "duration": {
           "anyOf": [
@@ -399,7 +519,7 @@
         "identity",
         "duration"
       ],
-      "title": "PlanSource",
+      "title": "PlanSourceV2",
       "type": "object"
     },
     "PositiveScores": {
@@ -413,7 +533,7 @@
               "type": "number"
             },
             {
-              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "pattern": "^\\+?(?:\\d+(?:\\.\\d*)?|\\.\\d+)$",
               "type": "string"
             }
           ],
@@ -426,7 +546,7 @@
               "type": "number"
             },
             {
-              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "pattern": "^\\+?(?:\\d+(?:\\.\\d*)?|\\.\\d+)$",
               "type": "string"
             }
           ],
@@ -439,7 +559,7 @@
               "type": "number"
             },
             {
-              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "pattern": "^\\+?(?:\\d+(?:\\.\\d*)?|\\.\\d+)$",
               "type": "string"
             }
           ],
@@ -452,7 +572,7 @@
               "type": "number"
             },
             {
-              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "pattern": "^\\+?(?:\\d+(?:\\.\\d*)?|\\.\\d+)$",
               "type": "string"
             }
           ],
@@ -465,7 +585,7 @@
               "type": "number"
             },
             {
-              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "pattern": "^\\+?(?:\\d+(?:\\.\\d*)?|\\.\\d+)$",
               "type": "string"
             }
           ],
@@ -478,7 +598,7 @@
               "type": "number"
             },
             {
-              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "pattern": "^\\+?(?:\\d+(?:\\.\\d*)?|\\.\\d+)$",
               "type": "string"
             }
           ],
@@ -491,7 +611,7 @@
               "type": "number"
             },
             {
-              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "pattern": "^\\+?(?:\\d+(?:\\.\\d*)?|\\.\\d+)$",
               "type": "string"
             }
           ],
@@ -504,7 +624,7 @@
               "type": "number"
             },
             {
-              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "pattern": "^\\+?(?:\\d+(?:\\.\\d*)?|\\.\\d+)$",
               "type": "string"
             }
           ],
@@ -517,7 +637,7 @@
               "type": "number"
             },
             {
-              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "pattern": "^\\+?(?:\\d+(?:\\.\\d*)?|\\.\\d+)$",
               "type": "string"
             }
           ],
@@ -530,7 +650,7 @@
               "type": "number"
             },
             {
-              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "pattern": "^\\+?(?:\\d+(?:\\.\\d*)?|\\.\\d+)$",
               "type": "string"
             }
           ],
@@ -786,6 +906,135 @@
     },
     "TransitionV2": {
       "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "cut"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "duration": {
+                "anyOf": [
+                  {
+                    "maximum": 0,
+                    "minimum": 0,
+                    "type": "number"
+                  },
+                  {
+                    "pattern": "^\\+?0+(?:\\.0*)?$",
+                    "type": "string"
+                  }
+                ]
+              },
+              "relation": {
+                "enum": [
+                  "continuous_action",
+                  "matched_motion",
+                  "same_event"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "dissolve"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "duration": {
+                "anyOf": [
+                  {
+                    "exclusiveMinimum": 0,
+                    "type": "number"
+                  },
+                  {
+                    "pattern": "^\\+?(?=[0-9.]*[1-9])(?:\\d+(?:\\.\\d*)?|\\.\\d+)$",
+                    "type": "string"
+                  }
+                ]
+              },
+              "relation": {
+                "enum": [
+                  "same_event",
+                  "same_place_time_shift"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "fade"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "duration": {
+                "anyOf": [
+                  {
+                    "exclusiveMinimum": 0,
+                    "type": "number"
+                  },
+                  {
+                    "pattern": "^\\+?(?=[0-9.]*[1-9])(?:\\d+(?:\\.\\d*)?|\\.\\d+)$",
+                    "type": "string"
+                  }
+                ]
+              },
+              "relation": {
+                "enum": [
+                  "chapter_boundary",
+                  "story_open_close"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "fade_black"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "duration": {
+                "anyOf": [
+                  {
+                    "exclusiveMinimum": 0,
+                    "type": "number"
+                  },
+                  {
+                    "pattern": "^\\+?(?=[0-9.]*[1-9])(?:\\d+(?:\\.\\d*)?|\\.\\d+)$",
+                    "type": "string"
+                  }
+                ]
+              },
+              "relation": {
+                "enum": [
+                  "chapter_boundary",
+                  "location_change",
+                  "time_jump"
+                ]
+              }
+            }
+          }
+        }
+      ],
       "description": "Semantic transition between adjacent version 2 clips.",
       "properties": {
         "audio_policy": {
@@ -912,7 +1161,7 @@
     },
     "sources": {
       "items": {
-        "$ref": "#/$defs/PlanSource"
+        "$ref": "#/$defs/PlanSourceV2"
       },
       "minItems": 1,
       "title": "Sources",
