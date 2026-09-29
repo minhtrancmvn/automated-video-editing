@@ -90,7 +90,11 @@ class JobStore:
 
     def __enter__(self) -> JobStore:  # noqa: PYI034
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._connection = sqlite3.connect(self.db_path, timeout=30)
+        self._connection = sqlite3.connect(
+            self.db_path,
+            timeout=30,
+            check_same_thread=False,
+        )
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA foreign_keys = ON")
         self._connection.execute("PRAGMA busy_timeout = 30000")
