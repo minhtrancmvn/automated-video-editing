@@ -9,6 +9,8 @@ from pydantic import ValidationError
 from video_editor.models.edit_plan import (
     EditPlan,
     load_plan,
+    load_plan_document,
+    load_plan_v1,
     timeline_duration,
     write_plan,
 )
@@ -290,7 +292,7 @@ def test_load_and_write_plan_round_trip(tmp_path: Path) -> None:
     assert path.read_text() == (
         json.dumps(plan.model_dump(mode="json"), indent=2, sort_keys=True) + "\n"
     )
-    loaded = load_plan(path)
-    assert type(loaded) is EditPlan
-    assert loaded == plan
+    assert load_plan(path) == plan
+    assert load_plan_v1(path) == plan
+    assert load_plan_document(path) == plan
     assert json.loads(SCHEMA_PATH.read_text()) == EditPlan.model_json_schema()

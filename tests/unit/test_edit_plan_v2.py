@@ -8,11 +8,13 @@ import pytest
 from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
+from video_editor.errors import ErrorCategory, VideoEditorError
 from video_editor.models.edit_plan import (
     AnchorMoment,
     EditPlanV2,
     PlanSetPolicy,
     load_plan,
+    load_plan_document,
     timeline_duration,
     validate_plan_set,
     write_plan,
@@ -464,9 +466,16 @@ def test_v2_load_write_union_dispatch_and_schema_parity(tmp_path: Path) -> None:
     v2 = plan()
     path = tmp_path / "edit-plan-short-01.json"
     write_plan(v2, path)
-    loaded = load_plan(path)
+    loaded = load_plan_document(path)
     assert type(loaded) is EditPlanV2
     assert loaded == v2
+
+    with pytest.raises(VideoEditorError) as error:
+        load_plan(path)
+    assert error.value.category is ErrorCategory.PLAN
+    assert str(error.value) == (
+        "edit plan schema version 2 is not supported by Phase 1 workflow"
+    )
 
     schema = json.loads(SCHEMA_PATH.read_text())
     assert schema == EditPlanV2.model_json_schema()

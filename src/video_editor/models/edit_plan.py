@@ -793,7 +793,7 @@ def validate_plan_set(plans: Sequence[EditPlanV2], policy: PlanSetPolicy) -> Non
         raise ValueError("anchor moment may appear in at most two shorts")
 
 
-def load_plan(path: Path) -> EditPlanDocument:
+def load_plan_document(path: Path) -> EditPlanDocument:
     """Load and validate version 1 or version 2 JSON plan from disk."""
 
     try:
@@ -815,6 +815,24 @@ def load_plan(path: Path) -> EditPlanDocument:
         raise VideoEditorError(
             ErrorCategory.PLAN, f"invalid edit plan {path}: {exc}"
         ) from exc
+
+
+def load_plan_v1(path: Path) -> EditPlan:
+    """Load a version 1 plan for Phase 1 workflow and rendering boundaries."""
+
+    plan = load_plan_document(path)
+    if type(plan) is EditPlan:
+        return plan
+    raise VideoEditorError(
+        ErrorCategory.PLAN,
+        "edit plan schema version 2 is not supported by Phase 1 workflow",
+    )
+
+
+def load_plan(path: Path) -> EditPlan:
+    """Load a version 1 plan through the backward-compatible public API."""
+
+    return load_plan_v1(path)
 
 
 def write_plan(plan: EditPlanDocument, path: Path) -> None:
