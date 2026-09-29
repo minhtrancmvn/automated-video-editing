@@ -9,12 +9,11 @@ import os
 import secrets
 import stat
 import subprocess
-import weakref
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from itertools import pairwise
 from pathlib import Path
-from typing import Any, BinaryIO, Self
+from typing import Any, BinaryIO, Self, cast
 
 from pydantic import ValidationError
 
@@ -33,6 +32,8 @@ from video_editor.persistence.database import JobStore
 _IMPLEMENTATION_VERSION = "cloud-proxy-v1"
 _MAPPING_VERSION = "cloud-proxy-mapping-v1"
 _DURATION_TOLERANCE = Decimal("0.2")
+_TRUSTED_FFMPEG = "ffmpeg"
+_TRUSTED_FFPROBE = "ffprobe"
 _GENERATION_AUTHORITY = secrets.token_bytes(32)
 
 
@@ -83,9 +84,7 @@ class ProxyManifest:
     chunk_data: AnalysisChunkData
 
 
-_GENERATION_PROOFS: weakref.WeakKeyDictionary[ProxyManifest, bytes] = (
-    weakref.WeakKeyDictionary()
-)
+_GENERATION_PROOFS: dict[str, bytes] = {}
 
 
 class AuthorizedUpload:
@@ -441,17 +440,24 @@ def _validate_generation_inputs(
     return source_resolved, generated_root.resolve(strict=True)
 
 
-def _generation_proof(
-    manifest_id: str, digest: str, file_stat: os.stat_result
-) -> bytes:
-    payload = "\0".join(
-        (
-            manifest_id,
-            digest,
-            str(file_stat.st_dev),
-            str(file_stat.st_ino),
-            str(file_stat.st_size),
-        )
+def _generation_proof(manifest: ProxyManifest) -> bytes:
+    payload = json.dumps(
+        {
+            "chunk_data": manifest.chunk_data.model_dump(mode="json"),
+            "chunk_id": manifest.chunk_id,
+            "digest": manifest.digest,
+            "job_id": manifest.job_id,
+            "manifest_data": manifest.data.model_dump(mode="json"),
+            "manifest_id": manifest.manifest_id,
+            "path": str(manifest.path),
+            "source_id": manifest.source_id,
+            "trusted_tools": {
+                "ffmpeg": _TRUSTED_FFMPEG,
+                "ffprobe": _TRUSTED_FFPROBE,
+            },
+        },
+        sort_keys=True,
+        separators=(",", ":"),
     ).encode()
     return hmac.digest(_GENERATION_AUTHORITY, payload, "sha256")
 
@@ -468,8 +474,6 @@ def create_cloud_proxy_chunk(
     paths: PathSettings,
     store: JobStore,
     settings: CloudProxySettings | None = None,
-    ffmpeg: str = "ffmpeg",
-    ffprobe: str = "ffprobe",
 ) -> ProxyManifest:
     """Create, inspect, hash, and describe one cloud proxy chunk."""
     active = settings or CloudProxySettings()
@@ -570,7 +574,7 @@ def create_cloud_proxy_chunk(
                     source_start,
                     duration,
                     active,
-                    ffmpeg,
+                    _TRUSTED_FFMPEG,
                 ),
                 source_fd=source_fd,
                 output_fd=partial_fd,
@@ -606,7 +610,7 @@ def create_cloud_proxy_chunk(
             partial,
             duration,
             active,
-            ffprobe=ffprobe,
+            ffprobe=_TRUSTED_FFPROBE,
         )
         current_partial_stat = partial.lstat()
         if (
@@ -706,15 +710,13 @@ def create_cloud_proxy_chunk(
         data=manifest_data,
         chunk_data=chunk_data,
     )
-    _GENERATION_PROOFS[manifest] = _generation_proof(
-        manifest_id, manifest_data.file_digest_sha256, file_stat
-    )
+    proof_id = secrets.token_hex(32)
+    _GENERATION_PROOFS[proof_id] = _generation_proof(manifest)
+    object.__setattr__(manifest, "_generation_proof_id", proof_id)
     return manifest
 
 
-def register_proxy_manifest(
-    manifest: ProxyManifest, store: JobStore, *, ffprobe: str = "ffprobe"
-) -> None:
+def register_proxy_manifest(manifest: ProxyManifest, store: JobStore) -> None:
     """Persist only media whose observed bytes satisfy upload policy."""
     if manifest.data.job_id != manifest.job_id:
         raise ValueError("manifest job identity mismatch")
@@ -749,16 +751,17 @@ def register_proxy_manifest(
         ):
             raise _upload_error("generated media file facts do not match manifest")
         evidence = _probe_media_evidence(
-            descriptor_path, ffprobe=ffprobe, pass_fds=(descriptor,)
+            descriptor_path, ffprobe=_TRUSTED_FFPROBE, pass_fds=(descriptor,)
         )
         _enforce_media_policy(
             evidence, manifest.data.proxy_end - manifest.data.proxy_start
         )
         _match_manifest_media(evidence, manifest.data)
-        expected_proof = _generation_proof(
-            manifest.manifest_id, manifest.data.file_digest_sha256, opened_stat
-        )
-        generation_proof = _GENERATION_PROOFS.get(manifest)
+        expected_proof = _generation_proof(manifest)
+        proof_id = getattr(manifest, "_generation_proof_id", None)
+        if not isinstance(proof_id, str):
+            raise _upload_error("generated media lacks trusted generation evidence")
+        generation_proof = _GENERATION_PROOFS.get(proof_id)
         if generation_proof is None or not hmac.compare_digest(
             generation_proof, expected_proof
         ):
@@ -792,6 +795,7 @@ def register_proxy_manifest(
         raise
     else:
         connection.commit()
+        _GENERATION_PROOFS.pop(proof_id, None)
 
 
 def _upload_error(message: str) -> VideoEditorError:
@@ -816,17 +820,15 @@ def _reject_symlinks(path: Path) -> None:
 
 
 def _stored_source(job: dict[str, Any], source_id: str) -> dict[str, Any]:
-    sources = [
-        source
-        for source in job.get("sources", [])
-        if source.get("source_id") == source_id
-    ]
+    raw_sources = job.get("sources", [])
+    if not isinstance(raw_sources, list) or any(
+        not isinstance(source, dict) for source in raw_sources
+    ):
+        raise _upload_error("persisted source record is invalid")
+    sources = [source for source in raw_sources if source.get("source_id") == source_id]
     if len(sources) != 1:
         raise _upload_error("manifest source identity is not registered for job")
-    source = sources[0]
-    if not isinstance(source, dict):
-        raise _upload_error("persisted source record is invalid")
-    return source
+    return cast(dict[str, Any], sources[0])
 
 
 def _validate_upstream_mapping(
@@ -966,14 +968,19 @@ def _persisted_source_facts(
         if not isinstance(data, dict):
             raise _upload_error("persisted source identity is invalid")
         source_path = data.get("path")
+        source_id = data.get("source_id")
         fingerprint = data.get("fingerprint")
         identity_version = data.get("identity_version")
         size_bytes = data.get("size_bytes")
         if (
             not isinstance(source_path, str)
             or not source_path
+            or not isinstance(source_id, str)
+            or not source_id
+            or source_id != record.get("source_id")
             or not isinstance(fingerprint, str)
-            or not fingerprint
+            or len(fingerprint) != 64
+            or any(character not in "0123456789abcdef" for character in fingerprint)
             or identity_version != IDENTITY_VERSION
             or not isinstance(size_bytes, int)
             or isinstance(size_bytes, bool)
@@ -1038,6 +1045,14 @@ def _validate_source_identity(
         raise _upload_error(
             "source identity changed: file device, inode, or size mismatch"
         )
+    if (
+        source.get("source_id") != manifest.source_id
+        or identity_version != IDENTITY_VERSION
+        or not isinstance(fingerprint, str)
+        or len(fingerprint) != 64
+        or any(character not in "0123456789abcdef" for character in fingerprint)
+    ):
+        raise _upload_error("persisted source identity is invalid")
     if fingerprint != manifest.source_fingerprint:
         raise _upload_error("manifest source fingerprint mismatch")
     try:
@@ -1202,8 +1217,6 @@ def validate_upload_candidate(
     expected_job_id: str,
     store: JobStore,
     paths: PathSettings,
-    *,
-    ffprobe: str = "ffprobe",
 ) -> AuthorizedUpload:
     """Authorize one open descriptor after validating its bytes and provenance."""
     record = store.get_proxy_manifest_for_job(expected_job_id, manifest_id)
@@ -1225,12 +1238,12 @@ def validate_upload_candidate(
         store.get_proxy_artifact_metadata(expected_job_id, manifest.source_id), manifest
     )
 
-    job = store.get_job(expected_job_id)
-    source = _stored_source(job, manifest.source_id)
-    source_path = _validate_source_identity(source, manifest)
     source_paths, source_fingerprints = _persisted_source_facts(
         store.list_persisted_sources()
     )
+    job = store.get_job(expected_job_id)
+    source = _stored_source(job, manifest.source_id)
+    source_path = _validate_source_identity(source, manifest)
     path, file_stat = _validate_candidate_path(
         Path(manifest.artifact_path),
         manifest,
@@ -1254,7 +1267,7 @@ def validate_upload_candidate(
         _validate_probe(
             descriptor_path,
             manifest,
-            ffprobe=ffprobe,
+            ffprobe=_TRUSTED_FFPROBE,
             pass_fds=(stream.fileno(),),
         )
         if not _same_identity(opened_stat, os.fstat(stream.fileno())):

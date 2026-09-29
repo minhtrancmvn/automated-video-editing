@@ -7,6 +7,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from itertools import pairwise
@@ -79,7 +80,7 @@ def _paths(tmp_path: Path) -> PathSettings:
     )
 
 
-def _registered_chunk(tmp_path: Path) -> RegisteredChunk:
+def _registered_chunk(tmp_path: Path, *, register: bool = True) -> RegisteredChunk:
     paths = _paths(tmp_path)
     source = create_media_fixture(
         paths.input_dir / "source.mp4", with_audio=True, duration_seconds=2
@@ -148,7 +149,8 @@ def _registered_chunk(tmp_path: Path) -> RegisteredChunk:
         paths=paths,
         store=store,
     )
-    register_proxy_manifest(manifest, store)
+    if register:
+        register_proxy_manifest(manifest, store)
     return RegisteredChunk(manifest, store, paths, source)
 
 
@@ -1338,7 +1340,7 @@ def test_missing_unrelated_persisted_source_does_not_block_upload(
                     "source_id": "deleted-source",
                     "path": str(missing),
                     "size_bytes": 123,
-                    "fingerprint": "deleted-fingerprint",
+                    "fingerprint": "a" * 64,
                     "identity_version": IDENTITY_VERSION,
                 }
             ],
@@ -1412,6 +1414,65 @@ def test_malformed_persisted_source_identity_fails_closed(tmp_path: Path) -> Non
                 }
             ],
         )
+
+        with pytest.raises(VideoEditorError, match="persisted source identity"):
+            validate_upload_candidate(
+                registered.manifest.manifest_id,
+                registered.manifest.job_id,
+                registered.store,
+                registered.paths,
+            )
+    finally:
+        registered.store.__exit__(None, None, None)
+
+
+def test_missing_persisted_source_with_malformed_bounded_fingerprint_fails_closed(
+    tmp_path: Path,
+) -> None:
+    registered = _registered_chunk(tmp_path)
+    try:
+        other_job = registered.store.create_job(
+            {"input_path": str(registered.paths.input_dir)}, {}
+        )
+        registered.store.save_sources(
+            other_job,
+            [
+                {
+                    "source_id": "malformed-source",
+                    "path": str(registered.paths.input_dir / "missing.mp4"),
+                    "size_bytes": 123,
+                    "fingerprint": "not-a-valid-bounded-fingerprint",
+                    "identity_version": IDENTITY_VERSION,
+                }
+            ],
+        )
+
+        with pytest.raises(VideoEditorError, match="persisted source identity"):
+            validate_upload_candidate(
+                registered.manifest.manifest_id,
+                registered.manifest.job_id,
+                registered.store,
+                registered.paths,
+            )
+    finally:
+        registered.store.__exit__(None, None, None)
+
+
+def test_persisted_source_wrapper_and_data_ids_must_match(tmp_path: Path) -> None:
+    registered = _registered_chunk(tmp_path)
+    try:
+        row = registered.store.connection.execute(
+            "SELECT id, data_json FROM sources WHERE job_id = ? AND source_id = ?",
+            (registered.manifest.job_id, registered.manifest.source_id),
+        ).fetchone()
+        assert row is not None
+        data = json.loads(row["data_json"])
+        data["source_id"] = "different-source"
+        registered.store.connection.execute(
+            "UPDATE sources SET data_json = ? WHERE id = ?",
+            (json.dumps(data, sort_keys=True, separators=(",", ":")), row["id"]),
+        )
+        registered.store.connection.commit()
 
         with pytest.raises(VideoEditorError, match="persisted source identity"):
             validate_upload_candidate(
@@ -1598,6 +1659,83 @@ def test_registration_rejects_forged_generated_media_profile(
             register_proxy_manifest(forged_manifest, registered.store)
     finally:
         registered.store.__exit__(None, None, None)
+
+
+def test_public_creation_rejects_executable_wrapper_bitrate_bypass(
+    tmp_path: Path,
+) -> None:
+    generated = _registered_chunk(tmp_path, register=False)
+    try:
+        original = generated.manifest
+        original.path.unlink()
+        mapping = ProxyMapping(
+            source_id=original.source_id,
+            source_start=D("0"),
+            source_end=D("2"),
+            proxy_start=D("0"),
+            proxy_end=D("2"),
+            source_identity=original.data.source_identity,
+            settings_hash=original.data.upstream_settings_hash,
+            tool_version=original.data.upstream_tool_version,
+        )
+        real_ffmpeg = shutil.which("ffmpeg")
+        assert real_ffmpeg is not None
+        wrapper = tmp_path / "ffmpeg-wrapper"
+        wrapper.write_text(
+            f"#!{sys.executable}\n"
+            "import os\n"
+            "import sys\n"
+            f"executable = {real_ffmpeg!r}\n"
+            'args = ["32k" if value == "64k" else value for value in sys.argv[1:]]\n'
+            "os.execv(executable, [executable, *args])\n"
+        )
+        wrapper.chmod(0o700)
+
+        with pytest.raises(TypeError, match="ffmpeg|unexpected keyword"):
+            manifest = create_cloud_proxy_chunk(
+                generated.source,
+                generated.paths.cache_dir / original.job_id,
+                mapping,
+                D("0"),
+                D("1.5"),
+                job_id=original.job_id,
+                source_fingerprint=original.data.source_fingerprint,
+                paths=generated.paths,
+                store=generated.store,
+                ffmpeg=str(wrapper),
+            )
+            assert manifest.data.audio_probe_bitrate_bps < 60_000
+            register_proxy_manifest(manifest, generated.store)
+    finally:
+        generated.store.__exit__(None, None, None)
+
+
+def test_generation_proof_is_consumed_after_successful_registration(
+    tmp_path: Path,
+) -> None:
+    generated = _registered_chunk(tmp_path, register=False)
+    try:
+        register_proxy_manifest(generated.manifest, generated.store)
+
+        with pytest.raises(
+            VideoEditorError, match="trusted generation|consumed|replay"
+        ):
+            register_proxy_manifest(generated.manifest, generated.store)
+    finally:
+        generated.store.__exit__(None, None, None)
+
+
+def test_equal_manifest_object_cannot_reuse_generation_proof(tmp_path: Path) -> None:
+    generated = _registered_chunk(tmp_path, register=False)
+    try:
+        equal_manifest = replace(generated.manifest)
+        assert equal_manifest == generated.manifest
+        assert equal_manifest is not generated.manifest
+
+        with pytest.raises(VideoEditorError, match="trusted generation"):
+            register_proxy_manifest(equal_manifest, generated.store)
+    finally:
+        generated.store.__exit__(None, None, None)
 
 
 def test_registration_rejects_caller_forged_32kbps_media(
@@ -1861,26 +1999,27 @@ def test_upload_rejects_manifest_range_outside_persisted_phase1_mapping(
 def test_registration_rolls_back_manifest_when_chunk_save_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    registered = _registered_chunk(tmp_path)
+    registered = _registered_chunk(tmp_path, register=False)
     try:
         manifest = registered.manifest
-        registered.store.connection.execute(
-            "DELETE FROM analysis_chunks WHERE chunk_id = ?", (manifest.chunk_id,)
-        )
-        registered.store.connection.execute(
-            "DELETE FROM proxy_manifests WHERE manifest_id = ?", (manifest.manifest_id,)
-        )
-        registered.store.connection.commit()
+        actual_save = registered.store.save_analysis_chunk
+        calls = 0
 
-        def fail_chunk_save(*args: object, **kwargs: object) -> None:
-            raise RuntimeError("chunk write failed")
+        def fail_once(*args: object, **kwargs: object) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("chunk write failed")
+            actual_save(*args, **kwargs)  # type: ignore[arg-type]
 
-        monkeypatch.setattr(registered.store, "save_analysis_chunk", fail_chunk_save)
+        monkeypatch.setattr(registered.store, "save_analysis_chunk", fail_once)
 
         with pytest.raises(RuntimeError, match="chunk write failed"):
             register_proxy_manifest(manifest, registered.store)
 
         assert registered.store.get_proxy_manifest(manifest.manifest_id) is None
+        register_proxy_manifest(manifest, registered.store)
+        assert registered.store.get_proxy_manifest(manifest.manifest_id) is not None
     finally:
         registered.store.__exit__(None, None, None)
 

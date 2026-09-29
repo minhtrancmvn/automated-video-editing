@@ -283,3 +283,131 @@ Comparison includes all Phase 2 feature changes since `main`, not only round 1B.
 - Missing unrelated but complete source records remain upload-compatible unless candidate fingerprint matches.
 - Fail-closed malformed legacy source records block upload. No implicit legacy bypass exists.
 - No remaining known round 1B.1 concern.
+
+## Round 1B.2 Remediation
+
+Date: 2026-09-30
+
+### Status
+
+Complete. Removed public executable selection from upload-capable production APIs, replaced weak reusable proof identity with canonical one-time proof state, and made bounded-v1 persisted source validation exact and fail closed. Process-restart registration remains fail closed as accepted. No network/live Gemini use. No subagents dispatched.
+
+### Pre-Edit GitNexus Impact
+
+MCP initially returned `UNKNOWN` for private helpers. Exact CLI impact and required text confirmation resolved edit scope:
+
+- `create_cloud_proxy_chunk`: LOW; 0 direct indexed callers; 0 affected processes.
+- `register_proxy_manifest`: LOW; 0 direct indexed callers; 0 affected processes.
+- `ProxyManifest`: LOW; 0 direct indexed dependants; 0 affected processes.
+- `validate_upload_candidate`: LOW; 0 direct indexed callers; 0 affected processes.
+- `_validated_probe`: LOW; 1 direct caller (`create_cloud_proxy_chunk`); 1 affected Analysis process.
+- `_validate_source_identity`: LOW; 1 direct caller (`validate_upload_candidate`); 1 affected Analysis process.
+- `_stored_source`: LOW; 1 direct caller (`validate_upload_candidate`); 1 affected Analysis process.
+- `_generation_proof`, `_persisted_source_facts`, and `_probe_media_evidence` remained unindexed; exact text search confined references to `proxy_chunks.py` and unit tests.
+
+No HIGH or CRITICAL impact result occurred.
+
+### Exact Observed RED Evidence
+
+Executable-wrapper bitrate bypass:
+
+```text
+uv run pytest tests/unit/test_proxy_chunks.py::test_public_creation_rejects_executable_wrapper_bitrate_bypass -q
+FAILED: DID NOT RAISE TypeError
+```
+
+The wrapper replaced FFmpeg argument `64k` with `32k`; public creation completed and minted trusted generation evidence before the assertion failed.
+
+Proof replay and equal-object reuse:
+
+```text
+uv run pytest tests/unit/test_proxy_chunks.py::test_generation_proof_is_consumed_after_successful_registration tests/unit/test_proxy_chunks.py::test_equal_manifest_object_cannot_reuse_consumed_generation_proof -q
+FAILED test_generation_proof_is_consumed_after_successful_registration: DID NOT RAISE VideoEditorError
+FAILED test_equal_manifest_object_cannot_reuse_consumed_generation_proof: DID NOT RAISE VideoEditorError
+```
+
+Malformed nonempty bounded-v1 fingerprint and inconsistent source IDs:
+
+```text
+uv run pytest tests/unit/test_proxy_chunks.py::test_missing_persisted_source_with_malformed_bounded_fingerprint_fails_closed tests/unit/test_proxy_chunks.py::test_persisted_source_wrapper_and_data_ids_must_match -q
+FAILED test_missing_persisted_source_with_malformed_bounded_fingerprint_fails_closed: DID NOT RAISE VideoEditorError
+FAILED test_persisted_source_wrapper_and_data_ids_must_match: expected 'persisted source identity'; got 'manifest source identity is not registered for job'
+```
+
+### GREEN Changes
+
+- Public `create_cloud_proxy_chunk`, `register_proxy_manifest`, and `validate_upload_candidate` no longer accept caller-selected FFmpeg or ffprobe executable arguments. Upload-capable production paths use fixed trusted tool configuration.
+- Canonical HMAC payload now includes complete caller-visible `ProxyManifest` identity: manifest/chunk/job/source IDs, path, digest, full `ProxyManifestData`, full `AnalysisChunkData`, and trusted FFmpeg/ffprobe configuration. Those typed records bind source identity/facts, Phase 1 settings and tool version, source/proxy mapping ranges, media profile, digest, device, inode, size, and implementation/mapping versions.
+- Generation creates a random one-time proof capability not derived from module-private naming or object equality. Equal reconstructed manifest objects do not inherit it.
+- Registration consumes proof only after successful DB commit. Failed registration transactions roll back without consuming proof, allowing one narrowly scoped retry. Successful registration replay fails closed.
+- bounded-v1 fingerprints must be exactly 64 lowercase hexadecimal characters. Persisted wrapper `source_id` must equal data `source_id`; identity version, source ID, path, size, and fingerprint must all be valid. Missing-path malformed legacy records remain non-uploadable.
+- Exact stream set, one-open/no-follow descriptor validation, job-scoped reads, global source protection, and persisted Phase 1 mapping validation remain intact.
+
+Direct regression GREEN:
+
+```text
+uv run pytest tests/unit/test_proxy_chunks.py::test_public_creation_rejects_executable_wrapper_bitrate_bypass tests/unit/test_proxy_chunks.py::test_generation_proof_is_consumed_after_successful_registration tests/unit/test_proxy_chunks.py::test_equal_manifest_object_cannot_reuse_generation_proof tests/unit/test_proxy_chunks.py::test_registration_rolls_back_manifest_when_chunk_save_fails tests/unit/test_proxy_chunks.py::test_missing_persisted_source_with_malformed_bounded_fingerprint_fails_closed tests/unit/test_proxy_chunks.py::test_persisted_source_wrapper_and_data_ids_must_match -q
+6 passed in 3.24s
+```
+
+Focused GREEN:
+
+```text
+uv run pytest tests/unit/test_proxy_chunks.py tests/unit/test_proxies.py -q
+122 passed in 27.01s
+```
+
+### Final Verification
+
+```text
+uv run pytest -q
+510 passed in 106.86s (0:01:46)
+
+uv run mypy src
+Success: no issues found in 27 source files
+
+uv run ruff check .
+All checks passed!
+
+uv run ruff format --check src tests
+51 files already formatted
+
+uv build
+Successfully built dist/video_editor-0.1.0.tar.gz
+Successfully built dist/video_editor-0.1.0-py3-none-any.whl
+
+git diff --check
+passed with no output
+```
+
+Build outputs removed after verification.
+
+GitNexus compare against `main`:
+
+```text
+changed_count: 114
+changed_files: 29
+affected_count: 0
+risk_level: low
+affected_processes: []
+partial/truncated: false
+```
+
+Comparison includes all Phase 2 feature changes since `main`, not only round 1B.2.
+
+### Files Changed
+
+- `src/video_editor/analysis/proxy_chunks.py`
+- `tests/unit/test_proxy_chunks.py`
+- `.superpowers/sdd/2026-09-28-phase-2-automatic-highlights/task-4-fix-1b-report.md`
+
+`task_plan.md` remains an uncommitted execution artifact. GitNexus-generated instruction/skill changes remain excluded.
+
+### Self-Review and Concerns
+
+- No public production parameter can redirect trusted generation or registration probing to caller-provided wrappers.
+- Proof is not keyed by `ProxyManifest` equality and no `WeakKeyDictionary` remains. Random proof state is process-local and single use after commit.
+- Caller-visible manifest mutation changes canonical HMAC and fails verification. Equal reconstructed objects lack proof capability.
+- Transaction failure retains proof for retry; successful commit removes it. Manual deletion of persisted rows does not restore consumed trust.
+- Process restart before registration fails closed, accepted operational limitation.
+- No remaining known round 1B.2 concern.
