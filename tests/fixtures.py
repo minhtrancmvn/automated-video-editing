@@ -6,8 +6,13 @@ import subprocess
 from pathlib import Path
 
 
-def create_media_fixture(path: Path, *, with_audio: bool = True) -> Path:
+def create_media_fixture(
+    path: Path, *, with_audio: bool = True, duration_seconds: int = 1
+) -> Path:
     """Create tiny deterministic MP4 fixture using local FFmpeg only."""
+
+    if duration_seconds <= 0:
+        raise ValueError("duration_seconds must be positive")
 
     path.parent.mkdir(parents=True, exist_ok=True)
     args = [
@@ -20,7 +25,7 @@ def create_media_fixture(path: Path, *, with_audio: bool = True) -> Path:
         "-i",
         "color=c=black:s=320x240:r=10",
         "-t",
-        "1",
+        str(duration_seconds),
     ]
     if with_audio:
         args.extend(["-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono"])

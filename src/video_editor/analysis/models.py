@@ -45,20 +45,36 @@ class ProxyManifestData(AnalysisModel):
     """Provider-neutral payload for one generated proxy manifest."""
 
     schema_version: int = Field(ge=1)
+    job_id: NonEmptyString = "legacy"
+    source_id: NonEmptyString = "legacy"
+    chunk_id: NonEmptyString = "legacy"
     source_fingerprint: NonEmptyString
     source_identity: NonEmptyString
+    source_path: NonEmptyString = "legacy"
     artifact_path: NonEmptyString
     generated_root: NonEmptyString
+    generated_root_device: int = Field(default=0, ge=0)
+    generated_root_inode: int = Field(default=0, ge=0)
     mapping_version: NonEmptyString
+    upstream_settings_hash: NonEmptyString = "legacy"
+    upstream_tool_version: NonEmptyString = "legacy"
     source_start: FiniteDecimal = Field(ge=0)
     source_end: FiniteDecimal = Field(gt=0)
     proxy_start: FiniteDecimal = Field(ge=0)
     proxy_end: FiniteDecimal = Field(gt=0)
+    media_duration: FiniteDecimal = Field(default=Decimal(1), gt=0)
+    file_size_bytes: int = Field(default=0, ge=0)
+    file_digest_sha256: NonEmptyString = "legacy"
+    file_device: int = Field(default=0, ge=0)
+    file_inode: int = Field(default=0, ge=0)
+    video_codec: NonEmptyString = "h264"
     video_width: int = Field(gt=0)
     video_height: int = Field(gt=0)
     video_fps: FiniteDecimal = Field(gt=0)
     audio_codec: NonEmptyString
+    audio_channels: int = Field(default=1, gt=0)
     audio_bitrate_bps: int = Field(ge=0)
+    audio_probe_bitrate_bps: int = Field(default=0, ge=0)
     implementation_version: NonEmptyString
 
     @model_validator(mode="after")
@@ -75,11 +91,23 @@ class AnalysisChunkData(AnalysisModel):
     """Provider-neutral payload for one source-mapped analysis chunk."""
 
     schema_version: int = Field(ge=1)
+    job_id: NonEmptyString = "legacy"
+    source_id: NonEmptyString = "legacy"
+    source_identity: NonEmptyString = "legacy"
     mapping_version: NonEmptyString
+    source_start: FiniteDecimal = Field(default=Decimal(0), ge=0)
+    source_end: FiniteDecimal = Field(default=Decimal(1), gt=0)
     proxy_start: FiniteDecimal = Field(ge=0)
     proxy_end: FiniteDecimal = Field(gt=0)
     boundary_kind: AnalysisBoundaryKind
     implementation_version: NonEmptyString
+
+    @model_validator(mode="after")
+    def validate_source_range(self) -> Self:
+        """Reject empty or reversed source intervals."""
+        if self.source_end <= self.source_start:
+            raise ValueError("source range end must be greater than start")
+        return self
 
     @model_validator(mode="after")
     def validate_proxy_range(self) -> Self:

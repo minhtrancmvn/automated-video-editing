@@ -628,20 +628,23 @@ class JobStore:
         manifest_id: str,
         digest: str,
         data: ProxyManifestData,
+        *,
+        connection: sqlite3.Connection | None = None,
     ) -> None:
         """Persist one generated proxy manifest for later upload validation."""
         if type(data) is not ProxyManifestData:
             raise TypeError("data must be exact ProxyManifestData")
         data_json = _json_without_secrets(data.model_dump(mode="json"))
-        with self._transaction() as connection:
-            self._job_exists(connection, job_id)
-            existing = connection.execute(
+
+        def save(active: sqlite3.Connection) -> None:
+            self._job_exists(active, job_id)
+            existing = active.execute(
                 "SELECT job_id FROM proxy_manifests WHERE manifest_id = ?",
                 (manifest_id,),
             ).fetchone()
             if existing is not None and existing["job_id"] != job_id:
                 raise ValueError("manifest ID belongs to another job")
-            connection.execute(
+            active.execute(
                 """INSERT INTO proxy_manifests(
                     job_id, manifest_id, digest, data_json, created_at
                 ) VALUES (?, ?, ?, ?, ?)
@@ -651,6 +654,27 @@ class JobStore:
                     created_at=excluded.created_at""",
                 (job_id, manifest_id, digest, data_json, _now()),
             )
+
+        if connection is not None:
+            save(connection)
+            return
+        with self._transaction() as active:
+            save(active)
+
+    def get_proxy_manifest(self, manifest_id: str) -> dict[str, Any] | None:
+        """Return one registered proxy manifest by stable ID."""
+        row = self.connection.execute(
+            "SELECT * FROM proxy_manifests WHERE manifest_id = ?", (manifest_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "manifest_id": row["manifest_id"],
+            "job_id": row["job_id"],
+            "digest": row["digest"],
+            "data": _row_json(row["data_json"]),
+            "created_at": row["created_at"],
+        }
 
     def save_analysis_chunk(
         self,
@@ -662,6 +686,7 @@ class JobStore:
         source_start: Decimal,
         source_end: Decimal,
         data: AnalysisChunkData,
+        connection: sqlite3.Connection | None = None,
     ) -> None:
         """Persist one source-mapped analysis chunk."""
         if type(data) is not AnalysisChunkData:
@@ -672,9 +697,10 @@ class JobStore:
             end=source_end,
         )
         data_json = _json_without_secrets(data.model_dump(mode="json"))
-        with self._transaction() as connection:
-            self._job_exists(connection, job_id)
-            manifest = connection.execute(
+
+        def save(active: sqlite3.Connection) -> None:
+            self._job_exists(active, job_id)
+            manifest = active.execute(
                 "SELECT job_id FROM proxy_manifests WHERE manifest_id = ?",
                 (manifest_id,),
             ).fetchone()
@@ -682,7 +708,7 @@ class JobStore:
                 raise KeyError(f"unknown proxy manifest: {manifest_id}")
             if manifest["job_id"] != job_id:
                 raise ValueError("proxy manifest belongs to another job")
-            existing = connection.execute(
+            existing = active.execute(
                 """SELECT job_id, manifest_id, source_id, source_start, source_end
                 FROM analysis_chunks WHERE chunk_id = ?""",
                 (chunk_id,),
@@ -695,7 +721,7 @@ class JobStore:
                 or existing["source_end"] != format(source_range.end, "f")
             ):
                 raise ValueError("chunk ID is already assigned to another identity")
-            connection.execute(
+            active.execute(
                 """INSERT INTO analysis_chunks(
                     job_id, chunk_id, manifest_id, source_id,
                     source_start, source_end, data_json
@@ -711,6 +737,29 @@ class JobStore:
                     data_json,
                 ),
             )
+
+        if connection is not None:
+            save(connection)
+            return
+        with self._transaction() as active:
+            save(active)
+
+    def get_analysis_chunk(self, chunk_id: str) -> dict[str, Any] | None:
+        """Return one persisted source-mapped analysis chunk by stable ID."""
+        row = self.connection.execute(
+            "SELECT * FROM analysis_chunks WHERE chunk_id = ?", (chunk_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "chunk_id": row["chunk_id"],
+            "job_id": row["job_id"],
+            "manifest_id": row["manifest_id"],
+            "source_id": row["source_id"],
+            "source_start": Decimal(row["source_start"]),
+            "source_end": Decimal(row["source_end"]),
+            "data": _row_json(row["data_json"]),
+        }
 
     def save_analysis_result(
         self,
