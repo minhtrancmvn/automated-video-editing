@@ -661,6 +661,57 @@ class JobStore:
         with self._transaction() as active:
             save(active)
 
+    def list_persisted_sources(self) -> list[dict[str, Any]]:
+        """Return every persisted source record across jobs."""
+        rows = self.connection.execute(
+            "SELECT job_id, source_id, data_json FROM sources ORDER BY id"
+        ).fetchall()
+        return [
+            {
+                "job_id": row["job_id"],
+                "source_id": row["source_id"],
+                "data": _row_json(row["data_json"]),
+            }
+            for row in rows
+        ]
+
+    def get_proxy_artifact_metadata(
+        self, job_id: str, source_id: str
+    ) -> dict[str, Any] | None:
+        """Return unique persisted Phase 1 proxy metadata for one job source."""
+        rows = self.connection.execute(
+            "SELECT metadata_json FROM artifacts WHERE job_id = ? AND stage_name = ?",
+            (job_id, "proxy"),
+        ).fetchall()
+        matches = []
+        for row in rows:
+            metadata = _row_json(row["metadata_json"])
+            if (
+                isinstance(metadata, dict)
+                and metadata.get("kind") == "proxy"
+                and metadata.get("source_id") == source_id
+            ):
+                matches.append(metadata)
+        return matches[0] if len(matches) == 1 else None
+
+    def get_proxy_manifest_for_job(
+        self, job_id: str, manifest_id: str
+    ) -> dict[str, Any] | None:
+        """Return one registered proxy manifest inside caller job scope."""
+        row = self.connection.execute(
+            "SELECT * FROM proxy_manifests WHERE job_id = ? AND manifest_id = ?",
+            (job_id, manifest_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "manifest_id": row["manifest_id"],
+            "job_id": row["job_id"],
+            "digest": row["digest"],
+            "data": _row_json(row["data_json"]),
+            "created_at": row["created_at"],
+        }
+
     def get_proxy_manifest(self, manifest_id: str) -> dict[str, Any] | None:
         """Return one registered proxy manifest by stable ID."""
         row = self.connection.execute(
@@ -743,6 +794,26 @@ class JobStore:
             return
         with self._transaction() as active:
             save(active)
+
+    def get_analysis_chunk_for_job(
+        self, job_id: str, chunk_id: str
+    ) -> dict[str, Any] | None:
+        """Return one analysis chunk inside caller job scope."""
+        row = self.connection.execute(
+            "SELECT * FROM analysis_chunks WHERE job_id = ? AND chunk_id = ?",
+            (job_id, chunk_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "chunk_id": row["chunk_id"],
+            "job_id": row["job_id"],
+            "manifest_id": row["manifest_id"],
+            "source_id": row["source_id"],
+            "source_start": Decimal(row["source_start"]),
+            "source_end": Decimal(row["source_end"]),
+            "data": _row_json(row["data_json"]),
+        }
 
     def get_analysis_chunk(self, chunk_id: str) -> dict[str, Any] | None:
         """Return one persisted source-mapped analysis chunk by stable ID."""

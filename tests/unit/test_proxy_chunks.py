@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
 import shutil
 import stat
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from itertools import pairwise
 from pathlib import Path
@@ -95,6 +96,27 @@ def _registered_chunk(tmp_path: Path) -> RegisteredChunk:
             }
         ],
     )
+    phase1_proxy = paths.cache_dir / f"{source_id}.phase1.proxy.mp4"
+    phase1_proxy.parent.mkdir(parents=True, exist_ok=True)
+    phase1_proxy.write_bytes(b"phase1 proxy placeholder")
+    mapping_data = {
+        key: str(value) if isinstance(value, Decimal) else value
+        for key, value in mapping.__dict__.items()
+    }
+    store.save_artifact(
+        job_id,
+        "proxy",
+        phase1_proxy,
+        {
+            "kind": "proxy",
+            "source_id": source_id,
+            "source_path": str(source),
+            "source_identity": source_identity,
+            "settings_hash": mapping.settings_hash,
+            "tool_version": mapping.tool_version,
+            "mapping": mapping_data,
+        },
+    )
     generated_root = paths.cache_dir / job_id
     manifest = create_cloud_proxy_chunk(
         source,
@@ -105,6 +127,7 @@ def _registered_chunk(tmp_path: Path) -> RegisteredChunk:
         job_id=job_id,
         source_fingerprint=fingerprint,
         paths=paths,
+        store=store,
     )
     register_proxy_manifest(manifest, store)
     return RegisteredChunk(manifest, store, paths, source)
@@ -142,6 +165,44 @@ def _rewrite_chunk_data(registered: RegisteredChunk, **changes: object) -> None:
             json.dumps(payload, sort_keys=True, separators=(",", ":")),
             registered.manifest.chunk_id,
         ),
+    )
+    registered.store.connection.commit()
+
+
+def _rewrite_phase1_mapping(registered: RegisteredChunk, **changes: object) -> None:
+    row = registered.store.connection.execute(
+        "SELECT metadata_json FROM artifacts WHERE job_id = ? AND stage_name = 'proxy'",
+        (registered.manifest.job_id,),
+    ).fetchone()
+    assert row is not None
+    metadata = json.loads(row["metadata_json"])
+    mapping = metadata["mapping"]
+    assert isinstance(mapping, dict)
+    mapping.update(changes)
+    registered.store.connection.execute(
+        "UPDATE artifacts SET metadata_json = ? WHERE job_id = ? AND stage_name = 'proxy'",
+        (
+            json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+            registered.manifest.job_id,
+        ),
+    )
+    registered.store.connection.commit()
+
+
+def _retarget_manifest_file(registered: RegisteredChunk, path: Path) -> None:
+    file_stat = path.stat(follow_symlinks=False)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    _rewrite_manifest_data(
+        registered,
+        artifact_path=str(path),
+        file_size_bytes=file_stat.st_size,
+        file_digest_sha256=digest,
+        file_device=file_stat.st_dev,
+        file_inode=file_stat.st_ino,
+    )
+    registered.store.connection.execute(
+        "UPDATE proxy_manifests SET digest = ? WHERE manifest_id = ?",
+        (digest, registered.manifest.manifest_id),
     )
     registered.store.connection.commit()
 
@@ -256,12 +317,15 @@ def test_cloud_proxy_chunk_is_real_bounded_media_and_is_registered(
         assert stored_chunk is not None
         assert stored_chunk["manifest_id"] == manifest.manifest_id
         assert stored_chunk["data"] == manifest.chunk_data.model_dump(mode="json")
-        assert (
-            validate_upload_candidate(
-                manifest.manifest_id, registered.store, registered.paths
-            )
-            == manifest.path
-        )
+        with validate_upload_candidate(
+            manifest.manifest_id,
+            manifest.job_id,
+            registered.store,
+            registered.paths,
+        ) as authorized:
+            assert authorized.manifest_id == manifest.manifest_id
+            assert not hasattr(authorized, "path")
+            assert authorized.stream.read() == manifest.path.read_bytes()
     finally:
         registered.store.__exit__(None, None, None)
 
@@ -277,7 +341,10 @@ def test_registered_file_replaced_after_manifest_is_rejected(tmp_path: Path) -> 
 
         with pytest.raises(VideoEditorError, match="digest"):
             validate_upload_candidate(
-                registered.manifest.manifest_id, registered.store, registered.paths
+                registered.manifest.manifest_id,
+                registered.manifest.job_id,
+                registered.store,
+                registered.paths,
             )
     finally:
         registered.store.__exit__(None, None, None)
@@ -295,7 +362,10 @@ def test_symlink_to_original_is_rejected_even_inside_cache(tmp_path: Path) -> No
 
         with pytest.raises(VideoEditorError, match="original"):
             validate_upload_candidate(
-                registered.manifest.manifest_id, registered.store, registered.paths
+                registered.manifest.manifest_id,
+                registered.manifest.job_id,
+                registered.store,
+                registered.paths,
             )
     finally:
         registered.store.__exit__(None, None, None)
@@ -313,7 +383,10 @@ def test_hard_link_to_original_is_rejected(tmp_path: Path) -> None:
 
         with pytest.raises(VideoEditorError, match="original"):
             validate_upload_candidate(
-                registered.manifest.manifest_id, registered.store, registered.paths
+                registered.manifest.manifest_id,
+                registered.manifest.job_id,
+                registered.store,
+                registered.paths,
             )
     finally:
         registered.store.__exit__(None, None, None)
@@ -333,7 +406,10 @@ def test_symlinked_generated_parent_is_rejected(tmp_path: Path) -> None:
 
         with pytest.raises(VideoEditorError, match="links"):
             validate_upload_candidate(
-                registered.manifest.manifest_id, registered.store, registered.paths
+                registered.manifest.manifest_id,
+                registered.manifest.job_id,
+                registered.store,
+                registered.paths,
             )
     finally:
         registered.store.__exit__(None, None, None)
@@ -343,6 +419,68 @@ def test_symlinked_generated_parent_is_rejected(tmp_path: Path) -> None:
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
     reason="local FFmpeg and ffprobe required",
 )
+def test_creation_rejects_mapping_that_differs_from_persisted_phase1(
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    source = create_media_fixture(
+        paths.input_dir / "source.mp4", with_audio=True, duration_seconds=2
+    )
+    fingerprint = bounded_fingerprint(source)
+    source_identity = f"{IDENTITY_VERSION}:{fingerprint}"
+    mapping = ProxyMapping(
+        source_id="source-1",
+        source_start=D("0"),
+        source_end=D("2"),
+        proxy_start=D("0"),
+        proxy_end=D("2"),
+        source_identity=source_identity,
+        settings_hash="forged-settings",
+        tool_version="ffmpeg-test",
+    )
+    with JobStore(paths.state_dir / "jobs.db") as store:
+        job_id = store.create_job({"input_path": str(paths.input_dir)}, {})
+        phase1_proxy = paths.cache_dir / "source-1.phase1.proxy.mp4"
+        phase1_proxy.parent.mkdir(parents=True, exist_ok=True)
+        phase1_proxy.write_bytes(b"phase1 proxy placeholder")
+        store.save_artifact(
+            job_id,
+            "proxy",
+            phase1_proxy,
+            {
+                "kind": "proxy",
+                "source_id": "source-1",
+                "source_path": str(source),
+                "source_identity": source_identity,
+                "settings_hash": "phase1-settings",
+                "tool_version": "ffmpeg-test",
+                "mapping": {
+                    "source_id": "source-1",
+                    "source_start": "0",
+                    "source_end": "2",
+                    "proxy_start": "0",
+                    "proxy_end": "2",
+                    "source_identity": source_identity,
+                    "settings_hash": "phase1-settings",
+                    "tool_version": "ffmpeg-test",
+                },
+            },
+        )
+
+        with pytest.raises(VideoEditorError, match="upstream mapping"):
+            create_cloud_proxy_chunk(
+                source,
+                paths.cache_dir / job_id,
+                mapping,
+                D("0"),
+                D("1"),
+                job_id=job_id,
+                source_fingerprint=fingerprint,
+                paths=paths,
+                store=store,
+            )
+
+
 def test_generation_ignores_predictable_partial_links_and_preserves_source(
     tmp_path: Path,
 ) -> None:
@@ -884,10 +1022,559 @@ def test_proxy_manifest_security_provenance_is_mandatory(field: str) -> None:
 def test_unregistered_manifest_is_rejected(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
     with JobStore(paths.state_dir / "jobs.db") as store:
-        store.create_job({"input_path": str(paths.input_dir)}, {})
+        job_id = store.create_job({"input_path": str(paths.input_dir)}, {})
 
         with pytest.raises(VideoEditorError, match="unregistered"):
-            validate_upload_candidate("missing", store, paths)
+            validate_upload_candidate("missing", job_id, store, paths)
+
+
+def test_upload_uses_job_scoped_manifest_and_chunk_lookups(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registered = _registered_chunk(tmp_path)
+    try:
+        monkeypatch.setattr(
+            registered.store,
+            "get_proxy_manifest",
+            lambda manifest_id: pytest.fail("unscoped manifest lookup used"),
+        )
+        monkeypatch.setattr(
+            registered.store,
+            "get_analysis_chunk",
+            lambda chunk_id: pytest.fail("unscoped chunk lookup used"),
+        )
+
+        with validate_upload_candidate(
+            registered.manifest.manifest_id,
+            registered.manifest.job_id,
+            registered.store,
+            registered.paths,
+        ) as authorized:
+            assert authorized.stream.read(16)
+    finally:
+        registered.store.__exit__(None, None, None)
+
+
+def test_upload_validation_requires_expected_job_scope(tmp_path: Path) -> None:
+    registered = _registered_chunk(tmp_path)
+    try:
+        wrong_job = registered.store.create_job(
+            {"input_path": str(registered.paths.input_dir)}, {}
+        )
+
+        with pytest.raises(VideoEditorError, match="expected job"):
+            validate_upload_candidate(
+                registered.manifest.manifest_id,
+                wrong_job,
+                registered.store,
+                registered.paths,
+            )
+    finally:
+        registered.store.__exit__(None, None, None)
+
+
+def test_generation_and_registration_share_media_evidence_parser(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _paths(tmp_path)
+    source = create_media_fixture(
+        paths.input_dir / "source.mp4", with_audio=True, duration_seconds=2
+    )
+    fingerprint = bounded_fingerprint(source)
+    mapping = ProxyMapping(
+        source_id="source-1",
+        source_start=D("0"),
+        source_end=D("2"),
+        proxy_start=D("0"),
+        proxy_end=D("2"),
+        source_identity=f"{IDENTITY_VERSION}:{fingerprint}",
+        settings_hash="phase1-settings",
+        tool_version="ffmpeg-test",
+    )
+    from video_editor.analysis import proxy_chunks
+
+    actual_parse = proxy_chunks._parse_probe_payload
+    calls = 0
+
+    def counting_parse(path: Path, raw: str) -> object:
+        nonlocal calls
+        calls += 1
+        return actual_parse(path, raw)
+
+    monkeypatch.setattr(proxy_chunks, "_parse_probe_payload", counting_parse)
+    manifest = create_cloud_proxy_chunk(
+        source,
+        paths.cache_dir / "job-1",
+        mapping,
+        D("0"),
+        D("1.5"),
+        job_id="job-1",
+        source_fingerprint=fingerprint,
+        paths=paths,
+    )
+    assert manifest.data.video_codec == "h264"
+    assert calls == 1
+
+
+def test_registration_rejects_manifest_media_fact_mismatch(tmp_path: Path) -> None:
+    registered = _registered_chunk(tmp_path)
+    try:
+        forged = replace(
+            registered.manifest,
+            manifest_id=f"{registered.manifest.manifest_id}-forged-media",
+            chunk_id=f"{registered.manifest.chunk_id}-forged-media",
+            data=registered.manifest.data.model_copy(
+                update={
+                    "chunk_id": f"{registered.manifest.chunk_id}-forged-media",
+                    "video_width": registered.manifest.data.video_width - 2,
+                }
+            ),
+        )
+
+        with pytest.raises(VideoEditorError, match="width"):
+            register_proxy_manifest(forged, registered.store)
+    finally:
+        registered.store.__exit__(None, None, None)
+
+
+def test_registration_rejects_manifest_file_fact_mismatch(tmp_path: Path) -> None:
+    registered = _registered_chunk(tmp_path)
+    try:
+        forged = replace(
+            registered.manifest,
+            manifest_id=f"{registered.manifest.manifest_id}-forged-facts",
+            chunk_id=f"{registered.manifest.chunk_id}-forged-facts",
+            data=registered.manifest.data.model_copy(
+                update={
+                    "chunk_id": f"{registered.manifest.chunk_id}-forged-facts",
+                    "file_digest_sha256": "0" * 64,
+                }
+            ),
+            digest="0" * 64,
+            chunk_data=registered.manifest.chunk_data,
+        )
+
+        with pytest.raises(VideoEditorError, match="digest"):
+            register_proxy_manifest(forged, registered.store)
+    finally:
+        registered.store.__exit__(None, None, None)
+
+
+def test_upload_authorization_keeps_validated_descriptor_when_path_is_swapped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registered = _registered_chunk(tmp_path)
+    try:
+        original_bytes = registered.manifest.path.read_bytes()
+        replacement = registered.manifest.path.with_suffix(".replacement.mp4")
+        replacement.write_bytes(b"replacement")
+        from video_editor.analysis import proxy_chunks
+
+        actual_validate_probe = proxy_chunks._validate_probe
+
+        def validate_then_swap(
+            path: Path,
+            manifest: ProxyManifestData,
+            *,
+            ffprobe: str,
+            pass_fds: tuple[int, ...] = (),
+        ) -> None:
+            actual_validate_probe(path, manifest, ffprobe=ffprobe, pass_fds=pass_fds)
+            registered.manifest.path.unlink()
+            replacement.rename(registered.manifest.path)
+
+        monkeypatch.setattr(proxy_chunks, "_validate_probe", validate_then_swap)
+
+        with validate_upload_candidate(
+            registered.manifest.manifest_id,
+            registered.manifest.job_id,
+            registered.store,
+            registered.paths,
+        ) as authorized:
+            assert authorized.stream.read() == original_bytes
+    finally:
+        registered.store.__exit__(None, None, None)
+
+
+def test_upload_authorization_closes_descriptor_on_context_exit(tmp_path: Path) -> None:
+    registered = _registered_chunk(tmp_path)
+    try:
+        authorized = validate_upload_candidate(
+            registered.manifest.manifest_id,
+            registered.manifest.job_id,
+            registered.store,
+            registered.paths,
+        )
+        with authorized:
+            assert not authorized.stream.closed
+        assert authorized.stream.closed
+    finally:
+        registered.store.__exit__(None, None, None)
+
+
+def test_upload_rejects_generated_root_for_another_job(tmp_path: Path) -> None:
+    registered = _registered_chunk(tmp_path)
+    try:
+        wrong_job = registered.store.create_job(
+            {"input_path": str(registered.paths.input_dir)}, {}
+        )
+        wrong_root = registered.paths.cache_dir / wrong_job
+        wrong_root.mkdir(mode=0o700)
+        moved = wrong_root / registered.manifest.path.name
+        registered.manifest.path.rename(moved)
+        root_stat = wrong_root.stat(follow_symlinks=False)
+        _rewrite_manifest_data(
+            registered,
+            artifact_path=str(moved),
+            generated_root=str(wrong_root),
+            generated_root_device=root_stat.st_dev,
+            generated_root_inode=root_stat.st_ino,
+        )
+
+        with pytest.raises(VideoEditorError, match="expected job"):
+            validate_upload_candidate(
+                registered.manifest.manifest_id,
+                registered.manifest.job_id,
+                registered.store,
+                registered.paths,
+            )
+    finally:
+        registered.store.__exit__(None, None, None)
+
+
+def test_upload_rejects_changed_source_file_identity(tmp_path: Path) -> None:
+    registered = _registered_chunk(tmp_path)
+    try:
+        replacement = registered.source.with_suffix(".replacement.mp4")
+        shutil.copyfile(registered.source, replacement)
+        registered.source.unlink()
+        replacement.rename(registered.source)
+
+        with pytest.raises(VideoEditorError, match="source identity"):
+            validate_upload_candidate(
+                registered.manifest.manifest_id,
+                registered.manifest.job_id,
+                registered.store,
+                registered.paths,
+            )
+    finally:
+        registered.store.__exit__(None, None, None)
+
+
+def test_missing_unrelated_persisted_source_does_not_block_upload(
+    tmp_path: Path,
+) -> None:
+    registered = _registered_chunk(tmp_path)
+    try:
+        missing = registered.paths.input_dir / "deleted-other-source.mp4"
+        other_job = registered.store.create_job(
+            {"input_path": str(registered.paths.input_dir)}, {}
+        )
+        registered.store.save_sources(
+            other_job,
+            [
+                {
+                    "source_id": "deleted-source",
+                    "path": str(missing),
+                    "size_bytes": 123,
+                    "fingerprint": "deleted-fingerprint",
+                    "identity_version": IDENTITY_VERSION,
+                }
+            ],
+        )
+
+        with validate_upload_candidate(
+            registered.manifest.manifest_id,
+            registered.manifest.job_id,
+            registered.store,
+            registered.paths,
+        ) as authorized:
+            assert authorized.stream.read(16)
+    finally:
+        registered.store.__exit__(None, None, None)
+
+
+def test_cross_job_source_alias_is_globally_protected(tmp_path: Path) -> None:
+    registered = _registered_chunk(tmp_path)
+    try:
+        other_job = registered.store.create_job(
+            {"input_path": str(registered.paths.input_dir)}, {}
+        )
+        registered.store.save_sources(
+            other_job,
+            [
+                {
+                    "source_id": "other-source",
+                    "path": str(registered.manifest.path),
+                    "size_bytes": registered.manifest.path.stat().st_size,
+                    "fingerprint": bounded_fingerprint(registered.manifest.path),
+                    "identity_version": IDENTITY_VERSION,
+                }
+            ],
+        )
+
+        with pytest.raises(VideoEditorError, match="original source"):
+            validate_upload_candidate(
+                registered.manifest.manifest_id,
+                registered.manifest.job_id,
+                registered.store,
+                registered.paths,
+            )
+    finally:
+        registered.store.__exit__(None, None, None)
+
+
+def test_cross_job_source_hardlink_identity_is_globally_protected(
+    tmp_path: Path,
+) -> None:
+    registered = _registered_chunk(tmp_path)
+    try:
+        alias = registered.paths.input_dir / "cross-job-alias.mp4"
+        os.link(registered.manifest.path, alias)
+        other_job = registered.store.create_job(
+            {"input_path": str(registered.paths.input_dir)}, {}
+        )
+        registered.store.save_sources(
+            other_job,
+            [
+                {
+                    "source_id": "other-source",
+                    "path": str(alias),
+                    "size_bytes": alias.stat().st_size,
+                    "fingerprint": bounded_fingerprint(alias),
+                    "identity_version": IDENTITY_VERSION,
+                }
+            ],
+        )
+        file_stat = registered.manifest.path.stat()
+        _rewrite_manifest_data(
+            registered,
+            file_device=file_stat.st_dev,
+            file_inode=file_stat.st_ino,
+        )
+
+        with pytest.raises(VideoEditorError, match="original source"):
+            validate_upload_candidate(
+                registered.manifest.manifest_id,
+                registered.manifest.job_id,
+                registered.store,
+                registered.paths,
+            )
+    finally:
+        registered.store.__exit__(None, None, None)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("source_identity", "bounded-v1:wrong"),
+        ("settings_hash", "wrong-settings"),
+        ("tool_version", "wrong-tool"),
+        ("source_start", "0.5"),
+        ("source_end", "1.5"),
+        ("proxy_start", "0.5"),
+        ("proxy_end", "2.5"),
+    ],
+)
+def test_upload_rejects_persisted_phase1_mapping_mismatch(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    registered = _registered_chunk(tmp_path)
+    try:
+        _rewrite_phase1_mapping(registered, **{field: value})
+
+        with pytest.raises(VideoEditorError, match="upstream mapping"):
+            validate_upload_candidate(
+                registered.manifest.manifest_id,
+                registered.manifest.job_id,
+                registered.store,
+                registered.paths,
+            )
+    finally:
+        registered.store.__exit__(None, None, None)
+
+
+@pytest.mark.parametrize(
+    ("video_args", "audio_args", "message"),
+    [
+        (("-c:v", "libx264"), ("-c:a", "aac", "-ac", "1", "-b:a", "64k"), "width|FPS"),
+        (("-c:v", "libx264"), ("-an",), "stream count"),
+        (("-c:v", "mpeg4"), ("-c:a", "aac", "-ac", "1", "-b:a", "64k"), "H.264"),
+        (("-c:v", "libx264"), ("-c:a", "mp3", "-ac", "1", "-b:a", "64k"), "AAC"),
+        (("-c:v", "libx264"), ("-c:a", "aac", "-ac", "2", "-b:a", "64k"), "mono"),
+        (("-c:v", "libx264"), ("-c:a", "aac", "-ac", "1", "-b:a", "128k"), "64 kbps"),
+    ],
+)
+def test_registration_rejects_forged_generated_media_profile(
+    tmp_path: Path,
+    video_args: tuple[str, ...],
+    audio_args: tuple[str, ...],
+    message: str,
+) -> None:
+    registered = _registered_chunk(tmp_path)
+    try:
+        forged = registered.manifest.path.with_name("forged.mp4")
+        video_source = (
+            "color=c=black:s=800x450:r=30"
+            if message == "width|FPS"
+            else "color=c=black:s=640x360:r=15"
+        )
+        args = [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            video_source,
+            "-f",
+            "lavfi",
+            "-i",
+            (
+                "sine=frequency=1000:sample_rate=48000"
+                if message == "64 kbps"
+                else "anullsrc=r=16000:cl=stereo"
+            ),
+            "-t",
+            "10" if message == "64 kbps" else "1.5",
+            *video_args,
+            *audio_args,
+            "-shortest",
+            str(forged),
+        ]
+        if audio_args == ("-an",):
+            args = [value for value in args if value not in ("-shortest",)]
+        completed = subprocess.run(args, check=False, capture_output=True, text=True)
+        assert completed.returncode == 0, completed.stderr
+        file_stat = forged.stat()
+        forged_data = registered.manifest.data.model_copy(
+            update={
+                "artifact_path": str(forged),
+                "file_size_bytes": file_stat.st_size,
+                "file_digest_sha256": hashlib.sha256(forged.read_bytes()).hexdigest(),
+                "file_device": file_stat.st_dev,
+                "file_inode": file_stat.st_ino,
+            }
+        )
+        forged_manifest = replace(
+            registered.manifest,
+            path=forged,
+            digest=forged_data.file_digest_sha256,
+            data=forged_data,
+        )
+
+        with pytest.raises(VideoEditorError, match=message):
+            register_proxy_manifest(forged_manifest, registered.store)
+    finally:
+        registered.store.__exit__(None, None, None)
+
+
+def test_registration_rejects_generated_media_with_two_video_streams(
+    tmp_path: Path,
+) -> None:
+    registered = _registered_chunk(tmp_path)
+    try:
+        forged = registered.manifest.path.with_name("two-video.mp4")
+        completed = subprocess.run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=640x360:r=15",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=blue:s=640x360:r=15",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=16000:cl=mono",
+                "-t",
+                "1.5",
+                "-map",
+                "0:v",
+                "-map",
+                "1:v",
+                "-map",
+                "2:a",
+                "-c:v",
+                "libx264",
+                "-c:a",
+                "aac",
+                "-ac",
+                "1",
+                "-b:a",
+                "64k",
+                "-shortest",
+                str(forged),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode == 0, completed.stderr
+        file_stat = forged.stat()
+        forged_data = registered.manifest.data.model_copy(
+            update={
+                "artifact_path": str(forged),
+                "file_size_bytes": file_stat.st_size,
+                "file_digest_sha256": hashlib.sha256(forged.read_bytes()).hexdigest(),
+                "file_device": file_stat.st_dev,
+                "file_inode": file_stat.st_ino,
+            }
+        )
+        forged_manifest = replace(
+            registered.manifest,
+            path=forged,
+            digest=forged_data.file_digest_sha256,
+            data=forged_data,
+        )
+
+        with pytest.raises(VideoEditorError, match="stream count"):
+            register_proxy_manifest(forged_manifest, registered.store)
+    finally:
+        registered.store.__exit__(None, None, None)
+
+
+def test_upload_rejects_manifest_range_outside_persisted_phase1_mapping(
+    tmp_path: Path,
+) -> None:
+    registered = _registered_chunk(tmp_path)
+    try:
+        _rewrite_manifest_data(
+            registered,
+            source_start="1.5",
+            source_end="2.5",
+            proxy_start="0",
+            proxy_end="1",
+        )
+        _rewrite_chunk_data(
+            registered,
+            source_start="1.5",
+            source_end="2.5",
+            proxy_start="0",
+            proxy_end="1",
+        )
+        registered.store.connection.execute(
+            "UPDATE analysis_chunks SET source_start = ?, source_end = ? WHERE chunk_id = ?",
+            ("1.5", "2.5", registered.manifest.chunk_id),
+        )
+        registered.store.connection.commit()
+
+        with pytest.raises(VideoEditorError, match="upstream mapping"):
+            validate_upload_candidate(
+                registered.manifest.manifest_id,
+                registered.manifest.job_id,
+                registered.store,
+                registered.paths,
+            )
+    finally:
+        registered.store.__exit__(None, None, None)
 
 
 @pytest.mark.skipif(
@@ -932,7 +1619,10 @@ def test_manifest_job_identity_mismatch_is_rejected(tmp_path: Path) -> None:
 
         with pytest.raises(VideoEditorError, match="job"):
             validate_upload_candidate(
-                registered.manifest.manifest_id, registered.store, registered.paths
+                registered.manifest.manifest_id,
+                registered.manifest.job_id,
+                registered.store,
+                registered.paths,
             )
     finally:
         registered.store.__exit__(None, None, None)
@@ -949,7 +1639,10 @@ def test_manifest_source_identity_mismatch_is_rejected(tmp_path: Path) -> None:
 
         with pytest.raises(VideoEditorError, match="source"):
             validate_upload_candidate(
-                registered.manifest.manifest_id, registered.store, registered.paths
+                registered.manifest.manifest_id,
+                registered.manifest.job_id,
+                registered.store,
+                registered.paths,
             )
     finally:
         registered.store.__exit__(None, None, None)
@@ -968,7 +1661,10 @@ def test_manifest_path_escape_is_rejected(tmp_path: Path) -> None:
 
         with pytest.raises(VideoEditorError, match="generated root"):
             validate_upload_candidate(
-                registered.manifest.manifest_id, registered.store, registered.paths
+                registered.manifest.manifest_id,
+                registered.manifest.job_id,
+                registered.store,
+                registered.paths,
             )
     finally:
         registered.store.__exit__(None, None, None)
@@ -987,7 +1683,10 @@ def test_input_descendant_is_rejected(tmp_path: Path) -> None:
 
         with pytest.raises(VideoEditorError, match="input root"):
             validate_upload_candidate(
-                registered.manifest.manifest_id, registered.store, registered.paths
+                registered.manifest.manifest_id,
+                registered.manifest.job_id,
+                registered.store,
+                registered.paths,
             )
     finally:
         registered.store.__exit__(None, None, None)
@@ -1018,7 +1717,10 @@ def test_wrong_persisted_stream_settings_are_rejected(
 
         with pytest.raises(VideoEditorError, match=message):
             validate_upload_candidate(
-                registered.manifest.manifest_id, registered.store, registered.paths
+                registered.manifest.manifest_id,
+                registered.manifest.job_id,
+                registered.store,
+                registered.paths,
             )
     finally:
         registered.store.__exit__(None, None, None)
@@ -1039,7 +1741,10 @@ def test_non_monotonic_manifest_mapping_is_rejected(tmp_path: Path) -> None:
 
         with pytest.raises(VideoEditorError, match="mapping"):
             validate_upload_candidate(
-                registered.manifest.manifest_id, registered.store, registered.paths
+                registered.manifest.manifest_id,
+                registered.manifest.job_id,
+                registered.store,
+                registered.paths,
             )
     finally:
         registered.store.__exit__(None, None, None)
@@ -1056,7 +1761,10 @@ def test_manifest_and_chunk_mapping_mismatch_is_rejected(tmp_path: Path) -> None
 
         with pytest.raises(VideoEditorError, match="mapping"):
             validate_upload_candidate(
-                registered.manifest.manifest_id, registered.store, registered.paths
+                registered.manifest.manifest_id,
+                registered.manifest.job_id,
+                registered.store,
+                registered.paths,
             )
     finally:
         registered.store.__exit__(None, None, None)
@@ -1074,7 +1782,10 @@ def test_stale_source_identity_is_rejected(tmp_path: Path) -> None:
 
         with pytest.raises(VideoEditorError, match="source identity"):
             validate_upload_candidate(
-                registered.manifest.manifest_id, registered.store, registered.paths
+                registered.manifest.manifest_id,
+                registered.manifest.job_id,
+                registered.store,
+                registered.paths,
             )
     finally:
         registered.store.__exit__(None, None, None)
@@ -1091,7 +1802,10 @@ def test_missing_source_is_rejected_as_unsafe_upload_candidate(tmp_path: Path) -
 
         with pytest.raises(VideoEditorError) as caught:
             validate_upload_candidate(
-                registered.manifest.manifest_id, registered.store, registered.paths
+                registered.manifest.manifest_id,
+                registered.manifest.job_id,
+                registered.store,
+                registered.paths,
             )
 
         assert caught.value.code == "unsafe_upload_candidate"

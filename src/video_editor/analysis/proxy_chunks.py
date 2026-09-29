@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from itertools import pairwise
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO, Self
 
 from pydantic import ValidationError
 
@@ -24,7 +24,7 @@ from video_editor.analysis.models import (
 from video_editor.config import PathSettings
 from video_editor.errors import ErrorCategory, VideoEditorError
 from video_editor.media.discovery import IDENTITY_VERSION, bounded_fingerprint
-from video_editor.media.probe import MediaProbe, probe_media
+from video_editor.media.probe import AudioStream, MediaProbe, VideoStream
 from video_editor.media.proxies import ProxyMapping
 from video_editor.persistence.database import JobStore
 
@@ -78,6 +78,23 @@ class ProxyManifest:
     digest: str
     data: ProxyManifestData
     chunk_data: AnalysisChunkData
+
+
+class AuthorizedUpload:
+    """Validated upload authorization owning the exact inspected bytes."""
+
+    def __init__(self, manifest_id: str, stream: BinaryIO) -> None:
+        self.manifest_id = manifest_id
+        self.stream = stream
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        self.stream.close()
 
 
 def plan_chunk_ranges(
@@ -276,50 +293,6 @@ def _decimal_probe(value: float | None, field: str) -> Decimal:
     return result
 
 
-def _probe_audio_bitrate(path: Path, ffprobe: str) -> int:
-    args = [
-        ffprobe,
-        "-v",
-        "error",
-        "-select_streams",
-        "a:0",
-        "-show_entries",
-        "stream=bit_rate",
-        "-of",
-        "default=noprint_wrappers=1:nokey=1",
-        str(path),
-    ]
-    try:
-        completed = subprocess.run(
-            args,
-            capture_output=True,
-            text=True,
-            shell=False,
-            check=False,
-        )
-    except OSError as exc:
-        raise VideoEditorError(
-            ErrorCategory.OUTPUT, f"cannot probe generated proxy audio bitrate: {exc}"
-        ) from exc
-    if completed.returncode != 0:
-        detail = completed.stderr.strip() or "unknown ffprobe error"
-        raise VideoEditorError(
-            ErrorCategory.OUTPUT,
-            f"cannot probe generated proxy audio bitrate: {detail}",
-        )
-    try:
-        bitrate = int(completed.stdout.strip())
-    except ValueError as exc:
-        raise VideoEditorError(
-            ErrorCategory.OUTPUT, "generated proxy has invalid audio bitrate"
-        ) from exc
-    if bitrate <= 0:
-        raise VideoEditorError(
-            ErrorCategory.OUTPUT, "generated proxy has invalid audio bitrate"
-        )
-    return bitrate
-
-
 def _validated_probe(
     path: Path,
     expected_duration: Decimal,
@@ -327,30 +300,23 @@ def _validated_probe(
     *,
     ffprobe: str,
 ) -> tuple[MediaProbe, int]:
-    inspected = probe_media(path, ffprobe=ffprobe)
-    video = inspected.video
-    audio = inspected.audio
-    duration = _decimal_probe(inspected.duration, "duration")
-    valid = (
-        path.is_file()
-        and path.stat().st_size > 0
-        and video is not None
-        and video.width is not None
-        and video.height is not None
-        and video.width <= settings.max_width
-        and video.codec_name == _expected_video_codec(settings.video_codec)
-        and video.avg_frame_rate is not None
-        and abs(video.avg_frame_rate - settings.fps) <= 1e-6
-        and audio is not None
-        and audio.codec_name == settings.audio_codec
-        and audio.channels == 1
-        and abs(duration - expected_duration) <= _DURATION_TOLERANCE
-    )
-    if not valid:
+    evidence = _probe_media_evidence(path, ffprobe=ffprobe)
+    _enforce_media_policy(evidence, expected_duration)
+    video = evidence.probe.video
+    if (
+        not path.is_file()
+        or path.stat().st_size <= 0
+        or video is None
+        or video.width is None
+        or video.width > settings.max_width
+        or video.codec_name != _expected_video_codec(settings.video_codec)
+        or video.avg_frame_rate is None
+        or abs(video.avg_frame_rate - settings.fps) > 1e-6
+    ):
         raise VideoEditorError(
             ErrorCategory.OUTPUT, f"invalid generated cloud proxy: {path}"
         )
-    return inspected, _probe_audio_bitrate(path, ffprobe)
+    return evidence.probe, evidence.audio_bitrate_bps
 
 
 def _proxy_args(
@@ -477,12 +443,26 @@ def create_cloud_proxy_chunk(
     job_id: str,
     source_fingerprint: str,
     paths: PathSettings,
+    store: JobStore | None = None,
     settings: CloudProxySettings | None = None,
     ffmpeg: str = "ffmpeg",
     ffprobe: str = "ffprobe",
 ) -> ProxyManifest:
     """Create, inspect, hash, and describe one cloud proxy chunk."""
     active = settings or CloudProxySettings()
+    if store is not None:
+        metadata = store.get_proxy_artifact_metadata(job_id, mapping.source_id)
+        mapping_manifest = ProxyManifestData.model_construct(
+            source_id=mapping.source_id,
+            source_identity=mapping.source_identity,
+            upstream_settings_hash=mapping.settings_hash,
+            upstream_tool_version=mapping.tool_version,
+            source_start=source_start,
+            source_end=source_end,
+            proxy_start=Decimal(0),
+            proxy_end=source_end - source_start,
+        )
+        _validate_upstream_mapping(metadata, mapping_manifest)
     if generated_root.name != job_id:
         raise VideoEditorError(
             ErrorCategory.STORAGE, "generated root must be job-specific"
@@ -706,8 +686,10 @@ def create_cloud_proxy_chunk(
     )
 
 
-def register_proxy_manifest(manifest: ProxyManifest, store: JobStore) -> None:
-    """Persist manifest and mapped chunk as one registered upload identity."""
+def register_proxy_manifest(
+    manifest: ProxyManifest, store: JobStore, *, ffprobe: str = "ffprobe"
+) -> None:
+    """Persist only media whose observed bytes satisfy upload policy."""
     if manifest.data.job_id != manifest.job_id:
         raise ValueError("manifest job identity mismatch")
     if manifest.data.source_id != manifest.source_id:
@@ -716,6 +698,41 @@ def register_proxy_manifest(manifest: ProxyManifest, store: JobStore) -> None:
         raise ValueError("manifest chunk identity mismatch")
     if manifest.data.file_digest_sha256 != manifest.digest:
         raise ValueError("manifest digest mismatch")
+    try:
+        path_stat = manifest.path.lstat()
+        descriptor = os.open(manifest.path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        raise _upload_error(
+            f"cannot open generated media for registration: {exc}"
+        ) from exc
+    try:
+        opened_stat = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened_stat.st_mode)
+            or opened_stat.st_nlink != 1
+            or not _same_identity(path_stat, opened_stat)
+        ):
+            raise _upload_error("generated media identity is unsafe")
+        descriptor_path = Path(f"/dev/fd/{descriptor}")
+        if _sha256(descriptor_path) != manifest.data.file_digest_sha256:
+            raise _upload_error("generated media digest does not match manifest")
+        if (
+            opened_stat.st_size != manifest.data.file_size_bytes
+            or opened_stat.st_dev != manifest.data.file_device
+            or opened_stat.st_ino != manifest.data.file_inode
+        ):
+            raise _upload_error("generated media file facts do not match manifest")
+        evidence = _probe_media_evidence(
+            descriptor_path, ffprobe=ffprobe, pass_fds=(descriptor,)
+        )
+        _enforce_media_policy(
+            evidence, manifest.data.proxy_end - manifest.data.proxy_start
+        )
+        _match_manifest_media(evidence, manifest.data)
+        if not _same_identity(opened_stat, os.fstat(descriptor)):
+            raise _upload_error("generated media descriptor identity changed")
+    finally:
+        os.close(descriptor)
     connection = store.connection
     connection.execute("BEGIN IMMEDIATE")
     try:
@@ -778,6 +795,47 @@ def _stored_source(job: dict[str, Any], source_id: str) -> dict[str, Any]:
     return source
 
 
+def _validate_upstream_mapping(
+    metadata: dict[str, Any] | None, manifest: ProxyManifestData
+) -> None:
+    if metadata is None:
+        raise _upload_error("persisted upstream mapping is missing or ambiguous")
+    mapping = metadata.get("mapping")
+    if not isinstance(mapping, dict):
+        raise _upload_error("persisted upstream mapping is invalid")
+    try:
+        source_start = Decimal(str(mapping["source_start"]))
+        source_end = Decimal(str(mapping["source_end"]))
+        proxy_start = Decimal(str(mapping["proxy_start"]))
+        proxy_end = Decimal(str(mapping["proxy_end"]))
+    except (KeyError, InvalidOperation, ValueError) as exc:
+        raise _upload_error("persisted upstream mapping is invalid") from exc
+    if (
+        mapping.get("source_id") != manifest.source_id
+        or mapping.get("source_identity") != manifest.source_identity
+        or metadata.get("source_identity") != manifest.source_identity
+        or mapping.get("settings_hash") != manifest.upstream_settings_hash
+        or metadata.get("settings_hash") != manifest.upstream_settings_hash
+        or mapping.get("tool_version") != manifest.upstream_tool_version
+        or metadata.get("tool_version") != manifest.upstream_tool_version
+        or not all(
+            value.is_finite()
+            for value in (source_start, source_end, proxy_start, proxy_end)
+        )
+        or source_end <= source_start
+        or proxy_end <= proxy_start
+        or source_end - source_start != proxy_end - proxy_start
+        or source_start != Decimal(0)
+        or proxy_start != Decimal(0)
+        or manifest.source_start < source_start
+        or manifest.source_end > source_end
+        or manifest.proxy_start != Decimal(0)
+        or manifest.proxy_end - manifest.proxy_start
+        != manifest.source_end - manifest.source_start
+    ):
+        raise _upload_error("manifest does not match persisted upstream mapping")
+
+
 def _validate_persisted_identity(
     record: dict[str, Any],
     manifest: ProxyManifestData,
@@ -817,6 +875,7 @@ def _validate_persisted_identity(
 def _validate_candidate_path(
     path: Path,
     manifest: ProxyManifestData,
+    expected_job_id: str,
     paths: PathSettings,
     source_paths: list[Path],
 ) -> tuple[Path, os.stat_result]:
@@ -831,11 +890,10 @@ def _validate_candidate_path(
     except OSError as exc:
         raise _upload_error(f"cannot inspect upload candidate: {exc}") from exc
     allowed_roots = (paths.cache_dir.resolve(), paths.workspace_dir.resolve())
-    if not any(
-        resolved_root == allowed or resolved_root.is_relative_to(allowed)
-        for allowed in allowed_roots
+    if resolved_root.name != expected_job_id or not any(
+        resolved_root.parent == allowed for allowed in allowed_roots
     ):
-        raise _upload_error("manifest generated root is not configured")
+        raise _upload_error("manifest generated root does not match expected job")
     input_root = paths.input_dir.resolve()
     if resolved == input_root or resolved.is_relative_to(input_root):
         raise _upload_error("upload candidate is inside input root")
@@ -847,8 +905,13 @@ def _validate_candidate_path(
     ):
         raise _upload_error("generated root identity changed")
     for source in source_paths:
-        source_resolved = source.resolve(strict=True)
-        source_stat = source.stat()
+        try:
+            source_resolved = source.resolve(strict=True)
+            source_stat = source.stat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise _upload_error(f"cannot inspect persisted source: {exc}") from exc
         if (
             resolved == source_resolved
             or resolved.is_relative_to(source_resolved)
@@ -879,7 +942,7 @@ def _validate_file_facts(
         raise _upload_error("upload candidate file identity changed")
     if file_stat.st_nlink != 1:
         raise _upload_error(
-            "upload candidate is a hard link to original or untrusted media"
+            "upload candidate is a hard link to original source or untrusted media"
         )
 
 
@@ -903,6 +966,15 @@ def _validate_source_identity(
         raise _upload_error(f"cannot inspect registered source: {exc}") from exc
     if source_resolved != manifest_source_resolved:
         raise _upload_error("manifest source path mismatch")
+    source_stat = source_path.stat(follow_symlinks=False)
+    if (
+        source_stat.st_dev != manifest.source_device
+        or source_stat.st_ino != manifest.source_inode
+        or source_stat.st_size != manifest.source_size_bytes
+    ):
+        raise _upload_error(
+            "source identity changed: file device, inode, or size mismatch"
+        )
     if fingerprint != manifest.source_fingerprint:
         raise _upload_error("manifest source fingerprint mismatch")
     try:
@@ -915,8 +987,113 @@ def _validate_source_identity(
     return source_path
 
 
-def _validate_probe(path: Path, manifest: ProxyManifestData, *, ffprobe: str) -> None:
-    inspected = probe_media(path, ffprobe=ffprobe)
+@dataclass(frozen=True)
+class _MediaEvidence:
+    probe: MediaProbe
+    video_stream_count: int
+    audio_stream_count: int
+    audio_bitrate_bps: int
+
+
+def _parse_probe_payload(path: Path, raw: str) -> _MediaEvidence:
+    try:
+        payload = json.loads(raw)
+        streams = payload["streams"]
+        format_data = payload["format"]
+        videos = [item for item in streams if item.get("codec_type") == "video"]
+        audios = [item for item in streams if item.get("codec_type") == "audio"]
+        if len(videos) != 1 or len(audios) != 1:
+            raise _upload_error(
+                "generated media must contain exactly one video and one audio stream count"
+            )
+        video_data = videos[0]
+        audio_data = audios[0]
+        numerator, denominator = video_data["avg_frame_rate"].split("/", 1)
+        frame_rate = float(int(numerator) / int(denominator))
+        return _MediaEvidence(
+            probe=MediaProbe(
+                path=path,
+                duration=float(format_data["duration"]),
+                video=VideoStream(
+                    codec_name=video_data.get("codec_name"),
+                    width=int(video_data["width"]),
+                    height=int(video_data["height"]),
+                    avg_frame_rate=frame_rate,
+                ),
+                audio=AudioStream(
+                    codec_name=audio_data.get("codec_name"),
+                    channels=int(audio_data["channels"]),
+                ),
+            ),
+            video_stream_count=len(videos),
+            audio_stream_count=len(audios),
+            audio_bitrate_bps=int(audio_data["bit_rate"]),
+        )
+    except VideoEditorError:
+        raise
+    except (KeyError, TypeError, ValueError, ZeroDivisionError) as exc:
+        raise _upload_error("upload candidate probe data is invalid") from exc
+
+
+def _probe_media_evidence(
+    path: Path, *, ffprobe: str, pass_fds: tuple[int, ...] = ()
+) -> _MediaEvidence:
+    args = [
+        ffprobe,
+        "-v",
+        "error",
+        "-show_entries",
+        "stream=codec_type,codec_name,width,height,avg_frame_rate,channels,bit_rate:format=duration",
+        "-print_format",
+        "json",
+        str(path),
+    ]
+    try:
+        completed = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            shell=False,
+            check=False,
+            pass_fds=pass_fds,
+        )
+    except OSError as exc:
+        raise _upload_error(f"cannot probe generated media: {exc}") from exc
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or "unknown ffprobe error"
+        raise _upload_error(f"cannot probe generated media: {detail}")
+    return _parse_probe_payload(path, completed.stdout)
+
+
+def _enforce_media_policy(
+    evidence: _MediaEvidence,
+    expected_duration: Decimal,
+) -> None:
+    video = evidence.probe.video
+    audio = evidence.probe.audio
+    duration = _decimal_probe(evidence.probe.duration, "duration")
+    if evidence.video_stream_count != 1 or evidence.audio_stream_count != 1:
+        raise _upload_error("generated media stream count is invalid")
+    if video is None or video.codec_name != "h264":
+        raise _upload_error("generated media must use H.264 video")
+    if video.width is None or video.width > 640 or video.height is None:
+        raise _upload_error("generated media width exceeds 640")
+    if video.avg_frame_rate is None or abs(video.avg_frame_rate - 15) > 1e-6:
+        raise _upload_error("generated media must use 15 FPS")
+    if audio is None or audio.codec_name != "aac":
+        raise _upload_error("generated media must use AAC audio")
+    if audio.channels != 1:
+        raise _upload_error("generated media audio must be mono")
+    if not 0 < evidence.audio_bitrate_bps <= 72_000:
+        raise _upload_error("generated media audio must follow 64 kbps policy")
+    if abs(duration - expected_duration) > _DURATION_TOLERANCE:
+        raise _upload_error("generated media duration does not match mapped duration")
+
+
+def _match_manifest_media(
+    evidence: _MediaEvidence, manifest: ProxyManifestData
+) -> None:
+    inspected = evidence.probe
     video = inspected.video
     audio = inspected.audio
     if video is None or video.width != manifest.video_width:
@@ -935,12 +1112,7 @@ def _validate_probe(path: Path, manifest: ProxyManifestData, *, ffprobe: str) ->
         raise _upload_error("upload candidate audio channels mismatch")
     if manifest.audio_bitrate_bps != 64_000:
         raise _upload_error("upload candidate audio bitrate mismatch")
-    try:
-        probed_audio_bitrate = _probe_audio_bitrate(path, ffprobe)
-    except VideoEditorError as exc:
-        raise _upload_error(
-            f"cannot verify upload candidate audio bitrate: {exc}"
-        ) from exc
+    probed_audio_bitrate = evidence.audio_bitrate_bps
     if probed_audio_bitrate != manifest.audio_probe_bitrate_bps:
         raise _upload_error("upload candidate audio probe bitrate mismatch")
     duration = _decimal_probe(inspected.duration, "duration")
@@ -950,22 +1122,35 @@ def _validate_probe(path: Path, manifest: ProxyManifestData, *, ffprobe: str) ->
         raise _upload_error("upload candidate settings exceed cloud proxy limits")
 
 
+def _validate_probe(
+    path: Path,
+    manifest: ProxyManifestData,
+    *,
+    ffprobe: str,
+    pass_fds: tuple[int, ...] = (),
+) -> None:
+    evidence = _probe_media_evidence(path, ffprobe=ffprobe, pass_fds=pass_fds)
+    _enforce_media_policy(evidence, manifest.proxy_end - manifest.proxy_start)
+    _match_manifest_media(evidence, manifest)
+
+
 def validate_upload_candidate(
     manifest_id: str,
+    expected_job_id: str,
     store: JobStore,
     paths: PathSettings,
     *,
     ffprobe: str = "ffprobe",
-) -> Path:
-    """Revalidate registered bytes and provenance immediately before upload."""
-    record = store.get_proxy_manifest(manifest_id)
+) -> AuthorizedUpload:
+    """Authorize one open descriptor after validating its bytes and provenance."""
+    record = store.get_proxy_manifest_for_job(expected_job_id, manifest_id)
     if record is None:
-        raise _upload_error("unregistered upload candidate")
+        raise _upload_error("unregistered upload candidate for expected job")
     try:
         manifest = ProxyManifestData.model_validate(record["data"])
     except ValidationError as exc:
         raise _upload_error("registered manifest mapping is invalid") from exc
-    chunk = store.get_analysis_chunk(manifest.chunk_id)
+    chunk = store.get_analysis_chunk_for_job(expected_job_id, manifest.chunk_id)
     if chunk is None:
         raise _upload_error("registered manifest has no analysis chunk")
     try:
@@ -973,18 +1158,47 @@ def validate_upload_candidate(
     except ValidationError as exc:
         raise _upload_error("registered chunk mapping is invalid") from exc
     _validate_persisted_identity(record, manifest, chunk, chunk_data)
+    _validate_upstream_mapping(
+        store.get_proxy_artifact_metadata(expected_job_id, manifest.source_id), manifest
+    )
 
-    job = store.get_job(manifest.job_id)
+    job = store.get_job(expected_job_id)
     source = _stored_source(job, manifest.source_id)
     source_path = _validate_source_identity(source, manifest)
     source_paths = [
-        Path(value["path"])
-        for value in job.get("sources", [])
-        if isinstance(value, dict) and isinstance(value.get("path"), str)
+        Path(data["path"])
+        for record_source in store.list_persisted_sources()
+        if isinstance((data := record_source.get("data")), dict)
+        and isinstance(data.get("path"), str)
     ]
     path, file_stat = _validate_candidate_path(
-        Path(manifest.artifact_path), manifest, paths, [source_path, *source_paths]
+        Path(manifest.artifact_path),
+        manifest,
+        expected_job_id,
+        paths,
+        [source_path, *source_paths],
     )
-    _validate_file_facts(path, file_stat, record, manifest)
-    _validate_probe(path, manifest, ffprobe=ffprobe)
-    return path
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        raise _upload_error(f"cannot open upload candidate: {exc}") from exc
+    stream = os.fdopen(descriptor, "rb")
+    try:
+        opened_stat = os.fstat(stream.fileno())
+        if not _same_identity(file_stat, opened_stat):
+            raise _upload_error("upload candidate file identity changed")
+        descriptor_path = Path(f"/dev/fd/{stream.fileno()}")
+        _validate_file_facts(descriptor_path, opened_stat, record, manifest)
+        _validate_probe(
+            descriptor_path,
+            manifest,
+            ffprobe=ffprobe,
+            pass_fds=(stream.fileno(),),
+        )
+        if not _same_identity(opened_stat, os.fstat(stream.fileno())):
+            raise _upload_error("upload candidate descriptor identity changed")
+        stream.seek(0)
+    except BaseException:
+        stream.close()
+        raise
+    return AuthorizedUpload(manifest_id, stream)
