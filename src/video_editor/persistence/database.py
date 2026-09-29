@@ -71,6 +71,18 @@ def _usd_to_microusd(amount: Decimal, rounding: str) -> int:
     return microusd
 
 
+def _exact_usd_to_microusd(amount: Decimal) -> int:
+    if not amount.is_finite() or amount < 0:
+        raise ValueError("USD amount must be finite and non-negative")
+    scaled = amount * _MICRO_USD
+    if scaled != scaled.to_integral_value():
+        raise ValueError("actual USD cost must be representable in whole microUSD")
+    microusd = int(scaled)
+    if microusd > _SQLITE_MAX_INTEGER:
+        raise OverflowError("USD amount exceeds SQLite integer range")
+    return microusd
+
+
 def _microusd_to_usd(amount: int) -> Decimal:
     return Decimal(amount) / _MICRO_USD
 
@@ -90,11 +102,7 @@ class JobStore:
 
     def __enter__(self) -> JobStore:  # noqa: PYI034
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._connection = sqlite3.connect(
-            self.db_path,
-            timeout=30,
-            check_same_thread=False,
-        )
+        self._connection = sqlite3.connect(self.db_path, timeout=30)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA foreign_keys = ON")
         self._connection.execute("PRAGMA busy_timeout = 30000")
@@ -709,21 +717,30 @@ class JobStore:
         ).fetchone()
         if cached is not None:
             return None
-        existing = connection.execute(
-            """SELECT request_id, status FROM analysis_requests
-            WHERE job_id = ? AND cache_key = ?""",
-            (reservation.job_id, reservation.cache_key),
-        ).fetchone()
-        if existing is not None:
-            if existing["request_id"] != reservation.request_id:
-                raise ValueError("cache key is already assigned to another request")
-            if existing["status"] in {
-                "reserved",
-                "dispatched",
-                "billing_unknown",
-                "completed",
-            }:
+        existing_rows = connection.execute(
+            """SELECT request_id, job_id, cache_key, mode, status,
+                      maximum_cost_microusd, data_json
+            FROM analysis_requests
+            WHERE request_id = ? OR (job_id = ? AND cache_key = ?)""",
+            (reservation.request_id, reservation.job_id, reservation.cache_key),
+        ).fetchall()
+        maximum = _usd_to_microusd(reservation.maximum_cost_usd, ROUND_CEILING)
+        if existing_rows:
+            if len(existing_rows) != 1:
+                raise ValueError("request ID or cache key is already assigned")
+            existing = existing_rows[0]
+            if (
+                existing["request_id"] != reservation.request_id
+                or existing["job_id"] != reservation.job_id
+                or existing["cache_key"] != reservation.cache_key
+                or existing["mode"] != reservation.mode
+                or int(existing["maximum_cost_microusd"]) != maximum
+                or existing["data_json"] != reservation.model_dump_json()
+            ):
+                raise ValueError("existing reservation does not match request fields")
+            if existing["status"] == "reserved":
                 return str(existing["request_id"])
+            raise ValueError("existing request is not dispatchable")
         account = connection.execute(
             """SELECT limit_microusd, spent_microusd, reserved_microusd
             FROM budget_accounts WHERE job_id = ?""",
@@ -731,7 +748,6 @@ class JobStore:
         ).fetchone()
         if account is None:
             raise KeyError(f"budget is not initialized: {reservation.job_id}")
-        maximum = _usd_to_microusd(reservation.maximum_cost_usd, ROUND_CEILING)
         if (
             account["spent_microusd"] + account["reserved_microusd"] + maximum
             > account["limit_microusd"]
@@ -741,29 +757,20 @@ class JobStore:
                 "request exceeds job budget",
                 code="budget_exhausted",
             )
-        if existing is not None:
-            connection.execute(
-                """UPDATE analysis_requests SET
-                    status = 'reserved', maximum_cost_microusd = ?,
-                    actual_cost_microusd = NULL, data_json = ?
-                WHERE request_id = ?""",
-                (maximum, reservation.model_dump_json(), reservation.request_id),
-            )
-        else:
-            connection.execute(
-                """INSERT INTO analysis_requests(
-                    request_id, job_id, cache_key, mode, status,
-                    maximum_cost_microusd, actual_cost_microusd, data_json
-                ) VALUES (?, ?, ?, ?, 'reserved', ?, NULL, ?)""",
-                (
-                    reservation.request_id,
-                    reservation.job_id,
-                    reservation.cache_key,
-                    reservation.mode,
-                    maximum,
-                    reservation.model_dump_json(),
-                ),
-            )
+        connection.execute(
+            """INSERT INTO analysis_requests(
+                request_id, job_id, cache_key, mode, status,
+                maximum_cost_microusd, actual_cost_microusd, data_json
+            ) VALUES (?, ?, ?, ?, 'reserved', ?, NULL, ?)""",
+            (
+                reservation.request_id,
+                reservation.job_id,
+                reservation.cache_key,
+                reservation.mode,
+                maximum,
+                reservation.model_dump_json(),
+            ),
+        )
         connection.execute(
             """UPDATE budget_accounts
             SET reserved_microusd = reserved_microusd + ? WHERE job_id = ?""",
@@ -794,6 +801,12 @@ class JobStore:
             raise ValueError("all reservations must belong to the requested job")
         if any(request.mode != "broad" for request in requests):
             raise ValueError("batch preflight accepts only broad requests")
+        batch_request_ids = [request.request_id for request in requests]
+        if len(batch_request_ids) != len(set(batch_request_ids)):
+            raise ValueError("batch contains duplicate request_id")
+        cache_identities = [(request.job_id, request.cache_key) for request in requests]
+        if len(cache_identities) != len(set(cache_identities)):
+            raise ValueError("batch contains duplicate job_id and cache_key")
         connection = self.connection
         connection.execute("BEGIN IMMEDIATE")
         try:
@@ -844,8 +857,8 @@ class JobStore:
             )
 
     def settle_request(self, request_id: str, actual_cost_usd: Decimal) -> None:
-        """Replace full reservation with provider-confirmed actual cost."""
-        actual = _usd_to_microusd(actual_cost_usd, ROUND_CEILING)
+        """Replace full reservation with provider-confirmed exact microUSD cost."""
+        actual = _exact_usd_to_microusd(actual_cost_usd)
         with self._transaction() as connection:
             row = self._request_for_update(connection, request_id)
             if row["status"] not in {"reserved", "dispatched", "billing_unknown"}:

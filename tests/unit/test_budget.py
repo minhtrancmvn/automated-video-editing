@@ -213,40 +213,105 @@ def test_two_open_connections_cannot_overreserve(tmp_path: Path) -> None:
     with JobStore(database_path) as setup_store:
         job_id = _create_job_with_budget(setup_store, Decimal("1.00"))
 
-    first = JobStore(database_path)
-    second = JobStore(database_path)
-    first.__enter__()
-    second.__enter__()
-    barrier = threading.Barrier(2)
+    ready_events = (threading.Event(), threading.Event())
+    first_store_opened = threading.Event()
+    start_event = threading.Event()
     outcomes: list[str] = []
 
-    def reserve(store: JobStore, request_id: str, cache_key: str) -> None:
-        barrier.wait()
-        try:
-            store.reserve_request(
-                _reservation(job_id, request_id, cache_key, Decimal("0.60"))
-            )
-        except VideoEditorError as error:
-            outcomes.append(error.code or "unknown")
-        else:
-            outcomes.append("reserved")
+    def reserve(index: int, request_id: str, cache_key: str) -> None:
+        if index == 1:
+            assert first_store_opened.wait(timeout=5)
+        with JobStore(database_path) as store:
+            if index == 0:
+                first_store_opened.set()
+            ready_events[index].set()
+            assert start_event.wait(timeout=5)
+            try:
+                store.reserve_request(
+                    _reservation(job_id, request_id, cache_key, Decimal("0.60"))
+                )
+            except VideoEditorError as error:
+                outcomes.append(error.code or "unknown")
+            else:
+                outcomes.append("reserved")
 
-    try:
-        threads = (
-            threading.Thread(target=reserve, args=(first, "request-1", "cache-1")),
-            threading.Thread(target=reserve, args=(second, "request-2", "cache-2")),
-        )
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
-    finally:
-        first.__exit__(None, None, None)
-        second.__exit__(None, None, None)
+    threads = (
+        threading.Thread(target=reserve, args=(0, "request-1", "cache-1")),
+        threading.Thread(target=reserve, args=(1, "request-2", "cache-2")),
+    )
+    for thread in threads:
+        thread.start()
+    for ready_event in ready_events:
+        assert ready_event.wait(timeout=5)
+    start_event.set()
+    for thread in threads:
+        thread.join()
 
     assert sorted(outcomes) == ["budget_exhausted", "reserved"]
     with JobStore(database_path) as store:
         assert store.budget_state(job_id).reserved_usd == Decimal("0.60")
+
+
+def test_reserved_request_can_be_reused_only_with_exact_immutable_fields(
+    tmp_path: Path,
+) -> None:
+    with JobStore(tmp_path / "state.db") as store:
+        job_id = _create_job_with_budget(store, Decimal("1.00"))
+        reservation = _reservation(job_id, "request-1", "cache-1", Decimal("0.25"))
+
+        assert store.reserve_request(reservation) == "request-1"
+        assert store.reserve_request(reservation) == "request-1"
+        assert store.budget_state(job_id).reserved_usd == Decimal("0.25")
+
+        with pytest.raises(ValueError, match="does not match request fields"):
+            store.reserve_request(
+                _reservation(job_id, "request-1", "cache-1", Decimal("0.30"))
+            )
+
+
+def test_batch_rejects_duplicate_request_or_cache_identity(tmp_path: Path) -> None:
+    with JobStore(tmp_path / "state.db") as store:
+        job_id = _create_job_with_budget(store, Decimal("1.00"))
+
+        with pytest.raises(ValueError, match="duplicate request_id"):
+            store.reserve_request_batch(
+                job_id,
+                (
+                    _reservation(job_id, "request-1", "cache-1", Decimal("0.25")),
+                    _reservation(job_id, "request-1", "cache-2", Decimal("0.25")),
+                ),
+            )
+        with pytest.raises(ValueError, match="duplicate job_id and cache_key"):
+            store.reserve_request_batch(
+                job_id,
+                (
+                    _reservation(job_id, "request-1", "cache-1", Decimal("0.25")),
+                    _reservation(job_id, "request-2", "cache-1", Decimal("0.25")),
+                ),
+            )
+
+        assert store.budget_state(job_id).reserved_usd == Decimal(0)
+
+
+@pytest.mark.parametrize("status", ["dispatched", "billing_unknown", "completed"])
+def test_nonreserved_request_is_not_dispatchable(tmp_path: Path, status: str) -> None:
+    with JobStore(tmp_path / "state.db") as store:
+        job_id = _create_job_with_budget(store, Decimal("1.00"))
+        reservation = _reservation(job_id, "request-1", "cache-1", Decimal("0.25"))
+        assert store.reserve_request(reservation) == "request-1"
+
+        match status:
+            case "dispatched":
+                store.mark_request_dispatched("request-1")
+            case "billing_unknown":
+                store.mark_request_billing_unknown("request-1")
+            case "completed":
+                store.settle_request("request-1", Decimal("0.125000"))
+            case _:
+                raise AssertionError(f"unexpected status: {status}")
+
+        with pytest.raises(ValueError, match="not dispatchable"):
+            store.reserve_request(reservation)
 
 
 def test_unknown_billing_keeps_reservation_after_restart(tmp_path: Path) -> None:
@@ -262,6 +327,10 @@ def test_unknown_billing_keeps_reservation_after_restart(tmp_path: Path) -> None
 
     with JobStore(database_path) as store:
         assert store.budget_state(job_id).reserved_usd == Decimal("0.25")
+        with pytest.raises(ValueError, match="not dispatchable"):
+            store.reserve_request(
+                _reservation(job_id, "request-1", "cache-1", Decimal("0.25"))
+            )
 
 
 def test_confirmed_nonbillable_releases_reservation(tmp_path: Path) -> None:
@@ -279,7 +348,7 @@ def test_confirmed_nonbillable_releases_reservation(tmp_path: Path) -> None:
     assert state.reserved_usd == Decimal(0)
 
 
-def test_settlement_replaces_reservation_with_actual_cost(tmp_path: Path) -> None:
+def test_settlement_replaces_reservation_with_exact_actual_cost(tmp_path: Path) -> None:
     with JobStore(tmp_path / "state.db") as store:
         job_id = _create_job_with_budget(store, Decimal("1.00"))
         request_id = store.reserve_request(
@@ -287,11 +356,25 @@ def test_settlement_replaces_reservation_with_actual_cost(tmp_path: Path) -> Non
         )
         assert request_id == "request-1"
 
-        store.settle_request(request_id, Decimal("0.125"))
+        store.settle_request(request_id, Decimal("0.125001"))
 
         state = store.budget_state(job_id)
-    assert state.spent_usd == Decimal("0.125")
+    assert state.spent_usd == Decimal("0.125001")
     assert state.reserved_usd == Decimal(0)
+
+
+def test_settlement_rejects_sub_microusd_actual_cost(tmp_path: Path) -> None:
+    with JobStore(tmp_path / "state.db") as store:
+        job_id = _create_job_with_budget(store, Decimal("1.00"))
+        request_id = store.reserve_request(
+            _reservation(job_id, "request-1", "cache-1", Decimal("0.25"))
+        )
+        assert request_id == "request-1"
+
+        with pytest.raises(ValueError, match="representable in whole microUSD"):
+            store.settle_request(request_id, Decimal("0.1250001"))
+
+        assert store.budget_state(job_id).reserved_usd == Decimal("0.25")
 
 
 def test_reconciliation_requires_provider_confirmed_outcome(tmp_path: Path) -> None:
