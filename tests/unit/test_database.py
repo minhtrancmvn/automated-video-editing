@@ -7,11 +7,65 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from video_editor.analysis.models import RequestReservation
+from video_editor.analysis.models import (
+    AnalysisBoundaryKind,
+    AnalysisChunkData,
+    AnalysisResultData,
+    ProxyManifestData,
+    RequestReservation,
+)
 from video_editor.media.discovery import SourceCandidate
 from video_editor.media.sequencing import sequence_sources
 from video_editor.persistence.database import JobStatus, JobStore, StageStatus
 from video_editor.persistence.migrations import LATEST_MIGRATION_VERSION
+
+
+def _proxy_manifest_data() -> ProxyManifestData:
+    return ProxyManifestData(
+        schema_version=1,
+        source_fingerprint="source-fingerprint",
+        source_identity="source-identity",
+        artifact_path="/generated/proxy.mp4",
+        generated_root="/generated",
+        mapping_version="v1",
+        source_start=Decimal(0),
+        source_end=Decimal(1),
+        proxy_start=Decimal(0),
+        proxy_end=Decimal(1),
+        video_width=1920,
+        video_height=1080,
+        video_fps=Decimal(30),
+        audio_codec="aac",
+        audio_bitrate_bps=128000,
+        implementation_version="v1",
+    )
+
+
+def _analysis_chunk_data() -> AnalysisChunkData:
+    return AnalysisChunkData(
+        schema_version=1,
+        mapping_version="v1",
+        proxy_start=Decimal(0),
+        proxy_end=Decimal(1),
+        boundary_kind=AnalysisBoundaryKind.SCENE,
+        implementation_version="v1",
+    )
+
+
+def _analysis_result_data() -> AnalysisResultData:
+    return AnalysisResultData(
+        schema_version=1,
+        provider="provider",
+        model="model",
+        request_id="request-1",
+        prompt_version="v1",
+        response_schema_version="v1",
+        implementation_version="v1",
+        token_count=3,
+        request_token_count=2,
+        output_token_count=1,
+        normalized_record_ids=("record-1",),
+    )
 
 
 def test_failed_stage_retains_prior_completed_stage(tmp_path: Path) -> None:
@@ -418,7 +472,7 @@ def test_analysis_manifest_chunk_and_result_round_trip(tmp_path: Path) -> None:
             job_id,
             "manifest-1",
             "sha256:abc",
-            {"path": "/generated/chunk.mp4", "mapping_version": "v1"},
+            _proxy_manifest_data(),
         )
         store.save_analysis_chunk(
             job_id,
@@ -427,7 +481,7 @@ def test_analysis_manifest_chunk_and_result_round_trip(tmp_path: Path) -> None:
             source_id="source-1",
             source_start=Decimal("1.25"),
             source_end=Decimal("10.5"),
-            data={"fps": "0.5"},
+            data=_analysis_chunk_data(),
         )
         store.save_analysis_result(
             "result-1",
@@ -435,7 +489,7 @@ def test_analysis_manifest_chunk_and_result_round_trip(tmp_path: Path) -> None:
             "cache-1",
             "chunk-1",
             "broad",
-            {"scenes": []},
+            _analysis_result_data(),
             validated=True,
         )
 
@@ -446,7 +500,7 @@ def test_analysis_manifest_chunk_and_result_round_trip(tmp_path: Path) -> None:
             "chunk_id": "chunk-1",
             "mode": "broad",
             "validated": True,
-            "data": {"scenes": []},
+            "data": _analysis_result_data().model_dump(mode="json"),
         }
         state = store.get_job(job_id)
 
@@ -457,20 +511,25 @@ def test_analysis_manifest_chunk_and_result_round_trip(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "payload",
     [
-        {"api-key": "manifest-secret"},
-        {"nested": [{"AuthoriZation": "chunk-secret"}]},
-        {"nested": {"credentials": "result-secret"}},
+        {"access_token": "secret"},
+        {"client_secret": "secret"},
+        {"private_key": "secret"},
+        {"x-api-key": "secret"},
+        {"unknown": {"nested": "payload"}},
     ],
 )
-def test_analysis_payloads_reject_secret_like_keys(
+def test_analysis_save_methods_reject_untyped_payloads(
     tmp_path: Path, payload: dict[str, object]
 ) -> None:
     with JobStore(tmp_path / "state.db") as store:
         job_id = store.create_job("{}", "{}")
-        with pytest.raises(ValueError, match="secret-like key"):
+        with pytest.raises(TypeError, match="ProxyManifestData"):
             store.save_proxy_manifest(job_id, "manifest-1", "digest", payload)
-        store.save_proxy_manifest(job_id, "manifest-1", "digest", {"safe": True})
-        with pytest.raises(ValueError, match="secret-like key"):
+
+        store.save_proxy_manifest(
+            job_id, "manifest-1", "digest", _proxy_manifest_data()
+        )
+        with pytest.raises(TypeError, match="AnalysisChunkData"):
             store.save_analysis_chunk(
                 job_id,
                 "chunk-1",
@@ -480,6 +539,7 @@ def test_analysis_payloads_reject_secret_like_keys(
                 source_end=Decimal(1),
                 data=payload,
             )
+
         store.save_analysis_chunk(
             job_id,
             "chunk-1",
@@ -487,9 +547,9 @@ def test_analysis_payloads_reject_secret_like_keys(
             source_id="source-1",
             source_start=Decimal(0),
             source_end=Decimal(1),
-            data={"safe": True},
+            data=_analysis_chunk_data(),
         )
-        with pytest.raises(ValueError, match="secret-like key"):
+        with pytest.raises(TypeError, match="AnalysisResultData"):
             store.save_analysis_result(
                 "result-1",
                 job_id,
@@ -500,25 +560,16 @@ def test_analysis_payloads_reject_secret_like_keys(
                 validated=True,
             )
 
-        persisted = store.connection.execute(
-            "SELECT data_json FROM proxy_manifests UNION ALL "
-            "SELECT data_json FROM analysis_chunks"
-        ).fetchall()
 
-    assert "secret" not in json.dumps([row["data_json"] for row in persisted]).lower()
-
-
-def test_analysis_payloads_preserve_approved_keys(tmp_path: Path) -> None:
-    payload = {
-        "token_count": 5,
-        "request_token_count": 7,
-        "keyframe": 12,
-        "cache_key": "safe-cache",
-        "nested": [{"token_count": 3}],
-    }
+def test_analysis_payload_persistence_contains_only_declared_model_fields(
+    tmp_path: Path,
+) -> None:
+    manifest_data = _proxy_manifest_data()
+    chunk_data = _analysis_chunk_data()
+    result_data = _analysis_result_data()
     with JobStore(tmp_path / "state.db") as store:
         job_id = store.create_job("{}", "{}")
-        store.save_proxy_manifest(job_id, "manifest-1", "digest", payload)
+        store.save_proxy_manifest(job_id, "manifest-1", "digest", manifest_data)
         store.save_analysis_chunk(
             job_id,
             "chunk-1",
@@ -526,7 +577,7 @@ def test_analysis_payloads_preserve_approved_keys(tmp_path: Path) -> None:
             source_id="source-1",
             source_start=Decimal(0),
             source_end=Decimal(1),
-            data=payload,
+            data=chunk_data,
         )
         store.save_analysis_result(
             "result-1",
@@ -534,24 +585,29 @@ def test_analysis_payloads_preserve_approved_keys(tmp_path: Path) -> None:
             "cache-1",
             "chunk-1",
             "broad",
-            payload,
+            result_data,
             validated=True,
         )
-
         stored_payloads = [
             json.loads(row["data_json"])
             for table in ("proxy_manifests", "analysis_chunks", "analysis_results")
             for row in store.connection.execute(f"SELECT data_json FROM {table}")
         ]
 
-    assert stored_payloads == [payload, payload, payload]
+    assert stored_payloads == [
+        manifest_data.model_dump(mode="json"),
+        chunk_data.model_dump(mode="json"),
+        result_data.model_dump(mode="json"),
+    ]
 
 
 def test_analysis_records_reject_cross_job_identity_conflicts(tmp_path: Path) -> None:
     with JobStore(tmp_path / "state.db") as store:
         job_a = store.create_job("{}", "{}")
         job_b = store.create_job("{}", "{}")
-        store.save_proxy_manifest(job_a, "manifest-a", "digest-a", {"version": 1})
+        store.save_proxy_manifest(
+            job_a, "manifest-a", "digest-a", _proxy_manifest_data()
+        )
         store.save_analysis_chunk(
             job_a,
             "chunk-a",
@@ -559,7 +615,7 @@ def test_analysis_records_reject_cross_job_identity_conflicts(tmp_path: Path) ->
             source_id="source-a",
             source_start=Decimal(0),
             source_end=Decimal(10),
-            data={"revision": 1},
+            data=_analysis_chunk_data(),
         )
         store.save_analysis_result(
             "result-a",
@@ -567,12 +623,14 @@ def test_analysis_records_reject_cross_job_identity_conflicts(tmp_path: Path) ->
             "cache-a",
             "chunk-a",
             "broad",
-            {"revision": 1},
+            _analysis_result_data(),
             validated=True,
         )
 
         with pytest.raises(ValueError, match="manifest ID belongs"):
-            store.save_proxy_manifest(job_b, "manifest-a", "digest-b", {"version": 2})
+            store.save_proxy_manifest(
+                job_b, "manifest-a", "digest-b", _proxy_manifest_data()
+            )
         with pytest.raises(ValueError, match="proxy manifest belongs"):
             store.save_analysis_chunk(
                 job_b,
@@ -581,9 +639,11 @@ def test_analysis_records_reject_cross_job_identity_conflicts(tmp_path: Path) ->
                 source_id="source-b",
                 source_start=Decimal(0),
                 source_end=Decimal(10),
-                data={"revision": 2},
+                data=_analysis_chunk_data(),
             )
-        store.save_proxy_manifest(job_b, "manifest-b", "digest-b", {"version": 2})
+        store.save_proxy_manifest(
+            job_b, "manifest-b", "digest-b", _proxy_manifest_data()
+        )
         with pytest.raises(ValueError, match="chunk ID is already"):
             store.save_analysis_chunk(
                 job_b,
@@ -592,7 +652,7 @@ def test_analysis_records_reject_cross_job_identity_conflicts(tmp_path: Path) ->
                 source_id="source-a",
                 source_start=Decimal(0),
                 source_end=Decimal(10),
-                data={"revision": 2},
+                data=_analysis_chunk_data(),
             )
         with pytest.raises(ValueError, match="analysis chunk belongs"):
             store.save_analysis_result(
@@ -601,7 +661,7 @@ def test_analysis_records_reject_cross_job_identity_conflicts(tmp_path: Path) ->
                 "cache-b",
                 "chunk-a",
                 "broad",
-                {"revision": 2},
+                _analysis_result_data(),
                 validated=True,
             )
         store.save_analysis_chunk(
@@ -611,7 +671,7 @@ def test_analysis_records_reject_cross_job_identity_conflicts(tmp_path: Path) ->
             source_id="source-b",
             source_start=Decimal(0),
             source_end=Decimal(10),
-            data={"revision": 2},
+            data=_analysis_chunk_data(),
         )
         with pytest.raises(ValueError, match="result ID or cache key"):
             store.save_analysis_result(
@@ -620,7 +680,7 @@ def test_analysis_records_reject_cross_job_identity_conflicts(tmp_path: Path) ->
                 "cache-b",
                 "chunk-b",
                 "broad",
-                {"revision": 2},
+                _analysis_result_data(),
                 validated=True,
             )
         with pytest.raises(ValueError, match="result ID or cache key"):
@@ -630,7 +690,7 @@ def test_analysis_records_reject_cross_job_identity_conflicts(tmp_path: Path) ->
                 "cache-a",
                 "chunk-a",
                 "broad",
-                {"revision": 2},
+                _analysis_result_data(),
                 validated=True,
             )
 
@@ -646,16 +706,38 @@ def test_analysis_records_reject_cross_job_identity_conflicts(tmp_path: Path) ->
             "FROM analysis_results WHERE result_id = 'result-a'"
         ).fetchone()
 
-    assert tuple(manifest) == (job_a, "digest-a", '{"version":1}')
+    assert tuple(manifest) == (
+        job_a,
+        "digest-a",
+        json.dumps(
+            _proxy_manifest_data().model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
     assert tuple(chunk) == (
         job_a,
         "manifest-a",
         "source-a",
         "0",
         "10",
-        '{"revision":1}',
+        json.dumps(
+            _analysis_chunk_data().model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
     )
-    assert tuple(result) == ("result-a", job_a, "cache-a", "chunk-a", '{"revision":1}')
+    assert tuple(result) == (
+        "result-a",
+        job_a,
+        "cache-a",
+        "chunk-a",
+        json.dumps(
+            _analysis_result_data().model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
 
 
 @pytest.mark.parametrize(
@@ -673,7 +755,9 @@ def test_analysis_chunk_rejects_non_finite_or_reversed_ranges(
 ) -> None:
     with JobStore(tmp_path / "state.db") as store:
         job_id = store.create_job("{}", "{}")
-        store.save_proxy_manifest(job_id, "manifest-1", "digest", {})
+        store.save_proxy_manifest(
+            job_id, "manifest-1", "digest", _proxy_manifest_data()
+        )
         with pytest.raises(ValidationError):
             store.save_analysis_chunk(
                 job_id,
@@ -682,7 +766,7 @@ def test_analysis_chunk_rejects_non_finite_or_reversed_ranges(
                 source_id="source-1",
                 source_start=source_start,
                 source_end=source_end,
-                data={},
+                data=_analysis_chunk_data(),
             )
 
         assert (

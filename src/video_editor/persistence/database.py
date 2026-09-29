@@ -14,7 +14,14 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from video_editor.analysis.models import BudgetState, RequestReservation, SourceRange
+from video_editor.analysis.models import (
+    AnalysisChunkData,
+    AnalysisResultData,
+    BudgetState,
+    ProxyManifestData,
+    RequestReservation,
+    SourceRange,
+)
 from video_editor.errors import ErrorCategory, VideoEditorError
 from video_editor.persistence.migrations import run_migrations
 
@@ -76,8 +83,8 @@ def _normalize_payload_key(key: object) -> str:
     return str(key).lower().replace("-", "_").replace(" ", "_")
 
 
-def _json_without_secrets(value: Any) -> str:
-    """Serialize JSON-compatible payload after rejecting secret-like keys."""
+def _json_without_secrets(value: Mapping[str, Any]) -> str:
+    """Serialize a validated payload after rejecting secret-like keys."""
     normalized = _json_value(value)
 
     def reject_secrets(item: Any) -> None:
@@ -616,10 +623,12 @@ class JobStore:
         job_id: str,
         manifest_id: str,
         digest: str,
-        data: Any,
+        data: ProxyManifestData,
     ) -> None:
         """Persist one generated proxy manifest for later upload validation."""
-        data_json = _json_without_secrets(data)
+        if not isinstance(data, ProxyManifestData):
+            raise TypeError("data must be ProxyManifestData")
+        data_json = _json_without_secrets(data.model_dump(mode="json"))
         with self._transaction() as connection:
             self._job_exists(connection, job_id)
             existing = connection.execute(
@@ -648,15 +657,17 @@ class JobStore:
         source_id: str,
         source_start: Decimal,
         source_end: Decimal,
-        data: Any,
+        data: AnalysisChunkData,
     ) -> None:
         """Persist one source-mapped analysis chunk."""
+        if not isinstance(data, AnalysisChunkData):
+            raise TypeError("data must be AnalysisChunkData")
         source_range = SourceRange(
             source_id=source_id,
             start=source_start,
             end=source_end,
         )
-        data_json = _json_without_secrets(data)
+        data_json = _json_without_secrets(data.model_dump(mode="json"))
         with self._transaction() as connection:
             self._job_exists(connection, job_id)
             manifest = connection.execute(
@@ -704,12 +715,14 @@ class JobStore:
         cache_key: str,
         chunk_id: str,
         mode: Literal["broad", "candidate"],
-        data: Any,
+        data: AnalysisResultData,
         *,
         validated: bool,
     ) -> None:
         """Persist one provider-neutral normalized analysis result."""
-        data_json = _json_without_secrets(data)
+        if not isinstance(data, AnalysisResultData):
+            raise TypeError("data must be AnalysisResultData")
+        data_json = _json_without_secrets(data.model_dump(mode="json"))
         with self._transaction() as connection:
             self._job_exists(connection, job_id)
             chunk = connection.execute(

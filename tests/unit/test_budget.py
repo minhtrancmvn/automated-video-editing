@@ -10,7 +10,13 @@ from pathlib import Path
 import pytest
 
 from video_editor.analysis.budget import job_budget, reserve_all_uncached_broad_requests
-from video_editor.analysis.models import RequestReservation
+from video_editor.analysis.models import (
+    AnalysisBoundaryKind,
+    AnalysisChunkData,
+    AnalysisResultData,
+    ProxyManifestData,
+    RequestReservation,
+)
 from video_editor.analysis.pricing import (
     GEMINI_25_FLASH,
     ModelPricing,
@@ -59,6 +65,54 @@ def _create_job_with_budget(store: JobStore, limit: Decimal) -> str:
     job_id = store.create_job("{}", "{}")
     store.initialize_budget(job_id, limit)
     return job_id
+
+
+def _proxy_manifest_data() -> ProxyManifestData:
+    return ProxyManifestData(
+        schema_version=1,
+        source_fingerprint="source-fingerprint",
+        source_identity="source-identity",
+        artifact_path="/generated/proxy.mp4",
+        generated_root="/generated",
+        mapping_version="v1",
+        source_start=Decimal(0),
+        source_end=Decimal(1),
+        proxy_start=Decimal(0),
+        proxy_end=Decimal(1),
+        video_width=1920,
+        video_height=1080,
+        video_fps=Decimal(30),
+        audio_codec="aac",
+        audio_bitrate_bps=128000,
+        implementation_version="v1",
+    )
+
+
+def _analysis_chunk_data() -> AnalysisChunkData:
+    return AnalysisChunkData(
+        schema_version=1,
+        mapping_version="v1",
+        proxy_start=Decimal(0),
+        proxy_end=Decimal(1),
+        boundary_kind=AnalysisBoundaryKind.SCENE,
+        implementation_version="v1",
+    )
+
+
+def _analysis_result_data() -> AnalysisResultData:
+    return AnalysisResultData(
+        schema_version=1,
+        provider="provider",
+        model="model",
+        request_id="request-1",
+        prompt_version="v1",
+        response_schema_version="v1",
+        implementation_version="v1",
+        token_count=3,
+        request_token_count=2,
+        output_token_count=1,
+        normalized_record_ids=("record-1",),
+    )
 
 
 def test_maximum_request_cost_uses_exact_decimal_arithmetic(
@@ -181,7 +235,9 @@ def test_batch_skips_validated_cache_and_reserves_remaining_requests(
 ) -> None:
     with JobStore(tmp_path / "state.db") as store:
         job_id = _create_job_with_budget(store, Decimal("1.00"))
-        store.save_proxy_manifest(job_id, "manifest-1", "digest", {})
+        store.save_proxy_manifest(
+            job_id, "manifest-1", "digest", _proxy_manifest_data()
+        )
         store.save_analysis_chunk(
             job_id,
             "chunk-1",
@@ -189,10 +245,16 @@ def test_batch_skips_validated_cache_and_reserves_remaining_requests(
             source_id="source-1",
             source_start=Decimal(0),
             source_end=Decimal(1),
-            data={},
+            data=_analysis_chunk_data(),
         )
         store.save_analysis_result(
-            "result-1", job_id, "cache-1", "chunk-1", "broad", {}, validated=True
+            "result-1",
+            job_id,
+            "cache-1",
+            "chunk-1",
+            "broad",
+            _analysis_result_data(),
+            validated=True,
         )
 
         reserved = reserve_all_uncached_broad_requests(
