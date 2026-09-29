@@ -287,4 +287,10 @@ def test_load_and_write_plan_round_trip(tmp_path: Path) -> None:
     plan = EditPlan.model_validate(valid_plan_data())
     path = tmp_path / "plan.json"
     write_plan(plan, path)
-    assert load_plan(path) == plan
+    assert path.read_text() == (
+        json.dumps(plan.model_dump(mode="json"), indent=2, sort_keys=True) + "\n"
+    )
+    loaded = load_plan(path)
+    assert type(loaded) is EditPlan
+    assert loaded == plan
+    assert json.loads(SCHEMA_PATH.read_text()) == EditPlan.model_json_schema()
