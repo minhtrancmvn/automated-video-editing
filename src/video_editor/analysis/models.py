@@ -45,36 +45,39 @@ class ProxyManifestData(AnalysisModel):
     """Provider-neutral payload for one generated proxy manifest."""
 
     schema_version: int = Field(ge=1)
-    job_id: NonEmptyString = "legacy"
-    source_id: NonEmptyString = "legacy"
-    chunk_id: NonEmptyString = "legacy"
+    job_id: NonEmptyString
+    source_id: NonEmptyString
+    chunk_id: NonEmptyString
     source_fingerprint: NonEmptyString
     source_identity: NonEmptyString
-    source_path: NonEmptyString = "legacy"
+    source_path: NonEmptyString
+    source_device: int = Field(ge=0)
+    source_inode: int = Field(ge=0)
+    source_size_bytes: int = Field(ge=0)
     artifact_path: NonEmptyString
     generated_root: NonEmptyString
-    generated_root_device: int = Field(default=0, ge=0)
-    generated_root_inode: int = Field(default=0, ge=0)
+    generated_root_device: int = Field(ge=0)
+    generated_root_inode: int = Field(ge=0)
     mapping_version: NonEmptyString
-    upstream_settings_hash: NonEmptyString = "legacy"
-    upstream_tool_version: NonEmptyString = "legacy"
+    upstream_settings_hash: NonEmptyString
+    upstream_tool_version: NonEmptyString
     source_start: FiniteDecimal = Field(ge=0)
     source_end: FiniteDecimal = Field(gt=0)
     proxy_start: FiniteDecimal = Field(ge=0)
     proxy_end: FiniteDecimal = Field(gt=0)
-    media_duration: FiniteDecimal = Field(default=Decimal(1), gt=0)
-    file_size_bytes: int = Field(default=0, ge=0)
-    file_digest_sha256: NonEmptyString = "legacy"
-    file_device: int = Field(default=0, ge=0)
-    file_inode: int = Field(default=0, ge=0)
-    video_codec: NonEmptyString = "h264"
+    media_duration: FiniteDecimal = Field(gt=0)
+    file_size_bytes: int = Field(ge=0)
+    file_digest_sha256: NonEmptyString
+    file_device: int = Field(ge=0)
+    file_inode: int = Field(ge=0)
+    video_codec: NonEmptyString
     video_width: int = Field(gt=0)
     video_height: int = Field(gt=0)
     video_fps: FiniteDecimal = Field(gt=0)
     audio_codec: NonEmptyString
-    audio_channels: int = Field(default=1, gt=0)
+    audio_channels: int = Field(gt=0)
     audio_bitrate_bps: int = Field(ge=0)
-    audio_probe_bitrate_bps: int = Field(default=0, ge=0)
+    audio_probe_bitrate_bps: int = Field(ge=0)
     implementation_version: NonEmptyString
 
     @model_validator(mode="after")

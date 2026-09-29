@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import stat
 import subprocess
 from dataclasses import dataclass
@@ -29,7 +30,7 @@ from video_editor.persistence.database import JobStore
 
 _IMPLEMENTATION_VERSION = "cloud-proxy-v1"
 _MAPPING_VERSION = "cloud-proxy-mapping-v1"
-_DURATION_TOLERANCE = Decimal("0.1")
+_DURATION_TOLERANCE = Decimal("0.2")
 
 
 @dataclass(frozen=True)
@@ -98,19 +99,60 @@ def plan_chunk_ranges(
             raise ValueError("safe boundaries must be inside source duration")
         previous = boundary
 
+    def can_partition(duration: Decimal) -> bool:
+        if duration == 0:
+            return True
+        minimum_chunks = int(
+            (duration / active.maximum_seconds).to_integral_value(
+                rounding="ROUND_CEILING"
+            )
+        )
+        maximum_chunks = int(duration // active.minimum_seconds)
+        return minimum_chunks <= maximum_chunks
+
+    def fixed_end(start: Decimal) -> Decimal:
+        remaining = source_duration - start
+        target_duration = active.target_seconds
+        feasible_chunks = [
+            count
+            for count in range(2, int(remaining // active.minimum_seconds) + 1)
+            if remaining <= count * active.maximum_seconds
+        ]
+        if not feasible_chunks:
+            return start + target_duration
+        count = min(
+            feasible_chunks,
+            key=lambda value: (abs(remaining / value - target_duration), value),
+        )
+        lower = max(
+            active.minimum_seconds,
+            remaining - (count - 1) * active.maximum_seconds,
+        )
+        upper = min(
+            active.maximum_seconds,
+            remaining - (count - 1) * active.minimum_seconds,
+        )
+        return start + min(max(target_duration, lower), upper)
+
     ranges: list[tuple[Decimal, Decimal]] = []
     start = Decimal(0)
-    while start + active.target_seconds < source_duration:
+    while source_duration - start > active.maximum_seconds:
         minimum = start + active.minimum_seconds
         maximum = start + active.maximum_seconds
         target = start + active.target_seconds
-        eligible = [
+        boundaries = [
             boundary for boundary in safe_boundaries if minimum <= boundary <= maximum
         ]
+        partitioned = [
+            boundary
+            for boundary in boundaries
+            if can_partition(source_duration - boundary)
+        ]
+        eligible = partitioned or boundaries
         end = (
             min(eligible, key=lambda value: (abs(value - target), value))
             if eligible
-            else target
+            else fixed_end(start)
         )
         if end <= start or end >= source_duration:
             raise ValueError("chunk planner produced invalid coverage")
@@ -149,7 +191,52 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _run_ffmpeg(args: list[str], partial: Path) -> None:
+def _bounded_fingerprint_fd(fd: int, chunk_bytes: int = 1_048_576) -> str:
+    """Hash stable source facts and bounded content from one open descriptor."""
+    source_stat = os.fstat(fd)
+    size = source_stat.st_size
+    first = os.pread(fd, chunk_bytes, 0)
+    last = (
+        first if size <= chunk_bytes else os.pread(fd, chunk_bytes, size - chunk_bytes)
+    )
+    digest = hashlib.sha256()
+    digest.update(IDENTITY_VERSION.encode("ascii"))
+    digest.update(b"\0size\0")
+    digest.update(str(size).encode("ascii"))
+    digest.update(b"\0first\0")
+    digest.update(len(first).to_bytes(8, "big"))
+    digest.update(first)
+    digest.update(b"\0last\0")
+    digest.update(len(last).to_bytes(8, "big"))
+    digest.update(last)
+    return digest.hexdigest()
+
+
+def _same_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def _same_source_facts(left: os.stat_result, right: os.stat_result) -> bool:
+    return _same_identity(left, right) and left.st_size == right.st_size
+
+
+def _cleanup_private_temp(partial: Path, root: Path, root_stat: os.stat_result) -> None:
+    """Remove only expected random temporary output from stable private root."""
+    if partial.parent != root or not _same_identity(root_stat, root.lstat()):
+        raise VideoEditorError(
+            ErrorCategory.STORAGE, "refusing cleanup outside stable generated root"
+        )
+    try:
+        partial.unlink()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise VideoEditorError(
+            ErrorCategory.STORAGE, f"cannot clean generated temporary proxy: {exc}"
+        ) from exc
+
+
+def _run_ffmpeg(args: list[str], *, source_fd: int, output_fd: int) -> None:
     try:
         completed = subprocess.run(
             args,
@@ -157,14 +244,13 @@ def _run_ffmpeg(args: list[str], partial: Path) -> None:
             text=True,
             shell=False,
             check=False,
+            pass_fds=(source_fd, output_fd),
         )
     except OSError as exc:
-        partial.unlink(missing_ok=True)
         raise VideoEditorError(
             ErrorCategory.RENDER, f"cloud proxy generation failed: {exc}"
         ) from exc
     if completed.returncode != 0:
-        partial.unlink(missing_ok=True)
         detail = completed.stderr.strip() or "unknown ffmpeg error"
         raise VideoEditorError(
             ErrorCategory.RENDER, f"cloud proxy generation failed: {detail}"
@@ -269,8 +355,8 @@ def _validated_probe(
 
 
 def _proxy_args(
-    source: Path,
-    partial: Path,
+    source_fd_path: str,
+    output_fd_path: str,
     source_start: Decimal,
     duration: Decimal,
     settings: CloudProxySettings,
@@ -280,11 +366,11 @@ def _proxy_args(
         ffmpeg,
         "-v",
         "error",
-        "-y",
+        "-n",
         "-ss",
         format(source_start, "f"),
         "-i",
-        str(source),
+        source_fd_path,
         "-t",
         format(duration, "f"),
         "-vf",
@@ -301,19 +387,25 @@ def _proxy_args(
         settings.audio_codec,
         "-b:a",
         settings.audio_bitrate,
+        "-movflags",
+        "frag_keyframe+empty_moov",
         "-f",
         "mp4",
-        str(partial),
+        output_fd_path,
     ]
+
+
+def _paths_overlap(left: Path, right: Path) -> bool:
+    return left == right or left.is_relative_to(right) or right.is_relative_to(left)
 
 
 def _validate_generation_inputs(
     source: Path,
     generated_root: Path,
+    paths: PathSettings,
     mapping: ProxyMapping,
     source_start: Decimal,
     source_end: Decimal,
-    source_fingerprint: str,
 ) -> tuple[Path, Path]:
     if not source_start.is_finite() or not source_end.is_finite():
         raise ValueError("chunk range must be finite")
@@ -323,18 +415,56 @@ def _validate_generation_inputs(
         raise ValueError("chunk range must be positive")
     source_resolved = source.resolve(strict=True)
     root_resolved = generated_root.resolve(strict=False)
-    if root_resolved == source_resolved or root_resolved.is_relative_to(
-        source_resolved.parent
+    allowed_roots = (paths.cache_dir.resolve(), paths.workspace_dir.resolve())
+    if any(
+        _paths_overlap(left, right)
+        for left in allowed_roots
+        for right in allowed_roots
+        if left != right
     ):
+        raise VideoEditorError(
+            ErrorCategory.STORAGE, "configured cache and workspace roots overlap"
+        )
+    matched_roots = [
+        allowed for allowed in allowed_roots if root_resolved.parent == allowed
+    ]
+    if not matched_roots:
+        raise VideoEditorError(
+            ErrorCategory.STORAGE,
+            "generated job root must be a direct child of a configured generated root",
+        )
+    protected_roots = {paths.input_dir.resolve(), source_resolved.parent}
+    if any(
+        _paths_overlap(allowed, protected)
+        for allowed in allowed_roots
+        for protected in protected_roots
+    ):
+        raise VideoEditorError(
+            ErrorCategory.STORAGE,
+            "configured generated root overlaps original source tree",
+        )
+    if any(_paths_overlap(root_resolved, protected) for protected in protected_roots):
         raise VideoEditorError(
             ErrorCategory.STORAGE, "generated root overlaps original source tree"
         )
-    actual_identity = f"{IDENTITY_VERSION}:{bounded_fingerprint(source_resolved)}"
-    if source_fingerprint != actual_identity.removeprefix(f"{IDENTITY_VERSION}:"):
-        raise VideoEditorError(ErrorCategory.STATE, "source fingerprint mismatch")
-    if mapping.source_identity != actual_identity:
-        raise VideoEditorError(ErrorCategory.STATE, "source identity mismatch")
-    generated_root.mkdir(parents=True, exist_ok=True)
+    generated_root.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        generated_root.mkdir(mode=0o700)
+    except FileExistsError:
+        root_stat = generated_root.lstat()
+    else:
+        root_stat = generated_root.lstat()
+        os.chmod(generated_root, 0o700)
+        root_stat = generated_root.lstat()
+    if (
+        not stat.S_ISDIR(root_stat.st_mode)
+        or stat.S_IMODE(root_stat.st_mode) != 0o700
+        or root_stat.st_uid != os.getuid()
+        or root_stat.st_nlink < 1
+    ):
+        raise VideoEditorError(
+            ErrorCategory.STORAGE, "generated job root is not private and owned"
+        )
     return source_resolved, generated_root.resolve(strict=True)
 
 
@@ -347,19 +477,24 @@ def create_cloud_proxy_chunk(
     *,
     job_id: str,
     source_fingerprint: str,
+    paths: PathSettings,
     settings: CloudProxySettings | None = None,
     ffmpeg: str = "ffmpeg",
     ffprobe: str = "ffprobe",
 ) -> ProxyManifest:
     """Create, inspect, hash, and describe one cloud proxy chunk."""
     active = settings or CloudProxySettings()
+    if generated_root.name != job_id:
+        raise VideoEditorError(
+            ErrorCategory.STORAGE, "generated root must be job-specific"
+        )
     source_resolved, root_resolved = _validate_generation_inputs(
         source,
         generated_root,
+        paths,
         mapping,
         source_start,
         source_end,
-        source_fingerprint,
     )
     identity_payload = json.dumps(
         {
@@ -378,30 +513,131 @@ def create_cloud_proxy_chunk(
     manifest_id = f"proxy-manifest-{identity}"
     chunk_id = f"analysis-chunk-{identity}"
     final = root_resolved / f"{identity}.cloud-proxy.mp4"
-    partial = final.with_name(final.name + ".partial")
+    partial = root_resolved / f".{secrets.token_hex(24)}.mp4"
+    root_stat = root_resolved.lstat()
+    partial_owned = False
     duration = source_end - source_start
+    open_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
-        _run_ffmpeg(
-            _proxy_args(
-                source_resolved,
-                partial,
-                source_start,
-                duration,
-                active,
-                ffmpeg,
-            ),
-            partial,
-        )
+        source_fd = os.open(source, open_flags)
+    except OSError as exc:
+        raise VideoEditorError(
+            ErrorCategory.INSPECTION, f"cannot open source securely: {exc}"
+        ) from exc
+    try:
+        source_stat = os.fstat(source_fd)
+        path_stat = source.lstat()
+        if not _same_identity(source_stat, path_stat):
+            raise VideoEditorError(
+                ErrorCategory.INSPECTION, "source path identity changed"
+            )
+        if not stat.S_ISREG(source_stat.st_mode) or source_stat.st_nlink != 1:
+            raise VideoEditorError(
+                ErrorCategory.INSPECTION,
+                "source must be one regular file without hard links",
+            )
+        actual_fingerprint = _bounded_fingerprint_fd(source_fd)
+        actual_identity = f"{IDENTITY_VERSION}:{actual_fingerprint}"
+        if source_fingerprint != actual_fingerprint:
+            raise VideoEditorError(ErrorCategory.STATE, "source fingerprint mismatch")
+        if mapping.source_identity != actual_identity:
+            raise VideoEditorError(ErrorCategory.STATE, "source identity mismatch")
+
+        root_stat = root_resolved.lstat()
+        reserve_flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
+        partial_fd = os.open(partial, reserve_flags, 0o600)
+        partial_owned = True
+        try:
+            reserved_stat = os.fstat(partial_fd)
+            if (
+                not stat.S_ISREG(reserved_stat.st_mode)
+                or reserved_stat.st_nlink != 1
+                or stat.S_IMODE(reserved_stat.st_mode) != 0o600
+            ):
+                raise VideoEditorError(
+                    ErrorCategory.STORAGE, "temporary proxy reservation is unsafe"
+                )
+            if not _same_identity(root_stat, root_resolved.lstat()):
+                raise VideoEditorError(
+                    ErrorCategory.STORAGE, "generated root identity changed"
+                )
+
+            _run_ffmpeg(
+                _proxy_args(
+                    f"/dev/fd/{source_fd}",
+                    f"pipe:{partial_fd}",
+                    source_start,
+                    duration,
+                    active,
+                    ffmpeg,
+                ),
+                source_fd=source_fd,
+                output_fd=partial_fd,
+            )
+            os.fsync(partial_fd)
+        finally:
+            os.close(partial_fd)
+        current_source_stat = os.fstat(source_fd)
+        if (
+            not _same_source_facts(source_stat, current_source_stat)
+            or _bounded_fingerprint_fd(source_fd) != actual_fingerprint
+        ):
+            raise VideoEditorError(ErrorCategory.STATE, "source identity changed")
+        if not _same_identity(root_stat, root_resolved.lstat()):
+            raise VideoEditorError(
+                ErrorCategory.STORAGE, "generated root identity changed"
+            )
+        partial_stat = partial.lstat()
+        partial_read_fd = os.open(partial, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            opened_partial_stat = os.fstat(partial_read_fd)
+            if (
+                not stat.S_ISREG(partial_stat.st_mode)
+                or partial_stat.st_nlink != 1
+                or not _same_identity(partial_stat, opened_partial_stat)
+            ):
+                raise VideoEditorError(
+                    ErrorCategory.STORAGE, "generated temporary proxy is unsafe"
+                )
+        finally:
+            os.close(partial_read_fd)
         inspected, probed_audio_bitrate = _validated_probe(
             partial,
             duration,
             active,
             ffprobe=ffprobe,
         )
-        partial.replace(final)
+        current_partial_stat = partial.lstat()
+        if (
+            not _same_identity(partial_stat, current_partial_stat)
+            or current_partial_stat.st_nlink != 1
+        ):
+            raise VideoEditorError(
+                ErrorCategory.STORAGE, "generated temporary proxy identity changed"
+            )
+        if not _same_identity(root_stat, root_resolved.lstat()):
+            raise VideoEditorError(
+                ErrorCategory.STORAGE, "generated root identity changed"
+            )
+        try:
+            os.link(partial, final, follow_symlinks=False)
+        except FileExistsError as exc:
+            raise VideoEditorError(
+                ErrorCategory.STORAGE, "final proxy path already exists"
+            ) from exc
+        final_stat = final.lstat()
+        if not _same_identity(partial_stat, final_stat):
+            raise VideoEditorError(
+                ErrorCategory.STORAGE, "final proxy identity changed during publication"
+            )
+        partial.unlink()
+        partial_owned = False
     except BaseException:
-        partial.unlink(missing_ok=True)
+        if partial_owned:
+            _cleanup_private_temp(partial, root_resolved, root_stat)
         raise
+    finally:
+        os.close(source_fd)
 
     file_stat = final.stat(follow_symlinks=False)
     root_stat = root_resolved.stat(follow_symlinks=False)
@@ -417,6 +653,9 @@ def create_cloud_proxy_chunk(
         source_fingerprint=source_fingerprint,
         source_identity=mapping.source_identity,
         source_path=str(source_resolved),
+        source_device=source_stat.st_dev,
+        source_inode=source_stat.st_ino,
+        source_size_bytes=source_stat.st_size,
         artifact_path=str(final),
         generated_root=str(root_resolved),
         generated_root_device=root_stat.st_dev,

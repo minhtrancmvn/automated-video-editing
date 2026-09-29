@@ -4,13 +4,17 @@ import importlib.util
 import json
 import os
 import shutil
+import stat
+import subprocess
 from dataclasses import dataclass
 from decimal import Decimal
 from itertools import pairwise
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
+from video_editor.analysis.models import ProxyManifestData
 from video_editor.analysis.proxy_chunks import (
     CloudProxySettings,
     ProxyManifest,
@@ -22,7 +26,7 @@ from video_editor.analysis.proxy_chunks import (
 from video_editor.config import PathSettings
 from video_editor.errors import VideoEditorError
 from video_editor.media.discovery import IDENTITY_VERSION, bounded_fingerprint
-from video_editor.media.probe import probe_media
+from video_editor.media.probe import AudioStream, MediaProbe, VideoStream, probe_media
 from video_editor.media.proxies import ProxyMapping
 from video_editor.persistence.database import JobStore
 
@@ -100,6 +104,7 @@ def _registered_chunk(tmp_path: Path) -> RegisteredChunk:
         D("1.5"),
         job_id=job_id,
         source_fingerprint=fingerprint,
+        paths=paths,
     )
     register_proxy_manifest(manifest, store)
     return RegisteredChunk(manifest, store, paths, source)
@@ -161,8 +166,38 @@ def test_chunk_ranges_cover_source_once_and_split_near_safe_boundaries() -> None
 def test_chunk_ranges_use_fixed_target_without_safe_boundary() -> None:
     assert plan_chunk_ranges(D("1600"), [], CloudProxySettings()) == [
         (D("0"), D("720")),
-        (D("720"), D("1440")),
-        (D("1440"), D("1600")),
+        (D("720"), D("1600")),
+    ]
+
+
+def test_chunk_ranges_keep_at_most_maximum_seconds_as_one_final_chunk() -> None:
+    assert plan_chunk_ranges(D("850"), [], CloudProxySettings()) == [
+        (D("0"), D("850")),
+    ]
+
+
+def test_chunk_ranges_use_unavoidable_short_final_remainder() -> None:
+    assert plan_chunk_ranges(D("1000"), [], CloudProxySettings()) == [
+        (D("0"), D("720")),
+        (D("720"), D("1000")),
+    ]
+
+
+def test_chunk_ranges_choose_boundary_that_leaves_valid_final_remainder() -> None:
+    assert plan_chunk_ranges(
+        D("1300"),
+        [D("650"), D("710")],
+        CloudProxySettings(),
+    ) == [
+        (D("0"), D("650")),
+        (D("650"), D("1300")),
+    ]
+
+
+def test_chunk_ranges_balance_fixed_split_to_avoid_short_final_remainder() -> None:
+    assert plan_chunk_ranges(D("1250"), [], CloudProxySettings()) == [
+        (D("0"), D("650")),
+        (D("650"), D("1250")),
     ]
 
 
@@ -295,6 +330,548 @@ def test_symlinked_generated_parent_is_rejected(tmp_path: Path) -> None:
             )
     finally:
         registered.store.__exit__(None, None, None)
+
+
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="local FFmpeg and ffprobe required",
+)
+def test_generation_ignores_predictable_partial_links_and_preserves_source(
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    source = create_media_fixture(
+        paths.input_dir / "source.mp4", with_audio=True, duration_seconds=2
+    )
+    original = source.read_bytes()
+    fingerprint = bounded_fingerprint(source)
+    mapping = ProxyMapping(
+        source_id="source-1",
+        source_start=D("0"),
+        source_end=D("2"),
+        proxy_start=D("0"),
+        proxy_end=D("2"),
+        source_identity=f"{IDENTITY_VERSION}:{fingerprint}",
+        settings_hash="phase1-settings",
+        tool_version="ffmpeg-test",
+    )
+    generated_root = paths.cache_dir / "job-1"
+    generated_root.mkdir(parents=True, mode=0o700)
+    generated_root.chmod(0o700)
+    predictable = generated_root / "predictable.cloud-proxy.mp4.partial"
+    predictable.symlink_to(source)
+    hardlink_victim = tmp_path / "hardlink-victim.bin"
+    hardlink_victim.write_bytes(b"victim bytes")
+    predictable_hardlink = generated_root / "predictable-hardlink.partial"
+    os.link(hardlink_victim, predictable_hardlink)
+
+    manifest = create_cloud_proxy_chunk(
+        source,
+        generated_root,
+        mapping,
+        D("0"),
+        D("1.5"),
+        job_id="job-1",
+        source_fingerprint=fingerprint,
+        paths=paths,
+    )
+
+    assert source.read_bytes() == original
+    assert hardlink_victim.read_bytes() == b"victim bytes"
+    assert predictable.is_symlink()
+    assert predictable_hardlink.stat().st_ino == hardlink_victim.stat().st_ino
+    assert manifest.path.is_file()
+    assert not manifest.path.is_symlink()
+
+
+def test_generation_rejects_hardlinked_source_without_modifying_it(
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    source = paths.input_dir / "source.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"source bytes")
+    original = source.read_bytes()
+    os.link(source, source.with_name("source-copy.mp4"))
+    fingerprint = bounded_fingerprint(source)
+    mapping = ProxyMapping(
+        source_id="source-1",
+        source_start=D("0"),
+        source_end=D("2"),
+        proxy_start=D("0"),
+        proxy_end=D("2"),
+        source_identity=f"{IDENTITY_VERSION}:{fingerprint}",
+        settings_hash="phase1-settings",
+        tool_version="ffmpeg-test",
+    )
+
+    with pytest.raises(VideoEditorError, match="hard links"):
+        create_cloud_proxy_chunk(
+            source,
+            paths.cache_dir / "job-1",
+            mapping,
+            D("0"),
+            D("1"),
+            job_id="job-1",
+            source_fingerprint=fingerprint,
+            paths=paths,
+        )
+
+    assert source.read_bytes() == original
+
+
+def test_generation_keeps_private_random_temp_open_during_ffmpeg(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _paths(tmp_path)
+    source = paths.input_dir / "source.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"source bytes")
+    fingerprint = bounded_fingerprint(source)
+    mapping = ProxyMapping(
+        source_id="source-1",
+        source_start=D("0"),
+        source_end=D("2"),
+        proxy_start=D("0"),
+        proxy_end=D("2"),
+        source_identity=f"{IDENTITY_VERSION}:{fingerprint}",
+        settings_hash="phase1-settings",
+        tool_version="ffmpeg-test",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_run(
+        args: list[str],
+        *,
+        capture_output: bool,
+        text: bool,
+        shell: bool,
+        check: bool,
+        pass_fds: tuple[int, ...] = (),
+    ) -> subprocess.CompletedProcess[str]:
+        captured["args"] = args
+        captured["pass_fds"] = pass_fds
+        input_path = args[args.index("-i") + 1]
+        output_path = args[-1]
+        assert input_path.startswith("/dev/fd/")
+        assert output_path.startswith("pipe:")
+        output_fd = int(output_path.removeprefix("pipe:"))
+        assert output_fd in pass_fds
+        output_stat = os.fstat(output_fd)
+        assert stat.S_ISREG(output_stat.st_mode)
+        assert output_stat.st_nlink == 1
+        os.write(output_fd, b"generated")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    inspected = MediaProbe(
+        path=tmp_path / "generated.mp4",
+        duration=1.0,
+        video=VideoStream(
+            codec_name="h264",
+            width=640,
+            height=360,
+            avg_frame_rate=15.0,
+        ),
+        audio=AudioStream(codec_name="aac", channels=1),
+    )
+    monkeypatch.setattr(
+        "video_editor.analysis.proxy_chunks._validated_probe",
+        lambda path, duration, settings, *, ffprobe: (inspected, 64000),
+    )
+
+    manifest = create_cloud_proxy_chunk(
+        source,
+        paths.cache_dir / "job-1",
+        mapping,
+        D("0"),
+        D("1"),
+        job_id="job-1",
+        source_fingerprint=fingerprint,
+        paths=paths,
+    )
+
+    args = captured["args"]
+    pass_fds = captured["pass_fds"]
+    assert isinstance(args, list)
+    assert isinstance(pass_fds, tuple)
+    assert "-n" in args
+    assert "-y" not in args
+    assert len(pass_fds) == 2
+    assert manifest.path.read_bytes() == b"generated"
+
+
+def test_generation_uses_no_overwrite_for_private_random_temp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _paths(tmp_path)
+    source = paths.input_dir / "source.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"source bytes")
+    fingerprint = bounded_fingerprint(source)
+    mapping = ProxyMapping(
+        source_id="source-1",
+        source_start=D("0"),
+        source_end=D("2"),
+        proxy_start=D("0"),
+        proxy_end=D("2"),
+        source_identity=f"{IDENTITY_VERSION}:{fingerprint}",
+        settings_hash="phase1-settings",
+        tool_version="ffmpeg-test",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_run(
+        args: list[str],
+        *,
+        capture_output: bool,
+        text: bool,
+        shell: bool,
+        check: bool,
+        pass_fds: tuple[int, ...] = (),
+    ) -> subprocess.CompletedProcess[str]:
+        captured["args"] = args
+        captured["pass_fds"] = pass_fds
+        output_fd = int(args[-1].removeprefix("pipe:"))
+        os.write(output_fd, b"generated")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    inspected = MediaProbe(
+        path=tmp_path / "generated.mp4",
+        duration=1.0,
+        video=VideoStream(
+            codec_name="h264",
+            width=640,
+            height=360,
+            avg_frame_rate=15.0,
+        ),
+        audio=AudioStream(codec_name="aac", channels=1),
+    )
+    monkeypatch.setattr(
+        "video_editor.analysis.proxy_chunks._validated_probe",
+        lambda path, duration, settings, *, ffprobe: (inspected, 64000),
+    )
+
+    create_cloud_proxy_chunk(
+        source,
+        paths.cache_dir / "job-1",
+        mapping,
+        D("0"),
+        D("1"),
+        job_id="job-1",
+        source_fingerprint=fingerprint,
+        paths=paths,
+    )
+
+    args = captured["args"]
+    assert isinstance(args, list)
+    assert "-n" in args
+    assert "-y" not in args
+    input_index = args.index("-i") + 1
+    assert str(args[input_index]).startswith("/dev/fd/")
+    assert captured["pass_fds"]
+    assert source.read_bytes() == b"source bytes"
+
+
+def test_generation_does_not_overwrite_existing_final_proxy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _paths(tmp_path)
+    source = paths.input_dir / "source.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"source bytes")
+    fingerprint = bounded_fingerprint(source)
+    mapping = ProxyMapping(
+        source_id="source-1",
+        source_start=D("0"),
+        source_end=D("2"),
+        proxy_start=D("0"),
+        proxy_end=D("2"),
+        source_identity=f"{IDENTITY_VERSION}:{fingerprint}",
+        settings_hash="phase1-settings",
+        tool_version="ffmpeg-test",
+    )
+    generated_root = paths.cache_dir / "job-1"
+    original_link = os.link
+
+    def race_link(
+        source_path: object,
+        destination_path: object,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        destination = Path(destination_path)  # type: ignore[arg-type]
+        if destination.name.endswith(".cloud-proxy.mp4"):
+            destination.write_bytes(b"existing final")
+        original_link(source_path, destination_path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "link", race_link)
+
+    def fake_run(
+        args: list[str],
+        *,
+        capture_output: bool,
+        text: bool,
+        shell: bool,
+        check: bool,
+        pass_fds: tuple[int, ...] = (),
+    ) -> subprocess.CompletedProcess[str]:
+        output_fd = int(args[-1].removeprefix("pipe:"))
+        os.write(output_fd, b"generated")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    inspected = MediaProbe(
+        path=tmp_path / "generated.mp4",
+        duration=1.0,
+        video=VideoStream(
+            codec_name="h264",
+            width=640,
+            height=360,
+            avg_frame_rate=15.0,
+        ),
+        audio=AudioStream(codec_name="aac", channels=1),
+    )
+    monkeypatch.setattr(
+        "video_editor.analysis.proxy_chunks._validated_probe",
+        lambda path, duration, settings, *, ffprobe: (inspected, 64000),
+    )
+
+    with pytest.raises(VideoEditorError, match="final proxy path already exists"):
+        create_cloud_proxy_chunk(
+            source,
+            generated_root,
+            mapping,
+            D("0"),
+            D("1"),
+            job_id="job-1",
+            source_fingerprint=fingerprint,
+            paths=paths,
+        )
+
+    final_files = list(generated_root.glob("*.cloud-proxy.mp4"))
+    assert len(final_files) == 1
+    assert final_files[0].read_bytes() == b"existing final"
+
+
+def test_generation_does_not_overwrite_existing_random_temp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _paths(tmp_path)
+    source = paths.input_dir / "source.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"source bytes")
+    fingerprint = bounded_fingerprint(source)
+    mapping = ProxyMapping(
+        source_id="source-1",
+        source_start=D("0"),
+        source_end=D("2"),
+        proxy_start=D("0"),
+        proxy_end=D("2"),
+        source_identity=f"{IDENTITY_VERSION}:{fingerprint}",
+        settings_hash="phase1-settings",
+        tool_version="ffmpeg-test",
+    )
+    generated_root = paths.cache_dir / "job-1"
+    generated_root.mkdir(parents=True, mode=0o700)
+    generated_root.chmod(0o700)
+    monkeypatch.setattr("secrets.token_hex", lambda size: "fixed-random-name")
+    existing = generated_root / ".fixed-random-name.mp4"
+    existing.write_bytes(b"do not overwrite")
+
+    with pytest.raises(FileExistsError):
+        create_cloud_proxy_chunk(
+            source,
+            generated_root,
+            mapping,
+            D("0"),
+            D("1"),
+            job_id="job-1",
+            source_fingerprint=fingerprint,
+            paths=paths,
+        )
+
+    assert existing.read_bytes() == b"do not overwrite"
+    assert source.read_bytes() == b"source bytes"
+
+
+def test_generation_requires_job_root_directly_under_configured_generated_root(
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    source = paths.input_dir / "source.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"source bytes")
+    fingerprint = bounded_fingerprint(source)
+    mapping = ProxyMapping(
+        source_id="source-1",
+        source_start=D("0"),
+        source_end=D("2"),
+        proxy_start=D("0"),
+        proxy_end=D("2"),
+        source_identity=f"{IDENTITY_VERSION}:{fingerprint}",
+        settings_hash="phase1-settings",
+        tool_version="ffmpeg-test",
+    )
+
+    with pytest.raises(VideoEditorError, match="direct child"):
+        create_cloud_proxy_chunk(
+            source,
+            paths.cache_dir / "nested" / "job-1",
+            mapping,
+            D("0"),
+            D("1"),
+            job_id="job-1",
+            source_fingerprint=fingerprint,
+            paths=paths,
+        )
+
+
+def test_generation_rejects_configured_generated_root_containing_input_root(
+    tmp_path: Path,
+) -> None:
+    paths = PathSettings(
+        input_dir=tmp_path / "cache" / "input",
+        workspace_dir=tmp_path / "workspace",
+        cache_dir=tmp_path / "cache",
+        output_dir=tmp_path / "output",
+        state_dir=tmp_path / "state",
+    )
+    source = paths.input_dir / "source.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"source bytes")
+    fingerprint = bounded_fingerprint(source)
+    mapping = ProxyMapping(
+        source_id="source-1",
+        source_start=D("0"),
+        source_end=D("2"),
+        proxy_start=D("0"),
+        proxy_end=D("2"),
+        source_identity=f"{IDENTITY_VERSION}:{fingerprint}",
+        settings_hash="phase1-settings",
+        tool_version="ffmpeg-test",
+    )
+
+    with pytest.raises(VideoEditorError, match="configured generated root overlaps"):
+        create_cloud_proxy_chunk(
+            source,
+            paths.cache_dir / "job-1",
+            mapping,
+            D("0"),
+            D("1"),
+            job_id="job-1",
+            source_fingerprint=fingerprint,
+            paths=paths,
+        )
+
+
+def test_generation_rejects_root_overlapping_input_or_source_parent(
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    source = paths.input_dir / "nested" / "source.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"source bytes")
+    fingerprint = bounded_fingerprint(source)
+    mapping = ProxyMapping(
+        source_id="source-1",
+        source_start=D("0"),
+        source_end=D("2"),
+        proxy_start=D("0"),
+        proxy_end=D("2"),
+        source_identity=f"{IDENTITY_VERSION}:{fingerprint}",
+        settings_hash="phase1-settings",
+        tool_version="ffmpeg-test",
+    )
+
+    invalid_roots = (
+        paths.input_dir / "job-1",
+        source.parent / "job-1",
+        tmp_path / "job-1",
+    )
+    for generated_root in invalid_roots:
+        with pytest.raises(
+            VideoEditorError, match="overlaps|configured roots|direct child"
+        ):
+            create_cloud_proxy_chunk(
+                source,
+                generated_root,
+                mapping,
+                D("0"),
+                D("1"),
+                job_id="job-1",
+                source_fingerprint=fingerprint,
+                paths=paths,
+            )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "job_id",
+        "source_id",
+        "chunk_id",
+        "source_path",
+        "source_device",
+        "source_inode",
+        "source_size_bytes",
+        "generated_root_device",
+        "generated_root_inode",
+        "upstream_settings_hash",
+        "upstream_tool_version",
+        "media_duration",
+        "file_size_bytes",
+        "file_digest_sha256",
+        "file_device",
+        "file_inode",
+        "video_codec",
+        "audio_channels",
+        "audio_probe_bitrate_bps",
+    ],
+)
+def test_proxy_manifest_security_provenance_is_mandatory(field: str) -> None:
+    payload = {
+        "schema_version": 1,
+        "job_id": "job-1",
+        "source_id": "source-1",
+        "chunk_id": "chunk-1",
+        "source_fingerprint": "fingerprint",
+        "source_identity": "bounded-v1:fingerprint",
+        "source_path": "/input/source.mp4",
+        "source_device": 1,
+        "source_inode": 1,
+        "source_size_bytes": 100,
+        "artifact_path": "/cache/job-1/proxy.mp4",
+        "generated_root": "/cache/job-1",
+        "generated_root_device": 1,
+        "generated_root_inode": 2,
+        "mapping_version": "mapping-v1",
+        "upstream_settings_hash": "settings-hash",
+        "upstream_tool_version": "ffmpeg-test",
+        "source_start": D("0"),
+        "source_end": D("1"),
+        "proxy_start": D("0"),
+        "proxy_end": D("1"),
+        "media_duration": D("1"),
+        "file_size_bytes": 100,
+        "file_digest_sha256": "digest",
+        "file_device": 1,
+        "file_inode": 3,
+        "video_codec": "h264",
+        "video_width": 640,
+        "video_height": 360,
+        "video_fps": D("15"),
+        "audio_codec": "aac",
+        "audio_channels": 1,
+        "audio_bitrate_bps": 64000,
+        "audio_probe_bitrate_bps": 64000,
+        "implementation_version": "cloud-proxy-v1",
+    }
+    payload.pop(field)
+
+    with pytest.raises(ValidationError):
+        ProxyManifestData.model_validate(payload)
 
 
 def test_unregistered_manifest_is_rejected(tmp_path: Path) -> None:
