@@ -9,11 +9,12 @@ import os
 import secrets
 import stat
 import subprocess
+import threading
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from itertools import pairwise
 from pathlib import Path
-from typing import Any, BinaryIO, Self, cast
+from typing import Any, BinaryIO, Literal, Self, cast
 
 from pydantic import ValidationError
 
@@ -84,7 +85,17 @@ class ProxyManifest:
     chunk_data: AnalysisChunkData
 
 
-_GENERATION_PROOFS: dict[str, bytes] = {}
+@dataclass
+class _GenerationProof:
+    manifest: ProxyManifest
+    proof: bytes
+    pid: int
+    state: Literal["issued", "registering"] = "issued"
+
+
+_GENERATION_AUTHORITY_PID = os.getpid()
+_GENERATION_PROOFS: dict[int, _GenerationProof] = {}
+_GENERATION_PROOFS_LOCK = threading.Lock()
 
 
 class AuthorizedUpload:
@@ -462,6 +473,64 @@ def _generation_proof(manifest: ProxyManifest) -> bytes:
     return hmac.digest(_GENERATION_AUTHORITY, payload, "sha256")
 
 
+def _require_generation_authority_process() -> int:
+    pid = os.getpid()
+    if pid != _GENERATION_AUTHORITY_PID:
+        raise _upload_error("generation authority cannot be used after fork")
+    return pid
+
+
+def _issue_generation_proof(manifest: ProxyManifest) -> None:
+    pid = _require_generation_authority_process()
+    with _GENERATION_PROOFS_LOCK:
+        _GENERATION_PROOFS[id(manifest)] = _GenerationProof(
+            manifest=manifest,
+            proof=_generation_proof(manifest),
+            pid=pid,
+        )
+
+
+def _claim_generation_proof(manifest: ProxyManifest) -> _GenerationProof:
+    pid = _require_generation_authority_process()
+    with _GENERATION_PROOFS_LOCK:
+        generation_proof = _GENERATION_PROOFS.get(id(manifest))
+        if (
+            generation_proof is None
+            or generation_proof.manifest is not manifest
+            or generation_proof.pid != pid
+            or generation_proof.state != "issued"
+            or not hmac.compare_digest(
+                generation_proof.proof, _generation_proof(manifest)
+            )
+        ):
+            raise _upload_error("generated media lacks trusted generation evidence")
+        generation_proof.state = "registering"
+        return generation_proof
+
+
+def _restore_generation_proof(
+    manifest: ProxyManifest, generation_proof: _GenerationProof
+) -> None:
+    with _GENERATION_PROOFS_LOCK:
+        current = _GENERATION_PROOFS.get(id(manifest))
+        if current is generation_proof and current.manifest is manifest:
+            current.state = "issued"
+
+
+def _consume_generation_proof(
+    manifest: ProxyManifest, generation_proof: _GenerationProof
+) -> None:
+    with _GENERATION_PROOFS_LOCK:
+        current = _GENERATION_PROOFS.get(id(manifest))
+        if (
+            current is not generation_proof
+            or current.manifest is not manifest
+            or current.state != "registering"
+        ):
+            raise RuntimeError("generation proof state changed during registration")
+        del _GENERATION_PROOFS[id(manifest)]
+
+
 def create_cloud_proxy_chunk(
     source: Path,
     generated_root: Path,
@@ -710,9 +779,7 @@ def create_cloud_proxy_chunk(
         data=manifest_data,
         chunk_data=chunk_data,
     )
-    proof_id = secrets.token_hex(32)
-    _GENERATION_PROOFS[proof_id] = _generation_proof(manifest)
-    object.__setattr__(manifest, "_generation_proof_id", proof_id)
+    _issue_generation_proof(manifest)
     return manifest
 
 
@@ -757,22 +824,16 @@ def register_proxy_manifest(manifest: ProxyManifest, store: JobStore) -> None:
             evidence, manifest.data.proxy_end - manifest.data.proxy_start
         )
         _match_manifest_media(evidence, manifest.data)
-        expected_proof = _generation_proof(manifest)
-        proof_id = getattr(manifest, "_generation_proof_id", None)
-        if not isinstance(proof_id, str):
-            raise _upload_error("generated media lacks trusted generation evidence")
-        generation_proof = _GENERATION_PROOFS.get(proof_id)
-        if generation_proof is None or not hmac.compare_digest(
-            generation_proof, expected_proof
-        ):
-            raise _upload_error("generated media lacks trusted generation evidence")
         if not _same_identity(opened_stat, os.fstat(descriptor)):
             raise _upload_error("generated media descriptor identity changed")
     finally:
         os.close(descriptor)
+    generation_proof = _claim_generation_proof(manifest)
     connection = store.connection
-    connection.execute("BEGIN IMMEDIATE")
+    transaction_started = False
     try:
+        connection.execute("BEGIN IMMEDIATE")
+        transaction_started = True
         store.save_proxy_manifest(
             manifest.job_id,
             manifest.manifest_id,
@@ -790,12 +851,15 @@ def register_proxy_manifest(manifest: ProxyManifest, store: JobStore) -> None:
             data=manifest.chunk_data,
             connection=connection,
         )
+        connection.commit()
     except BaseException:
-        connection.rollback()
+        if transaction_started and connection.in_transaction:
+            connection.rollback()
+        if not connection.in_transaction:
+            _restore_generation_proof(manifest, generation_proof)
         raise
     else:
-        connection.commit()
-        _GENERATION_PROOFS.pop(proof_id, None)
+        _consume_generation_proof(manifest, generation_proof)
 
 
 def _upload_error(message: str) -> VideoEditorError:

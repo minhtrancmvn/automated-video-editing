@@ -3,11 +3,13 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import multiprocessing
 import os
 import shutil
 import stat
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from itertools import pairwise
@@ -1725,16 +1727,110 @@ def test_generation_proof_is_consumed_after_successful_registration(
         generated.store.__exit__(None, None, None)
 
 
-def test_equal_manifest_object_cannot_reuse_generation_proof(tmp_path: Path) -> None:
+def test_returned_manifest_exposes_no_generation_capability(tmp_path: Path) -> None:
+    generated = _registered_chunk(tmp_path, register=False)
+    try:
+        assert not hasattr(generated.manifest, "_generation_proof_id")
+    finally:
+        generated.store.__exit__(None, None, None)
+
+
+def test_equal_manifest_object_cannot_receive_generation_authority(
+    tmp_path: Path,
+) -> None:
     generated = _registered_chunk(tmp_path, register=False)
     try:
         equal_manifest = replace(generated.manifest)
+        copied_capability = getattr(
+            generated.manifest, "_generation_proof_id", "copied-capability"
+        )
+        object.__setattr__(equal_manifest, "_generation_proof_id", copied_capability)
         assert equal_manifest == generated.manifest
         assert equal_manifest is not generated.manifest
 
         with pytest.raises(VideoEditorError, match="trusted generation"):
             register_proxy_manifest(equal_manifest, generated.store)
     finally:
+        generated.store.__exit__(None, None, None)
+
+
+def test_concurrent_registration_allows_exactly_one_success(tmp_path: Path) -> None:
+    generated = _registered_chunk(tmp_path, register=False)
+    database_path = generated.paths.state_dir / "jobs.db"
+    initialized = threading.Lock()
+    barrier = threading.Barrier(2, timeout=5)
+    outcomes: list[str] = []
+    outcomes_lock = threading.Lock()
+
+    def register() -> None:
+        store = JobStore(database_path)
+        try:
+            with initialized:
+                store.__enter__()
+            barrier.wait()
+            register_proxy_manifest(generated.manifest, store)
+        except (VideoEditorError, threading.BrokenBarrierError) as exc:
+            outcome = f"{type(exc).__name__}:{exc}"
+        else:
+            outcome = "success"
+        finally:
+            store.__exit__(None, None, None)
+        with outcomes_lock:
+            outcomes.append(outcome)
+
+    try:
+        threads = [threading.Thread(target=register, daemon=True) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        assert all(not thread.is_alive() for thread in threads)
+        assert outcomes.count("success") == 1
+        assert len(outcomes) == 2
+        assert all(
+            outcome == "success" or outcome.startswith("VideoEditorError:")
+            for outcome in outcomes
+        )
+    finally:
+        generated.store.__exit__(None, None, None)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fork context unavailable")
+def test_forked_child_cannot_replay_parent_generation_authority(
+    tmp_path: Path,
+) -> None:
+    generated = _registered_chunk(tmp_path, register=False)
+    context = multiprocessing.get_context("fork")
+    read_fd, write_fd = os.pipe()
+
+    def register_in_child() -> None:
+        os.close(read_fd)
+        try:
+            with JobStore(generated.paths.state_dir / "jobs.db") as store:
+                register_proxy_manifest(generated.manifest, store)
+        except VideoEditorError as exc:
+            outcome = f"{type(exc).__name__}:{exc}"
+        else:
+            outcome = "success"
+        os.write(write_fd, outcome.encode())
+        os.close(write_fd)
+
+    child = context.Process(target=register_in_child)
+    try:
+        child.start()
+        os.close(write_fd)
+        child.join(timeout=10)
+        assert not child.is_alive()
+        outcome = os.read(read_fd, 4096).decode()
+        assert outcome.startswith("VideoEditorError:")
+        assert "after fork" in outcome
+
+        register_proxy_manifest(generated.manifest, generated.store)
+    finally:
+        if child.is_alive():
+            child.terminate()
+            child.join(timeout=5)
+        os.close(read_fd)
         generated.store.__exit__(None, None, None)
 
 
@@ -2020,6 +2116,8 @@ def test_registration_rolls_back_manifest_when_chunk_save_fails(
         assert registered.store.get_proxy_manifest(manifest.manifest_id) is None
         register_proxy_manifest(manifest, registered.store)
         assert registered.store.get_proxy_manifest(manifest.manifest_id) is not None
+        with pytest.raises(VideoEditorError, match="trusted generation"):
+            register_proxy_manifest(manifest, registered.store)
     finally:
         registered.store.__exit__(None, None, None)
 

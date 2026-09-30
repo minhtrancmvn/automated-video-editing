@@ -411,3 +411,135 @@ Comparison includes all Phase 2 feature changes since `main`, not only round 1B.
 - Transaction failure retains proof for retry; successful commit removes it. Manual deletion of persisted rows does not restore consumed trust.
 - Process restart before registration fails closed, accepted operational limitation.
 - No remaining known round 1B.2 concern.
+
+## Round 1B.3 Remediation
+
+Date: 2026-09-30
+
+### Status
+
+Complete. Removed bearer capability from returned manifests, bound generation authority to exact issued-object identity and issuing PID, made proof claims atomic, preserved one retry only after verified rollback, and added deterministic concurrency/fork coverage. No subagents dispatched.
+
+### Deadlock Diagnosis
+
+Stalled concurrency test initialized each `JobStore` inside a worker before `barrier.wait()`. `JobStore.__enter__` runs schema DDL/migrations through SQLite transactions. One worker could block during initialization while the first worker waited at the barrier. Timed joins did not stop the barrier waiter, so fixture teardown could wait indefinitely.
+
+Test fix serializes separate-store initialization with a short lock, releases it before a bounded barrier, uses daemon threads plus bounded joins, and then races only `register_proxy_manifest`. Ten repeated bounded runs passed after the production fix.
+
+### Pre-Edit GitNexus Impact
+
+Prior worker evidence remained applicable:
+
+- `create_cloud_proxy_chunk`: LOW; 0 indexed callers; 0 affected processes.
+- `register_proxy_manifest`: LOW; 0 indexed callers; 0 affected processes.
+- `ProxyManifest`: LOW; 0 indexed dependants; 0 affected processes.
+- New private proof helpers and test symbols were unresolved by the stale graph and returned `UNKNOWN` with 0 impacted symbols.
+- No HIGH or CRITICAL result occurred.
+
+### Exact Observed RED Evidence
+
+First recovered concurrency test reproduced test-design error rather than product behavior:
+
+```text
+test_concurrent_registration_allows_exactly_one_success
+FAILED: outcomes contained two ProgrammingError values:
+SQLite objects created in a thread can only be used in that same thread.
+```
+
+After moving each SQLite connection's creation and use into the same worker and serializing only initialization, RED became deterministic assertion failure rather than hang/error:
+
+```text
+uv run pytest tests/unit/test_proxy_chunks.py::test_transferred_generation_proof_id_cannot_authorize_equal_manifest tests/unit/test_proxy_chunks.py::test_concurrent_registration_allows_exactly_one_success -q
+
+FAILED test_transferred_generation_proof_id_cannot_authorize_equal_manifest
+Failed: DID NOT RAISE VideoEditorError
+
+FAILED test_concurrent_registration_allows_exactly_one_success
+AssertionError: assert 2 == 1
+2 failed in 0.50s
+```
+
+Test was then aligned with required no-bearer contract: returned manifest must expose no `_generation_proof_id`; an equal object with caller-added capability data still lacks authority.
+
+### GREEN Changes
+
+- Returned `ProxyManifest` carries no proof ID or other bearer capability.
+- Process-private registry stores exact manifest object, canonical HMAC, issuing PID, and `issued`/`registering` state.
+- Registry access uses one lock; claim atomically changes `issued` to `registering` before opening a DB transaction.
+- Equal/copied objects fail exact `is` identity even if caller attaches capability-like data.
+- Forked children fail PID binding and cannot consume parent authority; parent can still register afterward.
+- A competing registration fails while first claim is `registering`; successful commit consumes authority.
+- Failed transaction restores `issued` only after rollback leaves connection outside a transaction and only for the same manifest/proof object.
+- Retry test now verifies failed transaction, one successful retry, then replay rejection.
+
+Direct GREEN:
+
+```text
+uv run pytest \
+  tests/unit/test_proxy_chunks.py::test_returned_manifest_exposes_no_generation_capability \
+  tests/unit/test_proxy_chunks.py::test_equal_manifest_object_cannot_receive_generation_authority \
+  tests/unit/test_proxy_chunks.py::test_concurrent_registration_allows_exactly_one_success \
+  tests/unit/test_proxy_chunks.py::test_forked_child_cannot_replay_parent_generation_authority \
+  tests/unit/test_proxy_chunks.py::test_registration_rolls_back_manifest_when_chunk_save_fails \
+  tests/unit/test_proxy_chunks.py::test_generation_proof_is_consumed_after_successful_registration -q
+6 passed in 1.18s
+```
+
+Concurrency repeat GREEN:
+
+```text
+10 bounded independent runs of test_concurrent_registration_allows_exactly_one_success
+10 passed; each run completed in 0.20-0.30s
+```
+
+Focused GREEN:
+
+```text
+uv run pytest tests/unit/test_proxy_chunks.py tests/unit/test_proxies.py -q
+125 passed in 10.07s
+```
+
+### Final Verification
+
+```text
+uv run pytest -q
+513 passed in 35.20s
+
+uv run mypy src
+Success: no issues found in 27 source files
+
+uv run ruff check .
+All checks passed!
+
+uv run ruff format --check src tests
+51 files already formatted
+
+uv build
+Successfully built dist/video_editor-0.1.0.tar.gz
+Successfully built dist/video_editor-0.1.0-py3-none-any.whl
+
+git diff --check
+passed with no output
+```
+
+Build outputs removed after verification.
+
+GitNexus compare against `main`:
+
+```text
+changed_count: 108
+changed_files: 26
+affected_count: 0
+risk_level: low
+affected_processes: []
+```
+
+Comparison includes all Phase 2 feature changes since `main`, not only round 1B.3.
+
+### Files Changed
+
+- `src/video_editor/analysis/proxy_chunks.py`
+- `tests/unit/test_proxy_chunks.py`
+- `.superpowers/sdd/2026-09-28-phase-2-automatic-highlights/task-4-fix-1b-report.md`
+
+Unrelated `CLAUDE.md`, `AGENTS.md`, `task_plan.md`, and `.claude/skills/**` changes from other worktrees were not imported or reverted.
