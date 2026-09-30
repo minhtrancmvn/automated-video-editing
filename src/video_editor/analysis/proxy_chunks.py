@@ -847,11 +847,18 @@ def register_proxy_manifest(manifest: ProxyManifest, store: JobStore) -> None:
             tuple(chunk_row) if chunk_row is not None else None,
         )
 
-    before = persisted_registration()
-    phase: Literal["claimed", "begun", "commit_attempted"] = "claimed"
+    phase: Literal["claimed", "begun", "preexisting", "commit_attempted"] = "claimed"
     try:
+        before = persisted_registration()
         connection.execute("BEGIN IMMEDIATE")
         phase = "begun"
+        current_manifest, current_chunk = persisted_registration()
+        if current_manifest is not None:
+            phase = "preexisting"
+            raise _upload_error("proxy manifest ID already exists")
+        if current_chunk is not None:
+            phase = "preexisting"
+            raise _upload_error("analysis chunk ID already exists")
         store.save_proxy_manifest(
             manifest.job_id,
             manifest.manifest_id,
@@ -876,7 +883,7 @@ def register_proxy_manifest(manifest: ProxyManifest, store: JobStore) -> None:
             _restore_generation_proof(manifest, generation_proof)
         else:
             connection.rollback()
-            if persisted_registration() == before:
+            if phase != "preexisting" and persisted_registration() == before:
                 _restore_generation_proof(manifest, generation_proof)
         raise
     else:

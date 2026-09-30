@@ -1723,6 +1723,9 @@ class _ConnectionFault:
         commit_before_error: bool = False,
         rollback_error: BaseException | None = None,
         reject_transaction_state_reads: bool = False,
+        select_error: BaseException | None = None,
+        select_error_after: int = 0,
+        select_error_match: str | None = None,
     ) -> None:
         self._connection = connection
         self._begin_error = begin_error
@@ -1730,6 +1733,10 @@ class _ConnectionFault:
         self._commit_before_error = commit_before_error
         self._rollback_error = rollback_error
         self._reject_transaction_state_reads = reject_transaction_state_reads
+        self._select_error = select_error
+        self._select_error_after = select_error_after
+        self._select_error_match = select_error_match
+        self._select_count = 0
         self.rollback_attempts = 0
 
     @property
@@ -1739,6 +1746,17 @@ class _ConnectionFault:
         return self._connection.in_transaction
 
     def execute(self, sql: str, parameters: object = ()) -> sqlite3.Cursor:
+        if sql.lstrip().startswith("SELECT") and (
+            self._select_error_match is None or self._select_error_match in sql
+        ):
+            self._select_count += 1
+            if (
+                self._select_error is not None
+                and self._select_count > self._select_error_after
+            ):
+                error = self._select_error
+                self._select_error = None
+                raise error
         if sql == "BEGIN IMMEDIATE" and self._begin_error is not None:
             raise self._begin_error
         return self._connection.execute(sql, parameters)  # type: ignore[arg-type]
@@ -1773,6 +1791,162 @@ class _ConnectionFaultStore:
     def save_analysis_chunk(self, *args: object, **kwargs: object) -> None:
         kwargs["connection"] = self.connection
         self._store.save_analysis_chunk(*args, **kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="local FFmpeg and ffprobe required",
+)
+def test_registration_rejects_preexisting_manifest_before_writes(
+    tmp_path: Path,
+) -> None:
+    generated = _registered_chunk(tmp_path, register=False)
+    manifest = generated.manifest
+    try:
+        generated.store.save_proxy_manifest(
+            manifest.job_id,
+            manifest.manifest_id,
+            manifest.digest,
+            manifest.data,
+        )
+
+        with pytest.raises(VideoEditorError, match="manifest.*already exists"):
+            register_proxy_manifest(manifest, generated.store)
+
+        assert generated.store.get_analysis_chunk(manifest.chunk_id) is None
+        with pytest.raises(VideoEditorError, match="trusted generation"):
+            register_proxy_manifest(manifest, generated.store)
+    finally:
+        generated.store.__exit__(None, None, None)
+
+
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="local FFmpeg and ffprobe required",
+)
+def test_registration_rejects_preexisting_chunk_before_writes(
+    tmp_path: Path,
+) -> None:
+    generated = _registered_chunk(tmp_path, register=False)
+    manifest = generated.manifest
+    try:
+        other_manifest_id = f"{manifest.manifest_id}-other"
+        generated.store.save_proxy_manifest(
+            manifest.job_id,
+            other_manifest_id,
+            manifest.digest,
+            manifest.data,
+        )
+        generated.store.save_analysis_chunk(
+            manifest.job_id,
+            manifest.chunk_id,
+            other_manifest_id,
+            source_id=manifest.source_id,
+            source_start=manifest.data.source_start,
+            source_end=manifest.data.source_end,
+            data=manifest.chunk_data,
+        )
+
+        with pytest.raises(VideoEditorError, match="chunk.*already exists"):
+            register_proxy_manifest(manifest, generated.store)
+
+        assert generated.store.get_proxy_manifest(manifest.manifest_id) is None
+        with pytest.raises(VideoEditorError, match="trusted generation"):
+            register_proxy_manifest(manifest, generated.store)
+    finally:
+        generated.store.__exit__(None, None, None)
+
+
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="local FFmpeg and ffprobe required",
+)
+def test_registration_identical_rows_commit_applied_then_raised_rejects_retry(
+    tmp_path: Path,
+) -> None:
+    generated = _registered_chunk(tmp_path, register=False)
+    manifest = generated.manifest
+    try:
+        generated.store.save_proxy_manifest(
+            manifest.job_id,
+            manifest.manifest_id,
+            manifest.digest,
+            manifest.data,
+        )
+        generated.store.save_analysis_chunk(
+            manifest.job_id,
+            manifest.chunk_id,
+            manifest.manifest_id,
+            source_id=manifest.source_id,
+            source_start=manifest.data.source_start,
+            source_end=manifest.data.source_end,
+            data=manifest.chunk_data,
+        )
+        fault = _ConnectionFault(
+            generated.store.connection,
+            commit_before_error=True,
+            commit_error=_CommitAppliedError("commit outcome unknown"),
+        )
+        store = _ConnectionFaultStore(generated.store, fault)
+
+        with pytest.raises(VideoEditorError, match="already exists"):
+            register_proxy_manifest(manifest, store)  # type: ignore[arg-type]
+
+        with pytest.raises(VideoEditorError, match="trusted generation"):
+            register_proxy_manifest(manifest, generated.store)
+    finally:
+        generated.store.__exit__(None, None, None)
+
+
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="local FFmpeg and ffprobe required",
+)
+def test_registration_initial_snapshot_failure_restores_authority(
+    tmp_path: Path,
+) -> None:
+    generated = _registered_chunk(tmp_path, register=False)
+    fault = _ConnectionFault(
+        generated.store.connection,
+        select_error=RuntimeError("snapshot read failed"),
+    )
+    store = _ConnectionFaultStore(generated.store, fault)
+    try:
+        with pytest.raises(RuntimeError, match="snapshot read failed"):
+            register_proxy_manifest(generated.manifest, store)  # type: ignore[arg-type]
+
+        register_proxy_manifest(generated.manifest, generated.store)
+        with pytest.raises(VideoEditorError, match="trusted generation"):
+            register_proxy_manifest(generated.manifest, generated.store)
+    finally:
+        generated.store.__exit__(None, None, None)
+
+
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="local FFmpeg and ffprobe required",
+)
+def test_registration_snapshot_failure_after_rollback_keeps_authority_non_issued(
+    tmp_path: Path,
+) -> None:
+    generated = _registered_chunk(tmp_path, register=False)
+    fault = _ConnectionFault(
+        generated.store.connection,
+        commit_error=RuntimeError("commit failed while active"),
+        select_error=RuntimeError("verification snapshot failed"),
+        select_error_after=4,
+        select_error_match="proxy_manifests",
+    )
+    store = _ConnectionFaultStore(generated.store, fault)
+    try:
+        with pytest.raises(RuntimeError, match="verification snapshot failed"):
+            register_proxy_manifest(generated.manifest, store)  # type: ignore[arg-type]
+
+        with pytest.raises(VideoEditorError, match="trusted generation"):
+            register_proxy_manifest(generated.manifest, generated.store)
+    finally:
+        generated.store.connection.rollback()
+        generated.store.__exit__(None, None, None)
 
 
 @pytest.mark.skipif(
