@@ -6,6 +6,7 @@ import json
 import multiprocessing
 import os
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -1709,6 +1710,205 @@ def test_public_creation_rejects_executable_wrapper_bitrate_bypass(
             assert manifest.data.audio_probe_bitrate_bps < 60_000
             register_proxy_manifest(manifest, generated.store)
     finally:
+        generated.store.__exit__(None, None, None)
+
+
+class _ConnectionFault:
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        begin_error: BaseException | None = None,
+        commit_error: BaseException | None = None,
+        commit_before_error: bool = False,
+        rollback_error: BaseException | None = None,
+        reject_transaction_state_reads: bool = False,
+    ) -> None:
+        self._connection = connection
+        self._begin_error = begin_error
+        self._commit_error = commit_error
+        self._commit_before_error = commit_before_error
+        self._rollback_error = rollback_error
+        self._reject_transaction_state_reads = reject_transaction_state_reads
+        self.rollback_attempts = 0
+
+    @property
+    def in_transaction(self) -> bool:
+        if self._reject_transaction_state_reads:
+            raise AssertionError("registration relied on in_transaction")
+        return self._connection.in_transaction
+
+    def execute(self, sql: str, parameters: object = ()) -> sqlite3.Cursor:
+        if sql == "BEGIN IMMEDIATE" and self._begin_error is not None:
+            raise self._begin_error
+        return self._connection.execute(sql, parameters)  # type: ignore[arg-type]
+
+    def commit(self) -> None:
+        if self._commit_before_error:
+            self._connection.commit()
+        if self._commit_error is not None:
+            raise self._commit_error
+        self._connection.commit()
+
+    def rollback(self) -> None:
+        self.rollback_attempts += 1
+        if self._rollback_error is not None:
+            raise self._rollback_error
+        self._connection.rollback()
+
+
+class _CommitAppliedError(RuntimeError):
+    pass
+
+
+class _ConnectionFaultStore:
+    def __init__(self, store: JobStore, connection: _ConnectionFault) -> None:
+        self._store = store
+        self.connection = connection
+
+    def save_proxy_manifest(self, *args: object, **kwargs: object) -> None:
+        kwargs["connection"] = self.connection
+        self._store.save_proxy_manifest(*args, **kwargs)  # type: ignore[arg-type]
+
+    def save_analysis_chunk(self, *args: object, **kwargs: object) -> None:
+        kwargs["connection"] = self.connection
+        self._store.save_analysis_chunk(*args, **kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="local FFmpeg and ffprobe required",
+)
+def test_registration_commit_applies_then_raises_consumes_authority(
+    tmp_path: Path,
+) -> None:
+    generated = _registered_chunk(tmp_path, register=False)
+    fault = _ConnectionFault(
+        generated.store.connection,
+        commit_before_error=True,
+        commit_error=_CommitAppliedError("commit outcome unknown"),
+    )
+    store = _ConnectionFaultStore(generated.store, fault)
+    try:
+        with pytest.raises(
+            _CommitAppliedError, match="commit outcome unknown"
+        ) as caught:
+            register_proxy_manifest(generated.manifest, store)  # type: ignore[arg-type]
+
+        assert not hasattr(caught.value, "__notes__")
+        assert fault.rollback_attempts == 1
+
+        assert (
+            generated.store.get_proxy_manifest(generated.manifest.manifest_id)
+            is not None
+        )
+        assert (
+            generated.store.get_analysis_chunk(generated.manifest.chunk_id) is not None
+        )
+        with pytest.raises(VideoEditorError, match="trusted generation"):
+            register_proxy_manifest(generated.manifest, generated.store)
+    finally:
+        generated.store.__exit__(None, None, None)
+
+
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="local FFmpeg and ffprobe required",
+)
+def test_registration_active_commit_failure_verified_rollback_allows_one_retry(
+    tmp_path: Path,
+) -> None:
+    generated = _registered_chunk(tmp_path, register=False)
+    fault = _ConnectionFault(
+        generated.store.connection,
+        commit_error=RuntimeError("commit failed while active"),
+        reject_transaction_state_reads=True,
+    )
+    store = _ConnectionFaultStore(generated.store, fault)
+    try:
+        with pytest.raises(RuntimeError, match="commit failed while active"):
+            register_proxy_manifest(generated.manifest, store)  # type: ignore[arg-type]
+
+        assert (
+            generated.store.get_proxy_manifest(generated.manifest.manifest_id) is None
+        )
+        assert generated.store.get_analysis_chunk(generated.manifest.chunk_id) is None
+        register_proxy_manifest(generated.manifest, generated.store)
+        with pytest.raises(VideoEditorError, match="trusted generation"):
+            register_proxy_manifest(generated.manifest, generated.store)
+    finally:
+        generated.store.__exit__(None, None, None)
+
+
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="local FFmpeg and ffprobe required",
+)
+def test_registration_rollback_failure_keeps_authority_non_issued(
+    tmp_path: Path,
+) -> None:
+    generated = _registered_chunk(tmp_path, register=False)
+    fault = _ConnectionFault(
+        generated.store.connection,
+        commit_error=RuntimeError("commit failed while active"),
+        rollback_error=RuntimeError("rollback failed"),
+    )
+    store = _ConnectionFaultStore(generated.store, fault)
+    try:
+        with pytest.raises(RuntimeError, match="rollback failed"):
+            register_proxy_manifest(generated.manifest, store)  # type: ignore[arg-type]
+
+        generated.store.connection.rollback()
+        with pytest.raises(VideoEditorError, match="trusted generation"):
+            register_proxy_manifest(generated.manifest, generated.store)
+    finally:
+        generated.store.connection.rollback()
+        generated.store.__exit__(None, None, None)
+
+
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="local FFmpeg and ffprobe required",
+)
+def test_registration_begin_immediate_failure_restores_authority(
+    tmp_path: Path,
+) -> None:
+    generated = _registered_chunk(tmp_path, register=False)
+    fault = _ConnectionFault(
+        generated.store.connection,
+        begin_error=RuntimeError("begin failed"),
+    )
+    store = _ConnectionFaultStore(generated.store, fault)
+    try:
+        with pytest.raises(RuntimeError, match="begin failed"):
+            register_proxy_manifest(generated.manifest, store)  # type: ignore[arg-type]
+
+        register_proxy_manifest(generated.manifest, generated.store)
+        with pytest.raises(VideoEditorError, match="trusted generation"):
+            register_proxy_manifest(generated.manifest, generated.store)
+    finally:
+        generated.store.__exit__(None, None, None)
+
+
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="local FFmpeg and ffprobe required",
+)
+def test_registration_preexisting_transaction_rejection_restores_authority(
+    tmp_path: Path,
+) -> None:
+    generated = _registered_chunk(tmp_path, register=False)
+    try:
+        generated.store.connection.execute("BEGIN")
+        with pytest.raises(sqlite3.OperationalError, match="within a transaction"):
+            register_proxy_manifest(generated.manifest, generated.store)
+
+        generated.store.connection.rollback()
+        register_proxy_manifest(generated.manifest, generated.store)
+        with pytest.raises(VideoEditorError, match="trusted generation"):
+            register_proxy_manifest(generated.manifest, generated.store)
+    finally:
+        generated.store.connection.rollback()
         generated.store.__exit__(None, None, None)
 
 

@@ -830,10 +830,28 @@ def register_proxy_manifest(manifest: ProxyManifest, store: JobStore) -> None:
         os.close(descriptor)
     generation_proof = _claim_generation_proof(manifest)
     connection = store.connection
-    transaction_started = False
+
+    def persisted_registration() -> tuple[
+        tuple[Any, ...] | None, tuple[Any, ...] | None
+    ]:
+        manifest_row = connection.execute(
+            "SELECT * FROM proxy_manifests WHERE manifest_id = ?",
+            (manifest.manifest_id,),
+        ).fetchone()
+        chunk_row = connection.execute(
+            "SELECT * FROM analysis_chunks WHERE chunk_id = ?",
+            (manifest.chunk_id,),
+        ).fetchone()
+        return (
+            tuple(manifest_row) if manifest_row is not None else None,
+            tuple(chunk_row) if chunk_row is not None else None,
+        )
+
+    before = persisted_registration()
+    phase: Literal["claimed", "begun", "commit_attempted"] = "claimed"
     try:
         connection.execute("BEGIN IMMEDIATE")
-        transaction_started = True
+        phase = "begun"
         store.save_proxy_manifest(
             manifest.job_id,
             manifest.manifest_id,
@@ -851,12 +869,15 @@ def register_proxy_manifest(manifest: ProxyManifest, store: JobStore) -> None:
             data=manifest.chunk_data,
             connection=connection,
         )
+        phase = "commit_attempted"
         connection.commit()
     except BaseException:
-        if transaction_started and connection.in_transaction:
-            connection.rollback()
-        if not connection.in_transaction:
+        if phase == "claimed":
             _restore_generation_proof(manifest, generation_proof)
+        else:
+            connection.rollback()
+            if persisted_registration() == before:
+                _restore_generation_proof(manifest, generation_proof)
         raise
     else:
         _consume_generation_proof(manifest, generation_proof)
