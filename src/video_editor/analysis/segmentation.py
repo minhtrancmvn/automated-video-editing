@@ -17,6 +17,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from video_editor.analysis.models import (
+    BoundarySuitabilityEvidence,
     EvidenceRange,
     IntervalEvidence,
     LocalSegmentation,
@@ -25,7 +26,7 @@ from video_editor.analysis.models import (
 )
 from video_editor.media.proxies import ProxyMapping
 
-_IMPLEMENTATION_VERSION = "local-segmentation-v1"
+_IMPLEMENTATION_VERSION = "local-segmentation-v2"
 _ZERO = Decimal(0)
 
 
@@ -48,23 +49,55 @@ class SegmentationSettings:
 
     def __post_init__(self) -> None:
         """Reject invalid settings before media processing."""
-        if self.sample_fps <= 0 or self.audio_window_seconds <= 0:
-            raise ValueError("segmentation sampling settings must be positive")
-        scores = (
+        decimals = (
+            self.audio_window_seconds,
+            self.peak_merge_seconds,
+            self.lead_seconds,
+            self.resolution_seconds,
+        )
+        floats = (
             self.scene_threshold,
             self.silence_rms,
             self.transient_delta,
-            self.exposure_luma_threshold / 255,
-            self.obstruction_luma_threshold / 255,
+            self.blur_variance_threshold,
+            self.exposure_luma_threshold,
+            self.obstruction_luma_threshold,
+            self.obstruction_flat_stddev,
         )
-        if any(not np.isfinite(value) or value < 0 for value in scores):
-            raise ValueError("segmentation thresholds must be finite and non-negative")
+        if (
+            not np.isfinite(self.sample_fps)
+            or any(not value.is_finite() for value in decimals)
+            or any(not np.isfinite(value) for value in floats)
+        ):
+            raise ValueError("segmentation settings must be finite")
+        if self.sample_fps <= 0 or self.audio_window_seconds <= 0:
+            raise ValueError("segmentation sampling settings must be positive")
+        if any(
+            not 0 <= value <= 1
+            for value in (
+                self.scene_threshold,
+                self.silence_rms,
+                self.transient_delta,
+            )
+        ):
+            raise ValueError("normalized segmentation thresholds must be within 0..1")
+        if any(
+            not 0 <= value <= 255
+            for value in (
+                self.exposure_luma_threshold,
+                self.obstruction_luma_threshold,
+            )
+        ):
+            raise ValueError("luminance thresholds must be within 0..255")
         if self.blur_variance_threshold <= 0 or self.obstruction_flat_stddev <= 0:
             raise ValueError("segmentation quality thresholds must be positive")
-        if (
-            self.peak_merge_seconds < 0
-            or self.lead_seconds < 0
-            or self.resolution_seconds < 0
+        if any(
+            value < 0
+            for value in (
+                self.peak_merge_seconds,
+                self.lead_seconds,
+                self.resolution_seconds,
+            )
         ):
             raise ValueError("segmentation window settings must be non-negative")
 
@@ -82,6 +115,8 @@ def _settings_hash(settings: SegmentationSettings) -> str:
 
 
 def _clamp(value: float) -> float:
+    if not np.isfinite(value):
+        raise ValueError("computed score must be finite")
     return float(min(1.0, max(0.0, value)))
 
 
@@ -181,7 +216,9 @@ def _read_video(
 
 def _histogram(frame: NDArray[np.uint8]) -> NDArray[np.float32]:
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    histogram = cv2.calcHist([hsv], [0, 1], None, [32, 32], [0, 180, 0, 256])
+    histogram = cv2.calcHist(
+        [hsv], [0, 1, 2], None, [16, 16, 16], [0, 180, 0, 256, 0, 256]
+    )
     normalized = cv2.normalize(histogram, histogram)
     return cast(NDArray[np.float32], normalized.flatten())
 
@@ -339,11 +376,24 @@ def _audio_evidence(
 ]:
     if audio is None:
         return (), (), (), ()
-    with wave.open(str(audio), "rb") as source:
-        if source.getnchannels() != 1 or source.getsampwidth() != 2:
-            raise ValueError("analysis audio must be mono 16-bit PCM WAV")
-        sample_rate = source.getframerate()
-        samples = np.frombuffer(source.readframes(source.getnframes()), dtype="<i2")
+    try:
+        with wave.open(str(audio), "rb") as source:
+            if source.getnchannels() != 1 or source.getsampwidth() != 2:
+                raise ValueError("analysis audio must be mono 16-bit PCM WAV")
+            sample_rate = source.getframerate()
+            frame_count = source.getnframes()
+            samples = np.frombuffer(source.readframes(frame_count), dtype="<i2")
+    except (EOFError, wave.Error) as error:
+        raise ValueError(f"cannot decode analysis audio: {audio}") from error
+    if sample_rate <= 0:
+        raise ValueError("analysis audio has invalid sample rate")
+    if frame_count <= 0 or samples.size == 0:
+        raise ValueError("analysis audio contains no samples")
+    audio_duration = Decimal(frame_count) / Decimal(sample_rate)
+    mapped_duration = mapping.proxy_end - mapping.proxy_start
+    sample_tolerance = Decimal(1) / Decimal(sample_rate)
+    if abs(audio_duration - mapped_duration) > sample_tolerance:
+        raise ValueError("analysis audio duration does not match mapping")
     window_samples = max(1, int(sample_rate * settings.audio_window_seconds))
     energy: list[ScoredEvidence] = []
     flags: list[tuple[Decimal, Decimal, bool]] = []
@@ -354,9 +404,13 @@ def _audio_evidence(
         if chunk.size == 0:
             continue
         start = proxy_offset + Decimal(offset) / Decimal(sample_rate)
-        end = proxy_offset + Decimal(
+        sample_end = proxy_offset + Decimal(
             min(offset + window_samples, len(samples))
         ) / Decimal(sample_rate)
+        if offset + window_samples >= len(samples):
+            end = min(sample_end + sample_tolerance, mapping.proxy_end)
+        else:
+            end = sample_end
         rms = _clamp(float(np.sqrt(np.mean(np.square(chunk)))) / 32768)
         energy.append(_scored("audio-energy", start, end, rms, mapping))
         flags.append((start, end, rms <= settings.silence_rms))
@@ -371,6 +425,40 @@ def _audio_evidence(
         mapping,
     )
     return tuple(energy), silence, speech, tuple(transients)
+
+
+def _boundary_suitability(
+    scenes: tuple[IntervalEvidence, ...],
+    motion: tuple[ScoredEvidence, ...],
+    mapping: ProxyMapping,
+) -> tuple[BoundarySuitabilityEvidence, ...]:
+    """Score scene entry and exit boundaries independently of candidate selection."""
+    records: list[BoundarySuitabilityEvidence] = []
+    for scene in scenes:
+        scene_motion = [
+            item
+            for item in motion
+            if scene.proxy_range.start <= item.proxy_range.start < scene.proxy_range.end
+        ]
+        entry_motion = scene_motion[0].score if scene_motion else 0.0
+        exit_motion = scene_motion[-1].score if scene_motion else 0.0
+        entry_score = _clamp(1 - entry_motion)
+        exit_score = _clamp(1 - exit_motion)
+        records.append(
+            BoundarySuitabilityEvidence(
+                evidence_id=_evidence_id(
+                    "boundary-suitability",
+                    scene.proxy_range.start,
+                    scene.proxy_range.end,
+                    (entry_score + exit_score) / 2,
+                ),
+                proxy_range=scene.proxy_range,
+                source_range=scene.source_range,
+                entry_score=entry_score,
+                exit_score=exit_score,
+            )
+        )
+    return tuple(records)
 
 
 def _candidate_windows(
@@ -423,9 +511,8 @@ def segment_media(
         samples = [
             (timestamp + mapping.proxy_start, frame) for timestamp, frame in samples
         ]
-    proxy_end = mapping.proxy_start + duration
-    scenes = _scene_ranges(samples, proxy_end, mapping, active)
-    video = _frame_evidence(samples, proxy_end, mapping, active)
+    scenes = _scene_ranges(samples, mapping.proxy_end, mapping, active)
+    video = _frame_evidence(samples, mapping.proxy_end, mapping, active)
     energy, silence, speech, transients = _audio_evidence(
         audio, mapping, active, mapping.proxy_start
     )
@@ -449,6 +536,7 @@ def segment_media(
         shake=video["shake"],
         exposure=video["exposure"],
         obstruction=video["obstruction"],
+        boundary_suitability=_boundary_suitability(scenes, motion, mapping),
         candidate_windows=_candidate_windows(
             scenes, motion, transients, mapping, active
         ),

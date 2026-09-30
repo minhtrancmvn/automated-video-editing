@@ -97,3 +97,32 @@ def create_segmentation_fixture(root: Path) -> tuple[Path, Path]:
         output.setframerate(sample_rate)
         output.writeframes(pcm.tobytes())
     return proxy, audio
+
+
+def create_luminance_cut_fixture(root: Path) -> Path:
+    """Create deterministic black-to-white hard-cut proxy fixture."""
+    root.mkdir(parents=True, exist_ok=True)
+    proxy = root / "luminance-cut-proxy.avi"
+    fps = 20
+    size = (160, 120)
+    writer = cv2.VideoWriter(str(proxy), cv2.VideoWriter_fourcc(*"MJPG"), fps, size)
+    if not writer.isOpened():
+        raise RuntimeError("OpenCV fixture video writer failed")
+    width, height = size
+    for frame_index in range(2 * fps):
+        value = 0 if frame_index < fps else 255
+        writer.write(np.full((height, width, 3), value, dtype=np.uint8))
+    writer.release()
+    return proxy
+
+
+def create_mono_wav(path: Path, *, frame_count: int, sample_rate: int = 16_000) -> Path:
+    """Create deterministic mono 16-bit PCM WAV with requested frame count."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pcm = np.zeros(frame_count, dtype="<i2")
+    with wave.open(str(path), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(sample_rate)
+        output.writeframes(pcm.tobytes())
+    return path

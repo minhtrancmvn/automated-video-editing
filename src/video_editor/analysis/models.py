@@ -148,6 +148,13 @@ class ScoredEvidence(IntervalEvidence):
     score: float = Field(ge=0, le=1, allow_inf_nan=False)
 
 
+class BoundarySuitabilityEvidence(IntervalEvidence):
+    """Normalized entry and exit suitability for one source-mapped interval."""
+
+    entry_score: float = Field(ge=0, le=1, allow_inf_nan=False)
+    exit_score: float = Field(ge=0, le=1, allow_inf_nan=False)
+
+
 class LocalSegmentation(AnalysisModel):
     """Deterministic source-mapped local media evidence."""
 
@@ -169,6 +176,7 @@ class LocalSegmentation(AnalysisModel):
     shake: tuple[ScoredEvidence, ...]
     exposure: tuple[ScoredEvidence, ...]
     obstruction: tuple[ScoredEvidence, ...]
+    boundary_suitability: tuple[BoundarySuitabilityEvidence, ...]
     candidate_windows: tuple[IntervalEvidence, ...]
 
 

@@ -157,3 +157,134 @@ Build outputs removed after verification. Bandit unavailable in project environm
 ## Concerns
 
 - OpenCV codec decode and optical-flow floating-point results are deterministic for repeated runs in one pinned runtime, as tested. Cross-platform byte identity depends on pinned OpenCV/codec behavior; implementation version and settings hash provide invalidation boundaries.
+
+## Fix Round 1/5 — 2026-09-30
+
+### Findings Closed
+
+- Persisted proxy/source endpoints now anchor to all four `ProxyMapping` boundaries. Decoder duration remains sampling and tolerance-validation data only. Unequal `4 → 8` scale and accepted 20 ms decoder drift are covered.
+- WAV duration now uses exact `frame_count / sample_rate`, permits at most one final-sample rounding interval, clips that final interval to `mapping.proxy_end`, and rejects materially long, short, empty, or malformed inputs.
+- Added canonical source-mapped `boundary_suitability` evidence and bumped implementation identity to `local-segmentation-v2` with normalized entry and exit scores, independent from candidate selection.
+- Scene histograms now include HSV value, detecting black-to-white luminance-only cuts.
+- Every numeric setting has explicit finite/domain validation. Computed scores reject nonfinite values before clamping.
+- Evidence IDs are asserted unique and repeat-run stable across every evidence collection.
+
+### Observed RED
+
+Primary review RED:
+
+```bash
+uv run pytest tests/unit/test_segmentation.py -v
+```
+
+```text
+collected 50 items
+35 failed, 15 passed
+```
+
+Failures covered exact endpoint drift, short/long/empty/malformed/final-sample WAV behavior, missing boundary evidence, luminance-only cuts, incomplete float/Decimal finite validation, nonfinite computed scores, and all-collection evidence IDs. Seven original Task 5 tests remained green.
+
+Explicit domain RED:
+
+```bash
+uv run pytest tests/unit/test_segmentation.py -q
+```
+
+```text
+5 failed, 57 passed in 2.52s
+```
+
+Rejected gaps were normalized thresholds above `1` and luminance thresholds above `255`.
+
+Final numeric RED:
+
+```bash
+uv run pytest tests/unit/test_segmentation.py::test_segmentation_settings_reject_nonfinite_sample_fps -v
+```
+
+```text
+3 failed in 0.29s
+```
+
+### Focused GREEN
+
+```bash
+uv run ruff check --fix src/video_editor/analysis/models.py src/video_editor/analysis/segmentation.py tests/fixtures.py tests/unit/test_segmentation.py --config pyproject.toml
+uv run ruff format src/video_editor/analysis/models.py src/video_editor/analysis/segmentation.py tests/fixtures.py tests/unit/test_segmentation.py --config pyproject.toml
+uv run pytest tests/unit/test_segmentation.py -v
+```
+
+```text
+All checks passed!
+4 files left unchanged
+collected 65 items
+65 passed in 2.36s
+```
+
+### Verification
+
+Full offline suite:
+
+```text
+uv run pytest -v
+585 passed in 42.60s
+```
+
+Final full-suite rerun after the final finite-setting case:
+
+```text
+uv run pytest -v
+588 passed in 39.43s
+```
+
+Type gate:
+
+```text
+uv run mypy src
+Success: no issues found in 28 source files
+```
+
+Lint, format, and diff gates:
+
+```text
+uv run ruff check . --config pyproject.toml
+All checks passed!
+
+uv run ruff format --check src/video_editor/analysis/models.py src/video_editor/analysis/segmentation.py tests/fixtures.py tests/unit/test_segmentation.py --config pyproject.toml
+4 files already formatted
+
+git diff --check
+passed with no output
+```
+
+Repository-wide `ruff format --check .` reports one pre-existing out-of-scope Markdown code-block formatting difference at `docs/superpowers/plans/2026-09-28-phase-2-automatic-highlights.md:209`. Running repository-wide formatting temporarily changed that plan; formatter-only changes were restored from HEAD. Approved Python files pass format check.
+
+Build gate:
+
+```text
+uv build
+Successfully built dist/video_editor-0.1.0.tar.gz
+Successfully built dist/video_editor-0.1.0-py3-none-any.whl
+```
+
+Build outputs removed after verification.
+
+### GitNexus Impact
+
+Pre-edit impact queries for `SegmentationSettings`, `_clamp`, `_histogram`, `_scene_ranges`, `_audio_evidence`, `segment_media`, `LocalSegmentation`, and `create_segmentation_fixture` returned `UNKNOWN`, zero indexed dependants/processes because current Task 5 symbols are absent from the stale index. No HIGH or CRITICAL result occurred.
+
+Final branch-wide `detect_changes(compare main)` evidence:
+
+```text
+changed_count: 108
+changed_files: 31
+affected_count: 0
+risk_level: low
+affected_processes: []
+```
+
+Comparison includes prior Phase 2 feature commits, not only Task 5 fix files.
+
+### Scope and Concerns
+
+Production/test changes remain inside approved four-file scope. Report appended as required. No original media, transcript semantics, network calls, or cloud calls added.
