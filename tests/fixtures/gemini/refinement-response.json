@@ -1,0 +1,17 @@
+{
+  "schema_version": "candidate-v1",
+  "chunk_id": "chunk-1",
+  "candidate_id": "candidate-1",
+  "start": "1",
+  "end": "3.5",
+  "action_completeness": 0.9,
+  "visual_composition": 0.8,
+  "novelty": 0.7,
+  "semantic_importance": 0.8,
+  "duplicate_similarity": 0.1,
+  "vertical_subject_priority": "coastal overlook",
+  "crop_intent": "keep overlook centered",
+  "adjacent_scene_compatibility": 0.8,
+  "speech_meaning_summary": "Speaker reacts to reaching the overlook.",
+  "confidence": 0.9
+}

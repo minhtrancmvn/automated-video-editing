@@ -1,0 +1,16 @@
+{
+  "schema_version": "broad-v1",
+  "chunk_id": "wrong-chunk",
+  "scenes": [],
+  "speech_presence_ranges": [],
+  "candidates": [
+    {
+      "candidate_id": "bad-candidate",
+      "start": "9",
+      "end": "12",
+      "category": "action",
+      "reason": "Outside requested interval.",
+      "confidence": 0.8
+    }
+  ]
+}

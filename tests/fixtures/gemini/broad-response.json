@@ -1,0 +1,33 @@
+{
+  "schema_version": "broad-v1",
+  "chunk_id": "chunk-1",
+  "scenes": [
+    {
+      "scene_id": "scene-1",
+      "start": "0",
+      "end": "4.5",
+      "summary": "Wide coastal view with steady camera movement.",
+      "actions": ["camera pans across coastline"],
+      "setting": "coastline",
+      "scenic_interest": 0.9,
+      "human_interaction": 0.0,
+      "story_milestone": false,
+      "technical_problems": [],
+      "vertical_suitability": 0.7,
+      "confidence": 0.95
+    }
+  ],
+  "speech_presence_ranges": [
+    {"start": "4.5", "end": "6"}
+  ],
+  "candidates": [
+    {
+      "candidate_id": "candidate-1",
+      "start": "0.5",
+      "end": "4",
+      "category": "scenic",
+      "reason": "Clear coastal reveal.",
+      "confidence": 0.9
+    }
+  ]
+}

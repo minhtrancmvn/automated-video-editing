@@ -23,6 +23,9 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "gemini_live: explicit opt-in Gemini contract test; excluded from offline suite",
+]
 
 [tool.ruff]
 target-version = "py312"
