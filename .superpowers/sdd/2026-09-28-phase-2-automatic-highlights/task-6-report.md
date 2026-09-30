@@ -58,3 +58,84 @@ RED failure reason correct: adapter module/public symbols absent. Fixture valida
 ## Production changes
 
 None. `src/` untouched.
+
+# Task 6B Report: Gemini Adapter GREEN Checkpoint Recovery
+
+## Recovery boundary
+
+- Started from feature checkpoint `9d9ef30` on branch `feature/task-6b-gemini-recovery`.
+- Cherry-picked RED contract `89beb01` as `b33008a`.
+- Copied byte-identical current uncommitted checkpoint files from `/Users/coffeemug/Programming/automated-video-editing/.claude/worktrees/agent-a31aed5550b49ad97`:
+  - `src/video_editor/analysis/gemini.py`
+  - `src/video_editor/analysis/models.py`
+  - `tests/unit/test_gemini.py`
+- Copied no other checkpoint file. No reimplementation. No credentials, network call, upload, or live-marker test ran.
+
+## GitNexus impact before copy
+
+- `impact(target="GeminiAdapter", direction="upstream")`: adapter target absent from index; direct callers 0, affected processes 0, risk `UNKNOWN`.
+- `impact(target="models.py", direction="upstream")`: target absent from index; direct callers 0, affected processes 0, risk `UNKNOWN`.
+- No HIGH or CRITICAL risk returned.
+
+## Test checkpoint inspection
+
+The recovered `tests/unit/test_gemini.py` differs from RED contract in five localized areas. No assertion was weakened and this recovery made no further test edit.
+
+1. Three `Decimal("0")` / `Decimal("1")` constructor arguments became integer forms. Equivalent values; formatting-only.
+2. Upload-delete assertion changed `fake_client.deleted` to `fake_client.files.deleted`, matching `FakeFiles.delete` storage. Restores assertion against actual fake-client state.
+3. Schema-repair first response changed from recorded malformed semantic payload to `{"schema_version": "broad-v1"}`. This forces Pydantic schema validation failure, matching adapter's one-repair branch; second response stays strict JSON-schema assertion.
+4. Schema-repair JSON MIME assertion was wrapped by formatter only.
+
+Installed SDK verified: `google-genai 1.75.0`. No concrete 1.75.0 object-shape mismatch exposed by gates, so contract assertions stayed unchanged after checkpoint copy.
+
+## GREEN gates
+
+```text
+$ uv run pytest tests/unit/test_gemini.py -q -m 'not gemini_live'
+..................                                                       [100%]
+18 passed, 1 deselected in 1.85s
+
+$ uv run pytest -v -m 'not gemini_live'
+608 passed, 1 deselected in 50.23s
+
+$ uv run mypy src
+Success: no issues found in 29 source files
+
+$ uv run ruff check . --config pyproject.toml
+All checks passed!
+
+$ uv run ruff format --check src/video_editor/analysis/gemini.py src/video_editor/analysis/models.py tests/unit/test_gemini.py --config pyproject.toml
+3 files already formatted
+
+$ uv build
+Successfully built dist/video_editor-0.1.0.tar.gz
+Successfully built dist/video_editor-0.1.0-py3-none-any.whl
+
+$ git diff --check
+<no output; exit 0>
+```
+
+Approved-scope formatter ran after checks:
+
+```text
+$ uv run ruff check --fix src/video_editor/analysis/gemini.py src/video_editor/analysis/models.py tests/unit/test_gemini.py --config pyproject.toml
+All checks passed!
+
+$ uv run ruff format src/video_editor/analysis/gemini.py src/video_editor/analysis/models.py tests/unit/test_gemini.py --config pyproject.toml
+3 files left unchanged
+```
+
+## Offline and secret boundary
+
+- Focused and full tests excluded `gemini_live`; live test remained deselected.
+- Default suite uses `FakeClient`; no default test can construct `genai.Client`, upload remote data, or call remote models.
+- API key read only through `GEMINI_API_KEY` in `from_environment`; adapter `repr`, provider errors, safe usage payload, and fixtures exclude key/client data.
+- Fixture scanner passed. Fixtures contain no real `AIza`, email, identity, token, or authorization data.
+
+## GitNexus compare
+
+`detect_changes(scope="compare", base_ref="main")` returned `risk_level: low`, `affected_count: 0`, and no affected processes. It includes 36 files / 108 symbols from cumulative feature-branch work relative to `main`; Task 6B recovery scope itself remains three copied files plus this report.
+
+## Status
+
+GREEN checkpoint recovered. Required offline gates pass. No concrete defect exposed; no implementation rework performed.

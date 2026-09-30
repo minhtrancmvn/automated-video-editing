@@ -150,8 +150,8 @@ def manifest() -> object:
         digest="a" * 64,
         data=SimpleNamespace(
             chunk_id="chunk-1",
-            proxy_start=Decimal("0"),
-            proxy_end=Decimal("6"),
+            proxy_start=Decimal(0),
+            proxy_end=Decimal(6),
         ),
     )
 
@@ -160,8 +160,8 @@ def manifest() -> object:
 def broad_chunk() -> object:
     return SimpleNamespace(
         chunk_id="chunk-1",
-        proxy_start=Decimal("0"),
-        proxy_end=Decimal("6"),
+        proxy_start=Decimal(0),
+        proxy_end=Decimal(6),
     )
 
 
@@ -171,7 +171,7 @@ def candidate(gemini_contract: None) -> object:
     return CandidateWindow(
         chunk_id="chunk-1",
         candidate_id="candidate-1",
-        start=Decimal("1"),
+        start=Decimal(1),
         end=Decimal("3.5"),
     )
 
@@ -216,7 +216,7 @@ def test_upload_sets_video_mp4_waits_for_active_and_deletes_upload(
     assert uploaded_file == manifest.path
     assert upload_config == {"mime_type": "video/mp4"}
     assert active.state == "ACTIVE"
-    assert fake_client.deleted == ["files/proxy-1"]
+    assert fake_client.files.deleted == ["files/proxy-1"]
 
 
 def test_failed_file_processing_is_terminal_and_never_generates_content(
@@ -382,14 +382,20 @@ def test_malformed_structured_response_receives_one_schema_repair_only(
 ) -> None:
     upload = upload_active(adapter, manifest)
     fake_client.models.responses.extend(
-        [queued_response("malformed-response.json"), queued_response("broad-response.json")]
+        [
+            ParsedResponse(parsed={"schema_version": "broad-v1"}),
+            queued_response("broad-response.json"),
+        ]
     )
 
     result = adapter.broad_scan(upload, broad_chunk, prompt_version="broad-v1")
 
     assert result.response.chunk_id == "chunk-1"
     assert fake_client.models.calls == 2
-    assert fake_client.models.requests[1]["config"].response_mime_type == "application/json"
+    assert (
+        fake_client.models.requests[1]["config"].response_mime_type
+        == "application/json"
+    )
 
 
 def test_usage_payload_preserves_request_id_and_redacts_key_from_repr_and_errors(
