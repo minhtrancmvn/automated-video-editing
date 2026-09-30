@@ -288,3 +288,101 @@ Comparison includes prior Phase 2 feature commits, not only Task 5 fix files.
 ### Scope and Concerns
 
 Production/test changes remain inside approved four-file scope. Report appended as required. No original media, transcript semantics, network calls, or cloud calls added.
+
+## Fix Round 2/5 — 2026-09-30
+
+### Findings Closed
+
+- Accepted positive decoder drift now filters decoded samples to the half-open mapped proxy interval before any evidence generation. A sample exactly at `mapping.proxy_end` is discarded; final valid scene and frame evidence still end exactly at mapped proxy/source endpoints.
+- WAV validation now requires decoded mono sample count to equal header-declared frame count.
+- Any WAV longer than mapped proxy duration, including one sample, is rejected. Only an exact one-sample-short WAV receives final-sample rounding extension to `mapping.proxy_end`.
+- Implementation identity advanced to `local-segmentation-v3` for cache invalidation.
+
+### Observed RED
+
+Direct edge RED:
+
+```bash
+uv run pytest tests/unit/test_segmentation.py::test_segmentation_anchors_unequal_mapping_despite_decoder_drift tests/unit/test_segmentation.py::test_segmentation_rejects_one_sample_long_audio tests/unit/test_segmentation.py::test_segmentation_rejects_truncated_audio_payload -v
+```
+
+```text
+collected 3 items
+3 failed in 0.85s
+
+positive drift: EvidenceRange rejected empty Decimal('14')..Decimal('14')
+one-sample-long WAV: EvidenceRange rejected empty Decimal('4')..Decimal('4')
+truncated payload: DID NOT RAISE ValueError
+```
+
+Implementation-version RED:
+
+```bash
+uv run pytest tests/unit/test_segmentation.py::test_segmentation_json_is_canonical_and_byte_stable -q
+```
+
+```text
+1 failed in 0.59s
+AssertionError: assert 'local-segmentation-v2' == 'local-segmentation-v3'
+```
+
+### GREEN
+
+Direct edge GREEN, including preserved one-sample-short and canonical behavior:
+
+```bash
+uv run pytest tests/unit/test_segmentation.py::test_segmentation_anchors_unequal_mapping_despite_decoder_drift tests/unit/test_segmentation.py::test_segmentation_rejects_one_sample_long_audio tests/unit/test_segmentation.py::test_segmentation_rejects_truncated_audio_payload tests/unit/test_segmentation.py::test_segmentation_clips_final_partial_audio_window_to_mapping_end tests/unit/test_segmentation.py::test_segmentation_json_is_canonical_and_byte_stable -v
+```
+
+```text
+collected 5 items
+5 passed in 1.01s
+```
+
+Focused suite:
+
+```text
+uv run pytest tests/unit/test_segmentation.py -v
+67 passed in 2.63s
+```
+
+### Verification
+
+```text
+uv run pytest -v
+590 passed in 39.81s
+
+uv run mypy src
+Success: no issues found in 28 source files
+
+uv run ruff check . --config pyproject.toml
+All checks passed!
+
+uv run ruff format --check src/video_editor/analysis/segmentation.py tests/unit/test_segmentation.py --config pyproject.toml
+2 files already formatted
+
+git diff --check
+passed with no output
+
+uv build
+Successfully built dist/video_editor-0.1.0.tar.gz
+Successfully built dist/video_editor-0.1.0-py3-none-any.whl
+```
+
+Build outputs removed after verification.
+
+### GitNexus
+
+Pre-edit impact for `segment_media`, `_audio_evidence`, and touched regression tests returned `UNKNOWN`, zero indexed dependants/processes because Task 5 symbols remain absent from index. No HIGH or CRITICAL result occurred.
+
+Final branch-wide comparison:
+
+```text
+changed_count: 108
+changed_files: 31
+affected_count: 0
+risk_level: low
+affected_processes: []
+```
+
+Comparison includes prior Phase 2 feature commits, not only this two-file fix.

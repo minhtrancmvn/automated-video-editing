@@ -26,7 +26,7 @@ from video_editor.analysis.models import (
 )
 from video_editor.media.proxies import ProxyMapping
 
-_IMPLEMENTATION_VERSION = "local-segmentation-v2"
+_IMPLEMENTATION_VERSION = "local-segmentation-v3"
 _ZERO = Decimal(0)
 
 
@@ -387,12 +387,17 @@ def _audio_evidence(
         raise ValueError(f"cannot decode analysis audio: {audio}") from error
     if sample_rate <= 0:
         raise ValueError("analysis audio has invalid sample rate")
+    if samples.size != frame_count:
+        raise ValueError("analysis audio decoded sample count does not match header")
     if frame_count <= 0 or samples.size == 0:
         raise ValueError("analysis audio contains no samples")
     audio_duration = Decimal(frame_count) / Decimal(sample_rate)
     mapped_duration = mapping.proxy_end - mapping.proxy_start
     sample_tolerance = Decimal(1) / Decimal(sample_rate)
-    if abs(audio_duration - mapped_duration) > sample_tolerance:
+    if (
+        audio_duration > mapped_duration
+        or mapped_duration - audio_duration > sample_tolerance
+    ):
         raise ValueError("analysis audio duration does not match mapping")
     window_samples = max(1, int(sample_rate * settings.audio_window_seconds))
     energy: list[ScoredEvidence] = []
@@ -507,10 +512,13 @@ def segment_media(
     mapped_duration = mapping.proxy_end - mapping.proxy_start
     if abs(duration - mapped_duration) > Decimal("0.05"):
         raise ValueError("decoded proxy duration does not match mapping")
-    if mapping.proxy_start != _ZERO:
-        samples = [
-            (timestamp + mapping.proxy_start, frame) for timestamp, frame in samples
-        ]
+    samples = [
+        (timestamp + mapping.proxy_start, frame)
+        for timestamp, frame in samples
+        if timestamp + mapping.proxy_start < mapping.proxy_end
+    ]
+    if not samples:
+        raise ValueError("proxy contains no samples within mapped interval")
     scenes = _scene_ranges(samples, mapping.proxy_end, mapping, active)
     video = _frame_evidence(samples, mapping.proxy_end, mapping, active)
     energy, silence, speech, transients = _audio_evidence(

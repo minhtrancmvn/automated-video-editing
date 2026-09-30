@@ -161,7 +161,7 @@ def test_segmentation_json_is_canonical_and_byte_stable(tmp_path: Path) -> None:
 
     assert first_json == second_json
     assert first_json.endswith(b"\n")
-    assert payload["implementation_version"] == "local-segmentation-v2"
+    assert payload["implementation_version"] == "local-segmentation-v3"
     assert payload["settings_hash"]
     assert payload["source_identity"] == "bounded-v1:controlled-fixture"
     evidence = [
@@ -209,7 +209,8 @@ def test_segmentation_anchors_unequal_mapping_despite_decoder_drift(
         proxy_path: Path, settings: SegmentationSettings
     ) -> tuple[list[tuple[Decimal, object]], Decimal]:
         samples, _ = original_read_video(proxy_path, settings)
-        return samples, D("3.98")
+        samples.append((D("4"), samples[-1][1]))
+        return samples, D("4.02")
 
     monkeypatch.setattr(segmentation, "_read_video", drifted_read_video)
 
@@ -236,6 +237,27 @@ def test_segmentation_rejects_material_audio_duration_mismatch(
     )
 
     with pytest.raises(ValueError, match="audio duration does not match mapping"):
+        segment_media(proxy, wav, _mapping())
+
+
+def test_segmentation_rejects_one_sample_long_audio(tmp_path: Path) -> None:
+    proxy, _ = create_segmentation_fixture(tmp_path)
+    sample_rate = 16_000
+    wav = create_mono_wav(
+        tmp_path / "one-sample-long.wav", frame_count=4 * sample_rate + 1
+    )
+
+    with pytest.raises(ValueError, match="audio duration does not match mapping"):
+        segment_media(proxy, wav, _mapping())
+
+
+def test_segmentation_rejects_truncated_audio_payload(tmp_path: Path) -> None:
+    proxy, _ = create_segmentation_fixture(tmp_path)
+    sample_rate = 16_000
+    wav = create_mono_wav(tmp_path / "truncated.wav", frame_count=4 * sample_rate)
+    wav.write_bytes(wav.read_bytes()[:-2])
+
+    with pytest.raises(ValueError, match="decoded sample count does not match header"):
         segment_media(proxy, wav, _mapping())
 
 
