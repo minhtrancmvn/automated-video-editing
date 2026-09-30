@@ -5,8 +5,10 @@ from __future__ import annotations
 import os
 import time
 from collections.abc import Callable
+from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, TypeVar, cast
+from io import IOBase
+from typing import Any, TypeVar
 
 from google import genai
 from google.genai import types
@@ -20,16 +22,17 @@ from video_editor.analysis.models import (
     CandidateWindow,
     ProviderResult,
     ProviderUsage,
-    ProxyManifest,
     RetryPolicy,
     UploadedFile,
 )
+from video_editor.analysis.proxy_chunks import AuthorizedUpload
 from video_editor.errors import ErrorCategory, VideoEditorError
 
 MODEL_ID = "gemini-2.5-flash"
 _BROAD_FPS = 0.5
 _RESPONSE_MIME_TYPE = "application/json"
 _ResponseT = TypeVar("_ResponseT", BroadScanResponse, CandidateRefinementResponse)
+_ValueT = TypeVar("_ValueT")
 
 
 class GeminiAdapter:
@@ -44,7 +47,7 @@ class GeminiAdapter:
         sleeper: Callable[[float], None] = time.sleep,
         maximum_request_cost_usd: Decimal | None = None,
     ) -> None:
-        """Create adapter with an injected client or a runtime-only API key."""
+        """Create adapter with injected client or runtime-only API key."""
         if client is None and not api_key:
             raise VideoEditorError(
                 ErrorCategory.CONFIGURATION,
@@ -52,7 +55,6 @@ class GeminiAdapter:
                 code="provider_configuration",
             )
         self._client = client if client is not None else genai.Client(api_key=api_key)
-        self._api_key = api_key
         self._retry_policy = retry_policy or RetryPolicy()
         self._sleeper = sleeper
         self._maximum_request_cost_usd = maximum_request_cost_usd
@@ -65,7 +67,7 @@ class GeminiAdapter:
     def from_environment(
         cls, *, maximum_request_cost_usd: Decimal | None = None
     ) -> GeminiAdapter:
-        """Create adapter from runtime environment without persisting its key."""
+        """Create adapter from runtime environment without retaining its key."""
         return cls(
             api_key=os.getenv("GEMINI_API_KEY"),
             maximum_request_cost_usd=maximum_request_cost_usd,
@@ -73,49 +75,49 @@ class GeminiAdapter:
 
     @staticmethod
     def estimate_broad_request_maximum(
-        manifest: ProxyManifest, chunk: AnalysisChunk
+        authorization: AuthorizedUpload, chunk: AnalysisChunk
     ) -> Decimal:
         """Return conservative live-contract ceiling for one tiny broad request."""
-        del manifest, chunk
+        del authorization, chunk
         return Decimal("0.01")
 
-    def upload(self, manifest: ProxyManifest) -> UploadedFile:
-        """Upload one validated MP4 proxy and retain manifest for expiry recovery."""
-        try:
-            uploaded = self._client.files.upload(
-                file=manifest.path,
-                config={"mime_type": "video/mp4"},
+    def upload(self, authorization: AuthorizedUpload) -> UploadedFile:
+        """Upload exact bytes from one validated upload authorization."""
+        if not isinstance(authorization, AuthorizedUpload):
+            raise TypeError("upload requires AuthorizedUpload")
+        with authorization:
+            stream = authorization.stream
+            if not isinstance(stream, IOBase):
+                raise TypeError("AuthorizedUpload stream must be an IOBase")
+            remote = self._retry(
+                lambda: self._client.files.upload(
+                    file=stream,
+                    config={"mime_type": "video/mp4"},
+                )
             )
-        except Exception as exc:  # noqa: BLE001 - SDK exposes heterogeneous errors
-            raise self._provider_error(exc) from None
-        return UploadedFile(
-            name=str(uploaded.name),
-            uri=str(uploaded.uri),
-            mime_type=str(uploaded.mime_type or "video/mp4"),
-            state=self._state_value(uploaded.state),
-            expiration_time=self._optional_string(uploaded.expiration_time),
-            manifest=manifest,
-        )
+        return self._uploaded_file(remote, authorization.manifest_id)
 
     def wait_until_active(self, upload: UploadedFile) -> UploadedFile:
-        """Poll file processing until ACTIVE or a terminal state is observed."""
+        """Poll file processing independently from individual SDK retry attempts."""
         current = upload
         for attempt in range(1, self._retry_policy.max_attempts + 1):
             try:
-                remote = self._client.files.get(name=current.name)
-            except Exception as exc:  # noqa: BLE001 - SDK exposes heterogeneous errors
-                raise self._provider_error(exc) from None
-            state = self._state_value(remote.state)
-            if state == "ACTIVE":
-                return current.model_copy(update={"state": state})
-            if state == "FAILED":
+                remote = self._retry(lambda: self._client.files.get(name=current.name))
+            except VideoEditorError as error:
+                if error.code == "provider_file_not_found":
+                    raise self._reupload_required(current) from None
+                raise
+            refreshed = self._uploaded_file(remote, current.manifest_id)
+            if self._is_expired(refreshed.expiration_time):
+                raise self._reupload_required(current)
+            if refreshed.state == "ACTIVE":
+                return refreshed
+            if refreshed.state == "FAILED":
                 raise VideoEditorError(
                     ErrorCategory.PROVIDER,
                     "Gemini file processing failed",
                     code="provider_file_failed",
                 )
-            if state == "EXPIRED":
-                return current.model_copy(update={"state": state})
             if attempt < self._retry_policy.max_attempts:
                 self._sleep(attempt)
         raise VideoEditorError(
@@ -134,7 +136,7 @@ class GeminiAdapter:
         """Analyze one whole proxy chunk at static 0.5 FPS."""
         return self._analyze(
             upload=upload,
-            identity=chunk.chunk_id,
+            chunk_id=chunk.chunk_id,
             start=chunk.proxy_start,
             end=chunk.proxy_end,
             fps=_BROAD_FPS,
@@ -159,7 +161,7 @@ class GeminiAdapter:
             )
         return self._analyze(
             upload=upload,
-            identity=candidate.chunk_id,
+            chunk_id=candidate.chunk_id,
             candidate_id=candidate.candidate_id,
             start=candidate.start,
             end=candidate.end,
@@ -170,16 +172,13 @@ class GeminiAdapter:
 
     def delete_upload(self, upload: UploadedFile) -> None:
         """Delete provider upload by Files API name."""
-        try:
-            self._client.files.delete(name=upload.name)
-        except Exception as exc:  # noqa: BLE001 - SDK exposes heterogeneous errors
-            raise self._provider_error(exc) from None
+        self._retry(lambda: self._client.files.delete(name=upload.name))
 
     def _analyze(
         self,
         *,
         upload: UploadedFile,
-        identity: str,
+        chunk_id: str,
         start: Decimal,
         end: Decimal,
         fps: float,
@@ -187,22 +186,16 @@ class GeminiAdapter:
         response_model: type[_ResponseT],
         candidate_id: str | None = None,
     ) -> ProviderResult[_ResponseT]:
-        if not prompt_version:
-            raise VideoEditorError(
-                ErrorCategory.PROVIDER,
-                "Prompt version is required",
-                code="provider_invalid_request",
-            )
+        prompt = self._prompt(
+            prompt_version,
+            chunk_id=chunk_id,
+            candidate_id=candidate_id,
+            start=start,
+            end=end,
+        )
         active = self.wait_until_active(upload)
-        if active.state == "EXPIRED":
-            active = self.wait_until_active(
-                self.upload(cast(ProxyManifest, upload.manifest))
-            )
         part = types.Part(
-            file_data=types.FileData(
-                file_uri=active.uri,
-                mime_type=active.mime_type,
-            ),
+            file_data=types.FileData(file_uri=active.uri, mime_type=active.mime_type),
             video_metadata=types.VideoMetadata(
                 start_offset=self._duration(start),
                 end_offset=self._duration(end),
@@ -213,44 +206,55 @@ class GeminiAdapter:
             response_mime_type=_RESPONSE_MIME_TYPE,
             response_schema=response_model,
         )
-        response = self._generate(part, config)
-        try:
-            parsed = response_model.model_validate(response.parsed)
-        except (ValidationError, TypeError, ValueError):
-            response = self._generate(part, config)
+        last_response: Any | None = None
+        for _ in range(2):
+            response = self._generate(part, prompt, config)
+            last_response = response
             try:
                 parsed = response_model.model_validate(response.parsed)
-            except (ValidationError, TypeError, ValueError):
-                raise self._invalid_response() from None
-        self._validate_response(
-            parsed,
-            chunk_id=identity,
-            candidate_id=candidate_id,
-            start=start,
-            end=end,
-        )
-        usage = self._usage(response)
-        return ProviderResult(response=parsed, usage=usage)
+                self._validate_response(
+                    parsed,
+                    chunk_id=chunk_id,
+                    candidate_id=candidate_id,
+                    start=start,
+                    end=end,
+                )
+            except (ValidationError, TypeError, ValueError, VideoEditorError):
+                continue
+            return ProviderResult(response=parsed, usage=self._usage(response))
+        del last_response
+        raise self._invalid_response()
 
-    def _generate(self, part: types.Part, config: types.GenerateContentConfig) -> Any:
-        last_error: Exception | None = None
+    def _generate(
+        self, part: types.Part, prompt: str, config: types.GenerateContentConfig
+    ) -> Any:
+        """Generate one response under shared bounded SDK retry policy."""
+        return self._retry(
+            lambda: self._client.models.generate_content(
+                model=MODEL_ID,
+                contents=[part, prompt],
+                config=config,
+            )
+        )
+
+    def _retry(self, operation: Callable[[], _ValueT]) -> _ValueT:
+        """Run one SDK operation with retries only for sanitized transient errors."""
         for attempt in range(1, self._retry_policy.max_attempts + 1):
             try:
-                return self._client.models.generate_content(
-                    model=MODEL_ID,
-                    contents=[part],
-                    config=config,
-                )
-            except Exception as exc:  # noqa: BLE001 - SDK exposes heterogeneous errors
-                last_error = exc
-                mapped = self._provider_error(exc)
-                if (
-                    not self._is_retryable(mapped)
-                    or attempt == self._retry_policy.max_attempts
-                ):
-                    raise mapped from None
-                self._sleep(attempt)
-        raise self._provider_error(cast(Exception, last_error))
+                return operation()
+            except Exception as error:  # noqa: BLE001 - SDK error hierarchy is open-ended
+                mapped = self._provider_error(error)
+            if (
+                not self._is_retryable(mapped)
+                or attempt == self._retry_policy.max_attempts
+            ):
+                raise mapped
+            self._sleep(attempt)
+        raise VideoEditorError(
+            ErrorCategory.PROVIDER,
+            "Gemini provider request failed",
+            code="provider_unavailable",
+        )
 
     @staticmethod
     def _validate_response(
@@ -288,32 +292,101 @@ class GeminiAdapter:
         return ProviderUsage(
             request_id=str(getattr(response, "response_id", None) or "unknown"),
             prompt_tokens=int(getattr(metadata, "prompt_token_count", 0) or 0),
-            output_tokens=int(getattr(metadata, "candidates_token_count", 0) or 0),
+            output_tokens=int(getattr(metadata, "response_token_count", 0) or 0),
             total_tokens=int(getattr(metadata, "total_token_count", 0) or 0),
-            actual_cost_usd=Decimal(0),
         )
 
-    def _provider_error(self, error: Exception) -> VideoEditorError:
-        status = getattr(error, "status_code", None)
+    @staticmethod
+    def _prompt(
+        prompt_version: str,
+        *,
+        chunk_id: str,
+        candidate_id: str | None,
+        start: Decimal,
+        end: Decimal,
+    ) -> str:
+        interval = f"[{format(start, 'f')}, {format(end, 'f')}] seconds"
+        if prompt_version == "broad-v1" and candidate_id is None:
+            return "\n".join(
+                (
+                    "mode: broad",
+                    "prompt_version: broad-v1",
+                    f"chunk_id: {chunk_id}",
+                    f"interval: {interval}",
+                    "Return only JSON matching response schema.",
+                    "Do not transcribe speech.",
+                    "Do not infer speech meaning.",
+                    "Do not identify any person.",
+                )
+            )
+        if prompt_version == "candidate-v1" and candidate_id is not None:
+            return "\n".join(
+                (
+                    "mode: candidate",
+                    "prompt_version: candidate-v1",
+                    f"chunk_id: {chunk_id}",
+                    f"candidate_id: {candidate_id}",
+                    f"interval: {interval}",
+                    "Return only JSON matching response schema.",
+                    "Speech meaning may be summarized only for this candidate interval.",
+                    "Do not identify any person.",
+                )
+            )
+        raise VideoEditorError(
+            ErrorCategory.PROVIDER,
+            "Unsupported Gemini prompt version",
+            code="provider_invalid_request",
+        )
+
+    @staticmethod
+    def _provider_error(error: Exception) -> VideoEditorError:
+        status = getattr(error, "code", None)
         if status in {401, 403}:
-            code = "provider_authentication"
-            message = "Gemini authentication failed"
+            code, message = "provider_authentication", "Gemini authentication failed"
+        elif status == 404:
+            code, message = (
+                "provider_file_not_found",
+                "Gemini file is no longer available",
+            )
         elif status is not None and 400 <= status < 500 and status != 429:
-            code = "provider_invalid_request"
-            message = "Gemini request was invalid"
+            code, message = "provider_invalid_request", "Gemini request was invalid"
         elif status == 429:
-            code = "provider_rate_limited"
-            message = "Gemini request was rate limited"
+            code, message = "provider_rate_limited", "Gemini request was rate limited"
         elif status is not None and status >= 500:
-            code = "provider_unavailable"
-            message = "Gemini service is unavailable"
+            code, message = "provider_unavailable", "Gemini service is unavailable"
         elif isinstance(error, OSError):
-            code = "provider_network"
-            message = "Gemini network request failed"
+            code, message = "provider_network", "Gemini network request failed"
         else:
-            code = "provider_unavailable"
-            message = "Gemini provider request failed"
+            code, message = "provider_unavailable", "Gemini provider request failed"
         return VideoEditorError(ErrorCategory.PROVIDER, message, code=code)
+
+    @staticmethod
+    def _uploaded_file(remote: Any, manifest_id: str) -> UploadedFile:
+        return UploadedFile(
+            name=str(remote.name),
+            uri=str(remote.uri),
+            mime_type=str(remote.mime_type or "video/mp4"),
+            state=GeminiAdapter._state_value(remote.state),
+            expiration_time=getattr(remote, "expiration_time", None),
+            manifest_id=manifest_id,
+        )
+
+    @staticmethod
+    def _is_expired(expiration_time: datetime | None) -> bool:
+        if expiration_time is None:
+            return False
+        if expiration_time.tzinfo is None or expiration_time.utcoffset() is None:
+            return True
+        return expiration_time <= datetime.now(UTC)
+
+    @staticmethod
+    def _reupload_required(upload: UploadedFile) -> VideoEditorError:
+        return VideoEditorError(
+            ErrorCategory.PROVIDER,
+            "Gemini file must be uploaded again",
+            code="provider_file_reupload_required",
+            safe_details={"manifest_id": upload.manifest_id},
+        )
 
     @staticmethod
     def _is_retryable(error: VideoEditorError) -> bool:
@@ -342,12 +415,7 @@ class GeminiAdapter:
     @staticmethod
     def _state_value(state: object) -> str:
         value = getattr(state, "value", state)
-        text = str(value)
-        return text.rsplit(".", 1)[-1]
-
-    @staticmethod
-    def _optional_string(value: object) -> str | None:
-        return None if value is None else str(value)
+        return str(value).rsplit(".", 1)[-1]
 
 
 __all__ = [

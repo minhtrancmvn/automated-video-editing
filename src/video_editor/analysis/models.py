@@ -2,14 +2,43 @@
 
 from __future__ import annotations
 
-from decimal import Decimal
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
-from pathlib import Path
-from typing import Annotated, Literal, Protocol, Self
+from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictFloat,
+    StringConstraints,
+    model_validator,
+)
+
+if TYPE_CHECKING:
+    from video_editor.analysis.proxy_chunks import AuthorizedUpload
+
+
+def _strict_json_decimal(value: object) -> Decimal:
+    if not isinstance(value, str):
+        raise ValueError(  # noqa: TRY004 - Pydantic must wrap this as ValidationError
+            "provider timestamp must be a JSON string"
+        )
+    try:
+        decimal = Decimal(value)
+    except InvalidOperation as exc:
+        raise ValueError("provider timestamp must be decimal text") from exc
+    if not decimal.is_finite():
+        raise ValueError("provider timestamp must be finite")
+    return decimal
+
 
 FiniteDecimal = Annotated[Decimal, Field(allow_inf_nan=False)]
+ProviderDecimal = Annotated[Decimal, BeforeValidator(_strict_json_decimal)]
+StrictScore = Annotated[StrictFloat, Field(ge=0, le=1, allow_inf_nan=False)]
 NonEmptyString = Annotated[str, StringConstraints(min_length=1)]
 
 
@@ -216,12 +245,6 @@ class BudgetState(AnalysisModel):
     remaining_usd: FiniteDecimal = Field(ge=0)
 
 
-class ProxyManifest(Protocol):
-    """Minimum validated manifest interface required by providers."""
-
-    path: Path
-
-
 class AnalysisChunk(Protocol):
     """Provider-neutral broad-scan interval."""
 
@@ -247,14 +270,14 @@ class CandidateWindow(AnalysisModel):
 
 
 class UploadedFile(AnalysisModel):
-    """Provider upload identity with local manifest retained for reupload."""
+    """Provider upload identity linked to its authorization manifest ID."""
 
     name: NonEmptyString
     uri: NonEmptyString
     mime_type: NonEmptyString
     state: NonEmptyString
-    expiration_time: str | None = None
-    manifest: object
+    expiration_time: datetime | None = None
+    manifest_id: NonEmptyString
 
 
 class RetryPolicy(AnalysisModel):
@@ -284,10 +307,10 @@ class ProviderUsage(AnalysisModel):
 
 
 class TimeRange(AnalysisModel):
-    """Strict provider-returned time interval."""
+    """Strict provider-returned time interval with string timestamps."""
 
-    start: FiniteDecimal = Field(ge=0)
-    end: FiniteDecimal = Field(gt=0)
+    start: ProviderDecimal = Field(ge=0)
+    end: ProviderDecimal = Field(gt=0)
 
     @model_validator(mode="after")
     def validate_interval(self) -> Self:
@@ -304,12 +327,12 @@ class BroadScene(TimeRange):
     summary: NonEmptyString
     actions: tuple[NonEmptyString, ...]
     setting: NonEmptyString
-    scenic_interest: float = Field(ge=0, le=1, allow_inf_nan=False)
-    human_interaction: float = Field(ge=0, le=1, allow_inf_nan=False)
-    story_milestone: bool
+    scenic_interest: StrictScore
+    human_interaction: StrictScore
+    story_milestone: StrictBool
     technical_problems: tuple[NonEmptyString, ...]
-    vertical_suitability: float = Field(ge=0, le=1, allow_inf_nan=False)
-    confidence: float = Field(ge=0, le=1, allow_inf_nan=False)
+    vertical_suitability: StrictScore
+    confidence: StrictScore
 
 
 class BroadCandidate(TimeRange):
@@ -318,7 +341,7 @@ class BroadCandidate(TimeRange):
     candidate_id: NonEmptyString
     category: NonEmptyString
     reason: NonEmptyString
-    confidence: float = Field(ge=0, le=1, allow_inf_nan=False)
+    confidence: StrictScore
 
 
 class BroadScanResponse(AnalysisModel):
@@ -337,16 +360,16 @@ class CandidateRefinementResponse(TimeRange):
     schema_version: Literal["candidate-v1"]
     chunk_id: NonEmptyString
     candidate_id: NonEmptyString
-    action_completeness: float = Field(ge=0, le=1, allow_inf_nan=False)
-    visual_composition: float = Field(ge=0, le=1, allow_inf_nan=False)
-    novelty: float = Field(ge=0, le=1, allow_inf_nan=False)
-    semantic_importance: float = Field(ge=0, le=1, allow_inf_nan=False)
-    duplicate_similarity: float = Field(ge=0, le=1, allow_inf_nan=False)
+    action_completeness: StrictScore
+    visual_composition: StrictScore
+    novelty: StrictScore
+    semantic_importance: StrictScore
+    duplicate_similarity: StrictScore
     vertical_subject_priority: NonEmptyString
     crop_intent: NonEmptyString
-    adjacent_scene_compatibility: float = Field(ge=0, le=1, allow_inf_nan=False)
+    adjacent_scene_compatibility: StrictScore
     speech_meaning_summary: NonEmptyString | None = None
-    confidence: float = Field(ge=0, le=1, allow_inf_nan=False)
+    confidence: StrictScore
 
 
 class ProviderResult[ResponseT](AnalysisModel):
@@ -359,8 +382,8 @@ class ProviderResult[ResponseT](AnalysisModel):
 class AnalysisProvider(Protocol):
     """Provider-neutral static video analysis interface."""
 
-    def upload(self, manifest: ProxyManifest) -> UploadedFile:
-        """Upload one validated generated proxy."""
+    def upload(self, authorization: AuthorizedUpload) -> UploadedFile:
+        """Upload exact bytes held by one validated authorization."""
         ...
 
     def broad_scan(

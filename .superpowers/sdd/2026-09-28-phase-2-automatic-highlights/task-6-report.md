@@ -139,3 +139,54 @@ $ uv run ruff format src/video_editor/analysis/gemini.py src/video_editor/analys
 ## Status
 
 GREEN checkpoint recovered. Required offline gates pass. No concrete defect exposed; no implementation rework performed.
+
+# Task 6 Fix Round 1A Report
+
+## Recovery boundary
+
+- Started branch `fix/task6-round-1a` from feature checkpoint `9d9ef30`.
+- Cherry-picked `89beb01` as `0a22fdd`, then `48d8194` as `b58f368`.
+- Copied only requested uncommitted checkpoints from `agent-a8f27bb7a88ecb823`:
+  - `src/video_editor/analysis/models.py`
+  - `tests/unit/test_gemini.py`
+- Did not copy docs, plan, or task-plan checkpoint files.
+
+## GitNexus impact before adapter edit
+
+`impact(target="GeminiAdapter", direction="upstream")` and `impact(target="upload", direction="upstream")` both returned target missing, `impactedCount: 0`, risk `UNKNOWN`. The recovered adapter is new to the current index; no HIGH or CRITICAL warning returned.
+
+## Fixes
+
+- `GeminiAdapter.upload()` accepts only Task 4 `AuthorizedUpload`, passes its exact open `stream` to `files.upload`, then closes it through authorization context ownership. No path-like upload path remains.
+- `models.py` keeps `AuthorizedUpload` type-only; adapter imports it at runtime. This preserves model ownership without a circular import.
+- SDK exceptions map to stable errors inside handler scope and raise after it. Adapter representation, error message, cause, context, and safe payload do not retain API-key or SDK exception data.
+- Broad and candidate prompts allow only `broad-v1` and `candidate-v1`, include mode, identity, requested interval, JSON contract, and semantic/identity restrictions. Unknown versions reject before generation.
+- One retry wrapper covers Files upload/get/delete and content generation. It uses real `google-genai` `.code`; 401/403 and invalid 4xx do not retry, while 429/5xx/network errors retry with injected sleeper.
+- Polling is separately bounded. It handles `PROCESSING` to `ACTIVE`, terminal `FAILED`, aware expiry timestamps, and Files 404 as a required authorized reupload. No unsupported `EXPIRED` state remains.
+- Strict models reject coercive and non-finite response scalars while requiring JSON string timestamps. Usage reads `response_token_count`.
+- Structural parse failures and semantic identity/interval failures share one total repair generation boundary.
+
+## Offline focused gates
+
+```text
+$ uv run pytest -v tests/unit/test_gemini.py -m 'not gemini_live'
+36 passed, 1 deselected in 0.46s
+
+$ uv run mypy src
+Success: no issues found in 29 source files
+
+$ uv run ruff check . --config pyproject.toml
+All checks passed!
+
+$ uv run ruff format --check . --config pyproject.toml
+78 files already formatted
+```
+
+## Notes
+
+- Initial direct `ruff` invocation failed because binary is not globally installed. Project commands use locked `uv run ruff` instead.
+- Focused tests use fake client only. `gemini_live` remains deselected. No remote Gemini call, upload, credential, or live safety action ran.
+- Final offline suite: `uv run pytest -v -m 'not gemini_live'` completed `626 passed, 1 deselected in 40.51s`.
+- Final package build completed: source distribution and wheel built successfully; `git diff --check` exited 0.
+- Final GitNexus working-tree scope: 4 changed files, 0 changed indexed symbols, 0 affected processes, risk `low`. Branch-vs-main compare: 37 files / 108 cumulative feature symbols, 0 affected processes, risk `low`.
+- Budget reservation and live-operation safety remain interface-only for round 1B, per scope.
