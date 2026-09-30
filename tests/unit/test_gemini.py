@@ -7,9 +7,11 @@ import json
 import math
 import os
 import re
+import shutil
+import subprocess
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,8 +21,20 @@ import pytest
 from google.genai import errors
 from pydantic import ValidationError
 
-from video_editor.analysis.proxy_chunks import AuthorizedUpload
-from video_editor.errors import VideoEditorError
+from video_editor.analysis.models import AnalysisRequestContext, RequestReservation
+from video_editor.analysis.pricing import ModelPricing
+from video_editor.analysis.proxy_chunks import (
+    AuthorizedUpload,
+    ProxyManifest,
+    create_cloud_proxy_chunk,
+    register_proxy_manifest,
+    validate_upload_candidate,
+)
+from video_editor.config import PathSettings
+from video_editor.errors import ErrorCategory, VideoEditorError
+from video_editor.media.discovery import IDENTITY_VERSION, bounded_fingerprint
+from video_editor.media.proxies import ProxyMapping
+from video_editor.persistence.database import JobStore
 
 try:
     from video_editor.analysis.gemini import (
@@ -54,6 +68,10 @@ class ParsedResponse:
             response_token_count=17,
             candidates_token_count=999,
             total_token_count=28,
+            prompt_tokens_details=[
+                SimpleNamespace(modality="VIDEO", token_count=7),
+                SimpleNamespace(modality="TEXT", token_count=4),
+            ],
         )
     )
 
@@ -164,6 +182,7 @@ def adapter(gemini_contract: None, fake_client: FakeClient) -> Any:
         api_key=SECRET,
         retry_policy=RetryPolicy(max_attempts=3, base_delay_seconds=Decimal("0.1")),
         sleeper=lambda _: None,
+        pricing=_test_pricing(),
     )
 
 
@@ -192,12 +211,161 @@ def candidate(gemini_contract: None) -> object:
     )
 
 
+@pytest.fixture
+def broad_request() -> AnalysisRequestContext:
+    return AnalysisRequestContext(
+        reservation_id="reservation-broad-1",
+        job_id="job-1",
+        manifest_id="manifest-1",
+        mode="broad",
+        chunk_id="chunk-1",
+    )
+
+
+@pytest.fixture
+def candidate_request() -> AnalysisRequestContext:
+    return AnalysisRequestContext(
+        reservation_id="reservation-candidate-1",
+        job_id="job-1",
+        manifest_id="manifest-1",
+        mode="candidate",
+        chunk_id="chunk-1",
+        candidate_id="candidate-1",
+    )
+
+
 def fixture_payload(name: str) -> dict[str, object]:
     return json.loads((FIXTURE_ROOT / name).read_text())
 
 
 def queued_response(name: str) -> ParsedResponse:
     return ParsedResponse(parsed=fixture_payload(name))
+
+
+def _test_pricing() -> ModelPricing:
+    return ModelPricing(
+        model="gemini-2.5-flash",
+        media_input_usd_per_million_tokens=Decimal("0.30"),
+        text_input_usd_per_million_tokens=Decimal("0.10"),
+        output_usd_per_million_tokens=Decimal("2.50"),
+        source_url="https://example.invalid/pinned-task-2-pricing",
+        effective_date=date(2026, 9, 28),
+    )
+
+
+def _paths(tmp_path: Path) -> PathSettings:
+    return PathSettings(
+        input_dir=tmp_path / "input",
+        workspace_dir=tmp_path / "workspace",
+        cache_dir=tmp_path / "cache",
+        output_dir=tmp_path / "output",
+        state_dir=tmp_path / "state",
+    )
+
+
+def _register_tiny_proxy(
+    tmp_path: Path,
+    store: JobStore,
+    *,
+    job_id: str,
+) -> tuple[ProxyManifest, object]:
+    paths = _paths(tmp_path)
+    source = paths.input_dir / "live-source.mp4"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=64x36:r=15",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=16000:cl=mono",
+            "-t",
+            "1",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-ac",
+            "1",
+            "-shortest",
+            str(source),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    fingerprint = bounded_fingerprint(source)
+    source_identity = f"{IDENTITY_VERSION}:{fingerprint}"
+    mapping = ProxyMapping(
+        source_id="live-source-1",
+        source_start=Decimal(0),
+        source_end=Decimal(1),
+        proxy_start=Decimal(0),
+        proxy_end=Decimal(1),
+        source_identity=source_identity,
+        settings_hash="live-settings",
+        tool_version="live-contract",
+    )
+    store.save_sources(
+        job_id,
+        [
+            {
+                "source_id": "live-source-1",
+                "path": str(source),
+                "size_bytes": source.stat().st_size,
+                "fingerprint": fingerprint,
+                "identity_version": IDENTITY_VERSION,
+            }
+        ],
+    )
+    phase1_proxy = paths.cache_dir / "live-source-1.phase1.proxy.mp4"
+    phase1_proxy.parent.mkdir(parents=True, exist_ok=True)
+    phase1_proxy.write_bytes(b"phase1 proxy placeholder")
+    mapping_data = {
+        key: str(value) if isinstance(value, Decimal) else value
+        for key, value in mapping.__dict__.items()
+    }
+    store.save_artifact(
+        job_id,
+        "proxy",
+        phase1_proxy,
+        {
+            "kind": "proxy",
+            "source_id": "live-source-1",
+            "source_path": str(source),
+            "source_identity": source_identity,
+            "settings_hash": mapping.settings_hash,
+            "tool_version": mapping.tool_version,
+            "mapping": mapping_data,
+        },
+    )
+    manifest = create_cloud_proxy_chunk(
+        source,
+        paths.cache_dir / job_id,
+        mapping,
+        Decimal(0),
+        Decimal(1),
+        job_id=job_id,
+        source_fingerprint=fingerprint,
+        paths=paths,
+        store=store,
+    )
+    register_proxy_manifest(manifest, store)
+    chunk = SimpleNamespace(
+        chunk_id=manifest.chunk_id,
+        proxy_start=manifest.data.proxy_start,
+        proxy_end=manifest.data.proxy_end,
+    )
+    return manifest, chunk
 
 
 def request_video_part(request: dict[str, object]) -> object:
@@ -310,13 +478,16 @@ def test_expired_or_missing_file_requests_authorized_reupload(
     adapter: Any,
     fake_client: FakeClient,
     broad_chunk: object,
+    broad_request: AnalysisRequestContext,
     remote_response: object,
 ) -> None:
     upload = upload_active(adapter)
     fake_client.files.get_responses.append(remote_response)
 
     with pytest.raises(VideoEditorError) as caught:
-        adapter.broad_scan(upload, broad_chunk, prompt_version="broad-v1")
+        adapter.broad_scan(
+            upload, broad_chunk, broad_request, prompt_version="broad-v1"
+        )
 
     assert caught.value.code == "provider_file_reupload_required"
     assert caught.value.safe_details == {"manifest_id": "manifest-1"}
@@ -328,11 +499,14 @@ def test_broad_request_uses_exact_model_static_metadata_and_strict_schema(
     adapter: Any,
     fake_client: FakeClient,
     broad_chunk: object,
+    broad_request: AnalysisRequestContext,
 ) -> None:
     upload = upload_active(adapter)
     fake_client.models.responses.append(queued_response("broad-response.json"))
 
-    result = adapter.broad_scan(upload, broad_chunk, prompt_version="broad-v1")
+    result = adapter.broad_scan(
+        upload, broad_chunk, broad_request, prompt_version="broad-v1"
+    )
 
     assert BroadScanResponse is not None
     request = fake_client.models.requests[0]
@@ -352,16 +526,19 @@ def test_broad_prompt_is_versioned_bounded_and_forbids_semantic_expansion(
     adapter: Any,
     fake_client: FakeClient,
     broad_chunk: object,
+    broad_request: AnalysisRequestContext,
 ) -> None:
     upload = upload_active(adapter)
     fake_client.models.responses.append(queued_response("broad-response.json"))
 
-    adapter.broad_scan(upload, broad_chunk, prompt_version="broad-v1")
+    adapter.broad_scan(upload, broad_chunk, broad_request, prompt_version="broad-v1")
 
     prompt = request_prompt(fake_client.models.requests[0])
     for required in (
         "mode: broad",
         "prompt_version: broad-v1",
+        "reservation_id: reservation-broad-1",
+        "job_id: job-1",
         "chunk_id: chunk-1",
         "interval: [0, 6] seconds",
         "Return only JSON",
@@ -377,6 +554,7 @@ def test_candidate_request_uses_bounded_fps_and_duration_string_offsets(
     adapter: Any,
     fake_client: FakeClient,
     candidate: object,
+    candidate_request: AnalysisRequestContext,
     fps: int,
 ) -> None:
     upload = upload_active(adapter)
@@ -385,6 +563,7 @@ def test_candidate_request_uses_bounded_fps_and_duration_string_offsets(
     result = adapter.refine_candidate(
         upload,
         candidate,
+        candidate_request,
         fps=fps,
         prompt_version="candidate-v1",
     )
@@ -404,6 +583,7 @@ def test_candidate_prompt_is_versioned_and_bounds_speech_meaning(
     adapter: Any,
     fake_client: FakeClient,
     candidate: object,
+    candidate_request: AnalysisRequestContext,
 ) -> None:
     upload = upload_active(adapter)
     fake_client.models.responses.append(queued_response("refinement-response.json"))
@@ -411,6 +591,7 @@ def test_candidate_prompt_is_versioned_and_bounds_speech_meaning(
     adapter.refine_candidate(
         upload,
         candidate,
+        candidate_request,
         fps=3,
         prompt_version="candidate-v1",
     )
@@ -419,6 +600,8 @@ def test_candidate_prompt_is_versioned_and_bounds_speech_meaning(
     for required in (
         "mode: candidate",
         "prompt_version: candidate-v1",
+        "reservation_id: reservation-candidate-1",
+        "job_id: job-1",
         "chunk_id: chunk-1",
         "candidate_id: candidate-1",
         "interval: [1, 3.5] seconds",
@@ -438,6 +621,8 @@ def test_unknown_prompt_version_is_rejected_before_generation(
     fake_client: FakeClient,
     broad_chunk: object,
     candidate: object,
+    broad_request: AnalysisRequestContext,
+    candidate_request: AnalysisRequestContext,
     operation: str,
     prompt_version: str,
 ) -> None:
@@ -445,11 +630,14 @@ def test_unknown_prompt_version_is_rejected_before_generation(
 
     with pytest.raises(VideoEditorError) as caught:
         if operation == "broad":
-            adapter.broad_scan(upload, broad_chunk, prompt_version=prompt_version)
+            adapter.broad_scan(
+                upload, broad_chunk, broad_request, prompt_version=prompt_version
+            )
         else:
             adapter.refine_candidate(
                 upload,
                 candidate,
+                candidate_request,
                 fps=3,
                 prompt_version=prompt_version,
             )
@@ -458,10 +646,29 @@ def test_unknown_prompt_version_is_rejected_before_generation(
     assert fake_client.models.calls == 0
 
 
+def test_generation_refuses_missing_or_mismatched_reservation_before_provider_call(
+    adapter: Any,
+    fake_client: FakeClient,
+    broad_chunk: object,
+    broad_request: AnalysisRequestContext,
+) -> None:
+    upload = upload_active(adapter)
+    mismatched = broad_request.model_copy(update={"chunk_id": "other-chunk"})
+
+    with pytest.raises(TypeError):
+        adapter.broad_scan(upload, broad_chunk, prompt_version="broad-v1")
+    with pytest.raises(VideoEditorError) as caught:
+        adapter.broad_scan(upload, broad_chunk, mismatched, prompt_version="broad-v1")
+
+    assert caught.value.code == "reservation_identity_mismatch"
+    assert fake_client.models.calls == 0
+
+
 def test_semantic_response_failure_receives_one_repair_only(
     adapter: Any,
     fake_client: FakeClient,
     broad_chunk: object,
+    broad_request: AnalysisRequestContext,
 ) -> None:
     upload = upload_active(adapter)
     fake_client.models.responses.extend(
@@ -472,7 +679,9 @@ def test_semantic_response_failure_receives_one_repair_only(
     )
 
     with pytest.raises(VideoEditorError, match="chunk|timestamp") as caught:
-        adapter.broad_scan(upload, broad_chunk, prompt_version="broad-v1")
+        adapter.broad_scan(
+            upload, broad_chunk, broad_request, prompt_version="broad-v1"
+        )
 
     assert caught.value.code == "provider_response_invalid"
     assert fake_client.models.calls == 2
@@ -533,6 +742,7 @@ def test_retry_policy_retries_only_transient_failures(
     adapter: Any,
     fake_client: FakeClient,
     broad_chunk: object,
+    broad_request: AnalysisRequestContext,
     error: BaseException,
     expected_code: str,
     expected_calls: int,
@@ -541,7 +751,9 @@ def test_retry_policy_retries_only_transient_failures(
     fake_client.models.responses.extend([error] * expected_calls)
 
     with pytest.raises(VideoEditorError) as caught:
-        adapter.broad_scan(upload, broad_chunk, prompt_version="broad-v1")
+        adapter.broad_scan(
+            upload, broad_chunk, broad_request, prompt_version="broad-v1"
+        )
 
     assert caught.value.code == expected_code
     assert fake_client.models.calls == expected_calls
@@ -650,10 +862,42 @@ def test_provider_response_requires_decimal_timestamps_as_json_strings(
     assert BroadScanResponse.model_validate(payload).scenes[0].start == Decimal(0)
 
 
+def test_total_generation_attempt_cap_includes_transient_retry_and_repair(
+    adapter: Any,
+    fake_client: FakeClient,
+    broad_chunk: object,
+    broad_request: AnalysisRequestContext,
+) -> None:
+    transient = errors.ServerError(503, {"error": {"message": "unavailable"}})
+    fake_client.models.responses.extend(
+        [
+            transient,
+            ParsedResponse(
+                parsed={"schema_version": "broad-v1"},
+                response_id="request-malformed",
+            ),
+            queued_response("broad-response.json"),
+        ]
+    )
+    upload = upload_active(adapter)
+
+    result = adapter.broad_scan(
+        upload, broad_chunk, broad_request, prompt_version="broad-v1"
+    )
+
+    assert fake_client.models.calls == 3
+    assert result.usage.request_ids == ("request-malformed", "request-123")
+    assert result.usage.prompt_tokens == 22
+    assert result.usage.output_tokens == 34
+    assert result.usage.total_tokens == 56
+    assert result.usage.actual_cost_usd == Decimal("0.000090")
+
+
 def test_malformed_structured_response_receives_one_schema_repair_only(
     adapter: Any,
     fake_client: FakeClient,
     broad_chunk: object,
+    broad_request: AnalysisRequestContext,
 ) -> None:
     upload = upload_active(adapter)
     fake_client.models.responses.extend(
@@ -663,7 +907,9 @@ def test_malformed_structured_response_receives_one_schema_repair_only(
         ]
     )
 
-    result = adapter.broad_scan(upload, broad_chunk, prompt_version="broad-v1")
+    result = adapter.broad_scan(
+        upload, broad_chunk, broad_request, prompt_version="broad-v1"
+    )
 
     assert result.response.chunk_id == "chunk-1"
     assert fake_client.models.calls == 2
@@ -673,22 +919,125 @@ def test_malformed_structured_response_receives_one_schema_repair_only(
     )
 
 
+def test_terminal_provider_error_exposes_aggregate_returned_usage(
+    adapter: Any,
+    fake_client: FakeClient,
+    broad_chunk: object,
+    broad_request: AnalysisRequestContext,
+) -> None:
+    returned = ParsedResponse(
+        parsed=None,
+        response_id="request-failed",
+    )
+    failure = errors.ClientError(400, {"error": {"message": "invalid request"}})
+    failure.response = returned
+    fake_client.models.responses.append(failure)
+    upload = upload_active(adapter)
+
+    with pytest.raises(VideoEditorError) as caught:
+        adapter.broad_scan(
+            upload, broad_chunk, broad_request, prompt_version="broad-v1"
+        )
+
+    usage = json.loads(caught.value.safe_details["usage"])
+    assert usage["reservation_id"] == "reservation-broad-1"
+    assert usage["request_ids"] == ["request-failed"]
+    assert usage["actual_cost_usd"] == "0.000045"
+
+
+def test_live_contract_preflight_rejects_before_upload(
+    fake_client: FakeClient,
+    broad_chunk: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert GeminiAdapter is not None
+    authorization = AuthorizedUpload("manifest-1", io.BytesIO(b"proxy"))
+    expensive = ModelPricing(
+        model="gemini-2.5-flash",
+        media_input_usd_per_million_tokens=Decimal(10000),
+        text_input_usd_per_million_tokens=Decimal(10000),
+        output_usd_per_million_tokens=Decimal(10000),
+        source_url="https://example.invalid/expensive-test-pricing",
+        effective_date=date(2026, 9, 28),
+    )
+
+    def fail_before_upload(reason: str) -> None:
+        raise VideoEditorError(
+            ErrorCategory.BUDGET,
+            reason,
+            code="live_preflight_exceeded",
+        )
+
+    monkeypatch.setattr(pytest, "skip", fail_before_upload)
+    maximum = GeminiAdapter.estimate_broad_request_maximum(
+        authorization,
+        broad_chunk,
+        expensive,
+    )
+
+    with pytest.raises(VideoEditorError, match="exceeds USD 0.01"):
+        if maximum > Decimal("0.01"):
+            pytest.skip("computed live request maximum exceeds USD 0.01")
+        GeminiAdapter(fake_client, pricing=expensive).upload(authorization)
+
+    assert fake_client.files.upload_calls == 0
+
+
+def test_remote_upload_cleanup_runs_from_finally_on_analysis_failure(
+    adapter: Any,
+    fake_client: FakeClient,
+    broad_chunk: object,
+    broad_request: AnalysisRequestContext,
+) -> None:
+    fake_client.models.responses.append(
+        errors.ClientError(400, {"error": {"message": "invalid request"}})
+    )
+    upload = upload_active(adapter)
+
+    with pytest.raises(VideoEditorError):
+        try:
+            adapter.broad_scan(
+                upload, broad_chunk, broad_request, prompt_version="broad-v1"
+            )
+        finally:
+            adapter.delete_upload(upload)
+
+    assert fake_client.files.deleted == ["files/proxy-1"]
+
+
 def test_usage_payload_preserves_request_id_and_redacts_key_from_repr_and_errors(
     adapter: Any,
     fake_client: FakeClient,
     broad_chunk: object,
+    broad_request: AnalysisRequestContext,
 ) -> None:
     upload = upload_active(adapter)
     fake_client.models.responses.append(queued_response("broad-response.json"))
 
-    result = adapter.broad_scan(upload, broad_chunk, prompt_version="broad-v1")
+    result = adapter.broad_scan(
+        upload, broad_chunk, broad_request, prompt_version="broad-v1"
+    )
     payload = result.usage.safe_payload()
 
     assert payload == {
-        "request_id": "request-123",
+        "reservation_id": "reservation-broad-1",
+        "attempts": [
+            {
+                "request_id": "request-123",
+                "prompt_tokens": 11,
+                "media_input_tokens": 7,
+                "text_input_tokens": 4,
+                "output_tokens": 17,
+                "total_tokens": 28,
+            }
+        ],
+        "request_ids": ["request-123"],
         "prompt_tokens": 11,
+        "media_input_tokens": 7,
+        "text_input_tokens": 4,
         "output_tokens": 17,
         "total_tokens": 28,
+        "actual_cost_usd": "0.000045",
     }
     assert SECRET not in repr(adapter)
     sdk_error = errors.ClientError(
@@ -697,7 +1046,9 @@ def test_usage_payload_preserves_request_id_and_redacts_key_from_repr_and_errors
     )
     fake_client.models.responses.append(sdk_error)
     with pytest.raises(VideoEditorError) as caught:
-        adapter.broad_scan(upload, broad_chunk, prompt_version="broad-v1")
+        adapter.broad_scan(
+            upload, broad_chunk, broad_request, prompt_version="broad-v1"
+        )
     serialized = {
         "category": caught.value.category.value,
         "code": caught.value.code,
@@ -718,21 +1069,72 @@ def test_usage_payload_preserves_request_id_and_redacts_key_from_repr_and_errors
     not os.getenv("RUN_GEMINI_LIVE_TESTS"),
     reason="explicit opt-in required; default suite is offline",
 )
-def test_live_broad_scan_preflights_maximum_cost_before_upload(
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="local FFmpeg and ffprobe required",
+)
+def test_live_broad_scan_reserves_settles_and_deletes_registered_proxy(
     gemini_contract: None,
-    upload_authorization: AuthorizedUpload,
-    broad_chunk: object,
+    tmp_path: Path,
 ) -> None:
     assert GeminiAdapter is not None
-    maximum = GeminiAdapter.estimate_broad_request_maximum(
-        upload_authorization,
-        broad_chunk,
-    )
-    assert maximum <= Decimal("0.01")
+    pricing = _test_pricing()
+    paths = _paths(tmp_path)
+    with JobStore(paths.state_dir / "live-jobs.db") as store:
+        job_id = store.create_job({"contract": "gemini-live"}, {})
+        manifest, chunk = _register_tiny_proxy(tmp_path, store, job_id=job_id)
+        authorization = validate_upload_candidate(
+            manifest.manifest_id,
+            job_id,
+            store,
+            paths,
+        )
+        maximum = GeminiAdapter.estimate_broad_request_maximum(
+            authorization,
+            chunk,
+            pricing,
+        )
+        if maximum > Decimal("0.01"):
+            authorization.close()
+            pytest.skip("computed live request maximum exceeds USD 0.01")
+        assert maximum <= Decimal("0.01")
 
-    adapter = GeminiAdapter.from_environment(maximum_request_cost_usd=maximum)
-    upload = adapter.upload(upload_authorization)
-    result = adapter.broad_scan(upload, broad_chunk, prompt_version="broad-v1")
-
-    assert result.response.chunk_id == "chunk-1"
-    assert result.usage.actual_cost_usd <= maximum
+        store.initialize_budget(job_id, Decimal("0.01"))
+        reservation_id = "gemini-live-broad-1"
+        reserved = store.reserve_request(
+            RequestReservation(
+                request_id=reservation_id,
+                job_id=job_id,
+                cache_key=f"gemini-live:{manifest.manifest_id}:{manifest.chunk_id}",
+                mode="broad",
+                maximum_cost_usd=maximum,
+            )
+        )
+        assert reserved == reservation_id
+        adapter = GeminiAdapter.from_environment(
+            maximum_request_cost_usd=maximum,
+            pricing=pricing,
+        )
+        upload = adapter.upload(authorization)
+        try:
+            store.mark_request_dispatched(reservation_id)
+            result = adapter.broad_scan(
+                upload,
+                chunk,
+                AnalysisRequestContext(
+                    reservation_id=reservation_id,
+                    job_id=job_id,
+                    manifest_id=manifest.manifest_id,
+                    mode="broad",
+                    chunk_id=manifest.chunk_id,
+                ),
+                prompt_version="broad-v1",
+            )
+            actual_cost = result.usage.actual_cost_usd
+            assert actual_cost is not None
+            assert actual_cost <= maximum
+            store.settle_request(reservation_id, actual_cost)
+            assert store.budget_state(job_id).spent_usd == actual_cost
+            assert result.response.chunk_id == manifest.chunk_id
+        finally:
+            adapter.delete_upload(upload)

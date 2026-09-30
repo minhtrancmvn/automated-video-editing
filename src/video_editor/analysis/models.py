@@ -287,23 +287,51 @@ class RetryPolicy(AnalysisModel):
     base_delay_seconds: FiniteDecimal = Field(default=Decimal(1), ge=0)
 
 
-class ProviderUsage(AnalysisModel):
-    """Safe provider request usage metadata."""
+class AnalysisRequestContext(AnalysisModel):
+    """Persisted reservation identity required for provider generation."""
+
+    reservation_id: NonEmptyString
+    job_id: NonEmptyString
+    manifest_id: NonEmptyString
+    mode: Literal["broad", "candidate"]
+    chunk_id: NonEmptyString
+    candidate_id: NonEmptyString | None = None
+
+    @model_validator(mode="after")
+    def validate_mode_identity(self) -> Self:
+        """Require candidate identity exactly for candidate requests."""
+        if (self.mode == "candidate") != (self.candidate_id is not None):
+            raise ValueError("candidate identity must match analysis mode")
+        return self
+
+
+class ProviderAttemptUsage(AnalysisModel):
+    """Verified usage from one billable provider generation attempt."""
 
     request_id: NonEmptyString
     prompt_tokens: int = Field(ge=0)
+    media_input_tokens: int = Field(ge=0)
+    text_input_tokens: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
     total_tokens: int = Field(ge=0)
-    actual_cost_usd: FiniteDecimal = Field(default=Decimal(0), ge=0)
 
-    def safe_payload(self) -> dict[str, str | int]:
-        """Return persistence-safe usage fields without credentials or client data."""
-        return {
-            "request_id": self.request_id,
-            "prompt_tokens": self.prompt_tokens,
-            "output_tokens": self.output_tokens,
-            "total_tokens": self.total_tokens,
-        }
+
+class ProviderUsage(AnalysisModel):
+    """Aggregate verified usage for every returned generation response."""
+
+    reservation_id: NonEmptyString
+    attempts: tuple[ProviderAttemptUsage, ...] = Field(min_length=1)
+    request_ids: tuple[NonEmptyString, ...]
+    prompt_tokens: int = Field(ge=0)
+    media_input_tokens: int = Field(ge=0)
+    text_input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    total_tokens: int = Field(ge=0)
+    actual_cost_usd: FiniteDecimal | None = Field(default=None, ge=0)
+
+    def safe_payload(self) -> dict[str, object]:
+        """Return persistence-safe aggregate usage without secret data."""
+        return self.model_dump(mode="json")
 
 
 class TimeRange(AnalysisModel):
@@ -390,21 +418,23 @@ class AnalysisProvider(Protocol):
         self,
         upload: UploadedFile,
         chunk: AnalysisChunk,
+        request: AnalysisRequestContext,
         *,
         prompt_version: str,
     ) -> ProviderResult[BroadScanResponse]:
-        """Analyze one broad proxy interval."""
+        """Analyze one broad proxy interval under a persisted reservation."""
         ...
 
     def refine_candidate(
         self,
         upload: UploadedFile,
         candidate: CandidateWindow,
+        request: AnalysisRequestContext,
         fps: int,
         *,
         prompt_version: str,
     ) -> ProviderResult[CandidateRefinementResponse]:
-        """Analyze one candidate at approved sampling rate."""
+        """Analyze one candidate under a persisted reservation."""
         ...
 
     def delete_upload(self, upload: UploadedFile) -> None:

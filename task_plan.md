@@ -1,41 +1,34 @@
-# Task Plan: Real HERO12 Benchmark Gate
+# Task Plan: Task 6 Fix Round 1B
 
 ## Goal
-Run the documented Phase 1 benchmark against authorized GoPro footage, preserve verifiable evidence, and report compatibility limits and discrepancies without modifying source media.
+Apply specified Task 6 commits, fix reservation identity, aggregate attempt/usage/cost accounting, and live-test safety with observed RED-GREEN evidence.
 
 ## Phases
-- [x] Phase 1: Confirm authorization, input batch, storage roots, and execution boundary
-- [x] Phase 2: Capture source hashes and camera/system/storage metadata
-- [x] Phase 3: Run inspection and full workflow benchmark with timing evidence
-- [x] Phase 4: Validate outputs, reports, chronology, source integrity, local-only behavior, and same-job artifact reuse
-- [x] Phase 5: Write benchmark record and identify follow-up work
-- [x] Phase 6: Run final scoped verification and deliver results
+- [x] Phase 1: Move worktree branch to feature HEAD and cherry-pick required commits
+- [x] Phase 2: Read review, brief, design, report, and inspect affected code/tests
+- [x] Phase 3: Run GitNexus impact checks and focused RED tests
+- [x] Phase 4: Implement focused fixes and offline tests
+- [x] Phase 5: Run required focused/full offline verification, type/lint/format/build/diff/GitNexus
+- [x] Phase 6: Append report, commit, and deliver evidence
 
 ## Key Questions
-1. Can all 18 authorized GoPro MP4 files be inspected and processed successfully?
-2. Do generated horizontal and vertical outputs satisfy dimensions, duration, readability, plan provenance, and crop requirements?
-3. Does the run preserve original source hashes and report zero cloud usage?
-4. Do filename chronology and chapter/session ordering agree with available source evidence?
-5. How do measured wall time and disk growth compare with reported estimates?
-6. Which discrepancies block a scoped HERO12 compatibility claim?
+1. Which analysis interfaces and Gemini adapter paths currently allow dispatch without reservation context?
+2. How are retries, schema repair, usage, request IDs, and costs currently represented?
+3. Which Task 2 pricing functions can calculate aggregate Gemini cost without duplicate catalogs?
+4. How must live test ordering guarantee preflight/reservation before upload and cleanup in `finally`?
 
 ## Decisions Made
-- Use branch `test/hero12-benchmark` because benchmark records change repository artifacts.
-- Treat `/Volumes/microSD/DCIM/100GOPRO` as the explicitly authorized 18-file input batch.
-- Restrict writes to configured `/Volumes/microSD/video-editor/` roots and local benchmark evidence files.
-- Keep source MP4 files immutable and compare hashes before and after processing.
-- Exclude SSD disconnect/unmount testing from this run because it can disrupt active work and needs separate approval.
-- Do not claim general HERO12 compatibility; any pass applies only to the tested batch and recorded conditions.
-- Keep the configured 10 GiB storage reserve intact; do not force duplicate proxy generation when capacity is insufficient.
-- Reuse and validate completed same-batch job `d0b50171-a0e0-41dd-a721-08daddbdfac7`: all six stages are complete, its inspect fingerprint matches the benchmark jobs, and its cache/plans/renders/reports exist. This is safer than deleting its 9.8 GiB cache, which would still leave insufficient room for a new run.
+- No subagents, per user request.
+- Do not run `gemini_live`; run offline suites with `-m "not gemini_live"`.
+- Preserve prior 1A security changes and keep provider implementation Gemini-only.
+- Touch budget/pricing/database only if necessary and only after mandatory impact analysis.
 
 ## Errors Encountered
-- Initial relative `microSD` directory probe failed because the configured media is mounted at `/Volumes/microSD`; corrected subsequent probes to the absolute configured volume path.
-- Full-run storage calculation found a 4.674 GiB shortfall after the required 10 GiB reserve; preserve the reserve and pause full rendering rather than forcing execution.
-- Hash-completion waiters matched their own `pgrep -f` command text and waited indefinitely after hashing completed; stopped those waiters and switched to direct artifact/process verification before starting inspection.
-- First inspection wrapper exited before writing its completion bookkeeping despite a completed inspection stage and valid 18-source stdout payload; identical direct reproduction exited 0, so record this as a non-reproducible wrapper anomaly rather than an application inspection failure.
-- Retry check found `GX011485.MP4` temporarily missing from the authorized input directory, reducing the batch from 18 files to 17; it was restored and its SHA-256 matched the original manifest exactly.
-- Clip-order evidence script initially used `source_id` for plan source records, but persisted plans use `id`; corrected the evidence-only script and generated the expected 18-clip sequence.
+- Worktree began at `a6aef56`, not requested `9d9ef30`; reset safely after preserving plan, then cherry-picked required commits.
+- First RED run failed collection because `AnalysisRequestContext` did not exist, proving reservation contract absence.
+- Initial generation retry refactor exposed stale error context and one indentation regression; fixed by mapping outside handler scope and reran focused suite.
+- First computed media-token test mixed float FPS with Decimal duration; converted FPS through decimal text and reran focused suite.
+- Full-project Ruff format check targets Markdown code fences in the implementation plan; restored unrelated plan formatting and verified `src tests` formatting separately.
 
 ## Status
-**Complete for scoped batch** - Existing completed same-batch job passed inspection, proxy, planning, render, validation, reporting, source-integrity, visual frame, and same-job reuse checks. Four benchmark limitations remain documented: firmware/settings, manual chronology confirmation, independent peak-disk sampling, and disconnected-volume recovery.
+**Complete** - Offline gates, build, report, and GitNexus scope recorded; live test not run.

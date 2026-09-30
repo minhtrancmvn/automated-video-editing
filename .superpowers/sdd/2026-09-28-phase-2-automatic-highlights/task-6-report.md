@@ -190,3 +190,55 @@ $ uv run ruff format --check . --config pyproject.toml
 - Final package build completed: source distribution and wheel built successfully; `git diff --check` exited 0.
 - Final GitNexus working-tree scope: 4 changed files, 0 changed indexed symbols, 0 affected processes, risk `low`. Branch-vs-main compare: 37 files / 108 cumulative feature symbols, 0 affected processes, risk `low`.
 - Budget reservation and live-operation safety remain interface-only for round 1B, per scope.
+
+# Task 6 Fix Round 1B Report
+
+## Recovery boundary
+
+- Reset isolated worktree to requested feature checkpoint `9d9ef30`.
+- Cherry-picked `89beb01`, `48d8194`, and `f823376` in order as `8b87f13`, `d02b8df`, and `1d34eb7`.
+- No subagents, network calls, credentials, live Gemini tests, Anthropic code, budget/pricing/database production edits, or source uploads.
+
+## GitNexus impact
+
+GitNexus index did not contain new Task 6 adapter/model/test symbols. Impact checks for reservation, generation, aggregation, maximum-cost, and live-test symbols returned zero direct callers, zero affected processes, and risk `UNKNOWN`; no HIGH or CRITICAL result. Final unstaged change detection reported four changed files, zero affected indexed processes, and risk `low`. Branch-versus-`main` comparison reported cumulative feature scope of 38 files / 114 symbols, zero affected processes, and risk `low`.
+
+## Fixes
+
+- Added provider-neutral `AnalysisRequestContext` with reservation, job, manifest, mode, chunk, and optional candidate identities. Broad and candidate methods require this context and reject identity mismatch before model generation.
+- Included reservation and job identifiers in Gemini request prompts. Missing context fails at the interface; mismatched context produces `reservation_identity_mismatch` with zero generation calls.
+- Enforced one `RetryPolicy.max_attempts` generation-call budget across transient retries and at most one structural/semantic repair. Provider calls without returned usage still consume budget.
+- Added per-attempt and aggregate usage records. Request IDs and all returned token metadata accumulate across malformed, repair, transient-error-response, and successful calls.
+- Reused Task 2 `ModelPricing` and `maximum_request_cost` for aggregate actual cost. Aggregate settlement cost rounds conservatively to whole microUSD for `JobStore.settle_request`; no duplicate pricing table or hardcoded zero cost.
+- Terminal provider failures expose sanitized aggregate returned usage in safe error details when SDK supplies a response, without retaining SDK error context or credentials.
+- Replaced hardcoded live preflight amount with token-ceiling arithmetic over media duration, prompt plus schema bytes, and bounded output tokens using injected pinned pricing.
+- Rewrote live contract around a tiny real locally generated and registered Task 4 proxy, `validate_upload_candidate`, computed maximum `<= USD 0.01`, `JobStore` reservation before upload, aggregate actual settlement, and remote deletion in `finally`.
+- Added offline fake proof for preflight stopping before upload and `finally` cleanup on analysis failure. Live marker remains explicit opt-in and was not run.
+
+## Verification
+
+```text
+$ uv run pytest tests/unit/test_gemini.py -q -m 'not gemini_live'
+41 passed, 1 deselected in 0.52s
+
+$ uv run pytest -v -m 'not gemini_live'
+631 passed, 1 deselected in 51.20s
+
+$ uv run mypy src
+Success: no issues found in 29 source files
+
+$ uv run ruff check . --config pyproject.toml
+All checks passed!
+
+$ uv run ruff format --check src tests --config pyproject.toml
+55 files already formatted
+
+$ uv build
+Successfully built dist/video_editor-0.1.0.tar.gz
+Successfully built dist/video_editor-0.1.0-py3-none-any.whl
+
+$ git diff --check
+<no output; exit 0>
+```
+
+Full-project `ruff format --check .` still reports the checked-in implementation-plan Markdown would be reformatted. Formatter output was restored to avoid unrelated plan churn; all source and test files pass format check.

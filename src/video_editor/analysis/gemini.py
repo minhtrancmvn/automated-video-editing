@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 from io import IOBase
 from typing import Any, TypeVar
 
@@ -17,20 +18,26 @@ from pydantic import ValidationError
 from video_editor.analysis.models import (
     AnalysisChunk,
     AnalysisProvider,
+    AnalysisRequestContext,
     BroadScanResponse,
     CandidateRefinementResponse,
     CandidateWindow,
+    ProviderAttemptUsage,
     ProviderResult,
     ProviderUsage,
     RetryPolicy,
     UploadedFile,
 )
+from video_editor.analysis.pricing import ModelPricing, maximum_request_cost
 from video_editor.analysis.proxy_chunks import AuthorizedUpload
 from video_editor.errors import ErrorCategory, VideoEditorError
 
 MODEL_ID = "gemini-2.5-flash"
 _BROAD_FPS = 0.5
 _RESPONSE_MIME_TYPE = "application/json"
+_LIVE_BROAD_OUTPUT_TOKEN_MAXIMUM = 512
+_LIVE_PROMPT_TOKEN_BYTES = 4
+_MICRO_USD = Decimal(1_000_000)
 _ResponseT = TypeVar("_ResponseT", BroadScanResponse, CandidateRefinementResponse)
 _ValueT = TypeVar("_ValueT")
 
@@ -46,6 +53,7 @@ class GeminiAdapter:
         retry_policy: RetryPolicy | None = None,
         sleeper: Callable[[float], None] = time.sleep,
         maximum_request_cost_usd: Decimal | None = None,
+        pricing: ModelPricing | None = None,
     ) -> None:
         """Create adapter with injected client or runtime-only API key."""
         if client is None and not api_key:
@@ -58,6 +66,7 @@ class GeminiAdapter:
         self._retry_policy = retry_policy or RetryPolicy()
         self._sleeper = sleeper
         self._maximum_request_cost_usd = maximum_request_cost_usd
+        self._pricing = pricing
 
     def __repr__(self) -> str:
         """Return safe adapter representation without client or key data."""
@@ -65,21 +74,71 @@ class GeminiAdapter:
 
     @classmethod
     def from_environment(
-        cls, *, maximum_request_cost_usd: Decimal | None = None
+        cls,
+        *,
+        maximum_request_cost_usd: Decimal | None = None,
+        pricing: ModelPricing | None = None,
     ) -> GeminiAdapter:
         """Create adapter from runtime environment without retaining its key."""
         return cls(
             api_key=os.getenv("GEMINI_API_KEY"),
             maximum_request_cost_usd=maximum_request_cost_usd,
+            pricing=pricing,
         )
 
     @staticmethod
     def estimate_broad_request_maximum(
-        authorization: AuthorizedUpload, chunk: AnalysisChunk
+        authorization: AuthorizedUpload,
+        chunk: AnalysisChunk,
+        pricing: ModelPricing,
+        *,
+        prompt_version: str = "broad-v1",
     ) -> Decimal:
-        """Return conservative live-contract ceiling for one tiny broad request."""
-        del authorization, chunk
-        return Decimal("0.01")
+        """Calculate conservative maximum cost for one tiny broad live request."""
+        duration = chunk.proxy_end - chunk.proxy_start
+        if duration <= 0 or not duration.is_finite():
+            raise ValueError("chunk duration must be finite and positive")
+        prompt = GeminiAdapter._prompt(
+            prompt_version,
+            request=AnalysisRequestContext(
+                reservation_id="live-reservation",
+                job_id="live-job",
+                manifest_id=authorization.manifest_id,
+                mode="broad",
+                chunk_id=chunk.chunk_id,
+            ),
+            chunk_id=chunk.chunk_id,
+            candidate_id=None,
+            start=chunk.proxy_start,
+            end=chunk.proxy_end,
+        )
+        prompt_bytes = len(prompt.encode("utf-8")) + len(
+            json.dumps(BroadScanResponse.model_json_schema(), sort_keys=True).encode(
+                "utf-8"
+            )
+        )
+        prompt_tokens = max(
+            1,
+            int(
+                (Decimal(prompt_bytes) / _LIVE_PROMPT_TOKEN_BYTES).to_integral_value(
+                    rounding=ROUND_CEILING
+                )
+            ),
+        )
+        media_tokens = int(
+            (Decimal(str(_BROAD_FPS)) * duration).to_integral_value(
+                rounding=ROUND_CEILING
+            )
+        )
+        maximum = maximum_request_cost(
+            pricing,
+            media_tokens,
+            prompt_tokens,
+            _LIVE_BROAD_OUTPUT_TOKEN_MAXIMUM,
+        )
+        return (maximum * _MICRO_USD).to_integral_value(
+            rounding=ROUND_CEILING
+        ) / _MICRO_USD
 
     def upload(self, authorization: AuthorizedUpload) -> UploadedFile:
         """Upload exact bytes from one validated upload authorization."""
@@ -130,12 +189,14 @@ class GeminiAdapter:
         self,
         upload: UploadedFile,
         chunk: AnalysisChunk,
+        request: AnalysisRequestContext,
         *,
         prompt_version: str,
     ) -> ProviderResult[BroadScanResponse]:
         """Analyze one whole proxy chunk at static 0.5 FPS."""
         return self._analyze(
             upload=upload,
+            request=request,
             chunk_id=chunk.chunk_id,
             start=chunk.proxy_start,
             end=chunk.proxy_end,
@@ -148,6 +209,7 @@ class GeminiAdapter:
         self,
         upload: UploadedFile,
         candidate: CandidateWindow,
+        request: AnalysisRequestContext,
         fps: int,
         *,
         prompt_version: str,
@@ -161,6 +223,7 @@ class GeminiAdapter:
             )
         return self._analyze(
             upload=upload,
+            request=request,
             chunk_id=candidate.chunk_id,
             candidate_id=candidate.candidate_id,
             start=candidate.start,
@@ -178,6 +241,7 @@ class GeminiAdapter:
         self,
         *,
         upload: UploadedFile,
+        request: AnalysisRequestContext,
         chunk_id: str,
         start: Decimal,
         end: Decimal,
@@ -186,8 +250,15 @@ class GeminiAdapter:
         response_model: type[_ResponseT],
         candidate_id: str | None = None,
     ) -> ProviderResult[_ResponseT]:
+        self._validate_request_context(
+            request,
+            upload=upload,
+            chunk_id=chunk_id,
+            candidate_id=candidate_id,
+        )
         prompt = self._prompt(
             prompt_version,
+            request=request,
             chunk_id=chunk_id,
             candidate_id=candidate_id,
             start=start,
@@ -206,10 +277,28 @@ class GeminiAdapter:
             response_mime_type=_RESPONSE_MIME_TYPE,
             response_schema=response_model,
         )
-        last_response: Any | None = None
-        for _ in range(2):
-            response = self._generate(part, prompt, config)
-            last_response = response
+        attempts: list[ProviderAttemptUsage] = []
+        remaining_attempts = self._retry_policy.max_attempts
+        repair_available = True
+        while remaining_attempts > 0:
+            response, generation_attempts, generation_calls, generation_error = (
+                self._generate(
+                    part,
+                    prompt,
+                    config,
+                    max_attempts=remaining_attempts,
+                )
+            )
+            attempts.extend(generation_attempts)
+            remaining_attempts -= generation_calls
+            if generation_error is not None:
+                raise self._provider_failure(
+                    generation_error,
+                    reservation_id=request.reservation_id,
+                    attempts=attempts,
+                )
+            if response is None:
+                raise self._invalid_response()
             try:
                 parsed = response_model.model_validate(response.parsed)
                 self._validate_response(
@@ -220,21 +309,56 @@ class GeminiAdapter:
                     end=end,
                 )
             except (ValidationError, TypeError, ValueError, VideoEditorError):
-                continue
-            return ProviderResult(response=parsed, usage=self._usage(response))
-        del last_response
+                if repair_available and remaining_attempts > 0:
+                    repair_available = False
+                    continue
+                raise self._invalid_response()
+            return ProviderResult(
+                response=parsed,
+                usage=self._aggregate_usage(request.reservation_id, attempts),
+            )
         raise self._invalid_response()
 
     def _generate(
-        self, part: types.Part, prompt: str, config: types.GenerateContentConfig
-    ) -> Any:
-        """Generate one response under shared bounded SDK retry policy."""
-        return self._retry(
-            lambda: self._client.models.generate_content(
-                model=MODEL_ID,
-                contents=[part, prompt],
-                config=config,
-            )
+        self,
+        part: types.Part,
+        prompt: str,
+        config: types.GenerateContentConfig,
+        *,
+        max_attempts: int,
+    ) -> tuple[Any | None, list[ProviderAttemptUsage], int, VideoEditorError | None]:
+        """Generate within one total attempt budget and retain returned usage."""
+        attempts: list[ProviderAttemptUsage] = []
+        for attempt in range(1, max_attempts + 1):
+            mapped: VideoEditorError | None = None
+            response: Any | None = None
+            try:
+                response = self._client.models.generate_content(
+                    model=MODEL_ID,
+                    contents=[part, prompt],
+                    config=config,
+                )
+            except Exception as error:  # noqa: BLE001 - SDK hierarchy is open-ended
+                returned_response = getattr(error, "response", None)
+                if returned_response is not None:
+                    attempts.append(self._attempt_usage(returned_response))
+                mapped = self._provider_error(error)
+            if mapped is not None:
+                if not self._is_retryable(mapped) or attempt == max_attempts:
+                    return None, attempts, attempt, mapped
+                self._sleep(attempt)
+                continue
+            attempts.append(self._attempt_usage(response))
+            return response, attempts, attempt, None
+        return (
+            None,
+            attempts,
+            max_attempts,
+            VideoEditorError(
+                ErrorCategory.PROVIDER,
+                "Gemini provider request failed",
+                code="provider_unavailable",
+            ),
         )
 
     def _retry(self, operation: Callable[[], _ValueT]) -> _ValueT:
@@ -255,6 +379,26 @@ class GeminiAdapter:
             "Gemini provider request failed",
             code="provider_unavailable",
         )
+
+    @staticmethod
+    def _validate_request_context(
+        request: AnalysisRequestContext,
+        *,
+        upload: UploadedFile,
+        chunk_id: str,
+        candidate_id: str | None,
+    ) -> None:
+        if (
+            request.manifest_id != upload.manifest_id
+            or request.chunk_id != chunk_id
+            or request.candidate_id != candidate_id
+            or request.mode != ("candidate" if candidate_id is not None else "broad")
+        ):
+            raise VideoEditorError(
+                ErrorCategory.BUDGET,
+                "Analysis request does not match its reservation identity",
+                code="reservation_identity_mismatch",
+            )
 
     @staticmethod
     def _validate_response(
@@ -287,19 +431,67 @@ class GeminiAdapter:
             raise GeminiAdapter._invalid_response()
 
     @staticmethod
-    def _usage(response: Any) -> ProviderUsage:
+    def _attempt_usage(response: Any) -> ProviderAttemptUsage:
         metadata = getattr(response, "usage_metadata", None)
-        return ProviderUsage(
+        details = getattr(metadata, "prompt_tokens_details", None) or ()
+        media_input_tokens = 0
+        for detail in details:
+            modality = getattr(detail, "modality", None)
+            modality_value = str(getattr(modality, "value", modality)).upper()
+            if modality_value in {"VIDEO", "AUDIO", "IMAGE"}:
+                media_input_tokens += int(getattr(detail, "token_count", 0) or 0)
+        prompt_tokens = int(getattr(metadata, "prompt_token_count", 0) or 0)
+        return ProviderAttemptUsage(
             request_id=str(getattr(response, "response_id", None) or "unknown"),
-            prompt_tokens=int(getattr(metadata, "prompt_token_count", 0) or 0),
+            prompt_tokens=prompt_tokens,
+            media_input_tokens=media_input_tokens,
+            text_input_tokens=max(0, prompt_tokens - media_input_tokens),
             output_tokens=int(getattr(metadata, "response_token_count", 0) or 0),
             total_tokens=int(getattr(metadata, "total_token_count", 0) or 0),
+        )
+
+    def _aggregate_usage(
+        self, reservation_id: str, attempts: list[ProviderAttemptUsage]
+    ) -> ProviderUsage:
+        actual_cost = (
+            None
+            if self._pricing is None
+            else sum(
+                (
+                    maximum_request_cost(
+                        self._pricing,
+                        attempt.media_input_tokens,
+                        attempt.text_input_tokens,
+                        attempt.output_tokens,
+                    )
+                    for attempt in attempts
+                ),
+                Decimal(0),
+            )
+        )
+        settled_cost = (
+            None
+            if actual_cost is None
+            else (actual_cost * _MICRO_USD).to_integral_value(rounding=ROUND_CEILING)
+            / _MICRO_USD
+        )
+        return ProviderUsage(
+            reservation_id=reservation_id,
+            attempts=tuple(attempts),
+            request_ids=tuple(attempt.request_id for attempt in attempts),
+            prompt_tokens=sum(attempt.prompt_tokens for attempt in attempts),
+            media_input_tokens=sum(attempt.media_input_tokens for attempt in attempts),
+            text_input_tokens=sum(attempt.text_input_tokens for attempt in attempts),
+            output_tokens=sum(attempt.output_tokens for attempt in attempts),
+            total_tokens=sum(attempt.total_tokens for attempt in attempts),
+            actual_cost_usd=settled_cost,
         )
 
     @staticmethod
     def _prompt(
         prompt_version: str,
         *,
+        request: AnalysisRequestContext,
         chunk_id: str,
         candidate_id: str | None,
         start: Decimal,
@@ -311,6 +503,8 @@ class GeminiAdapter:
                 (
                     "mode: broad",
                     "prompt_version: broad-v1",
+                    f"reservation_id: {request.reservation_id}",
+                    f"job_id: {request.job_id}",
                     f"chunk_id: {chunk_id}",
                     f"interval: {interval}",
                     "Return only JSON matching response schema.",
@@ -324,6 +518,8 @@ class GeminiAdapter:
                 (
                     "mode: candidate",
                     "prompt_version: candidate-v1",
+                    f"reservation_id: {request.reservation_id}",
+                    f"job_id: {request.job_id}",
                     f"chunk_id: {chunk_id}",
                     f"candidate_id: {candidate_id}",
                     f"interval: {interval}",
@@ -336,6 +532,23 @@ class GeminiAdapter:
             ErrorCategory.PROVIDER,
             "Unsupported Gemini prompt version",
             code="provider_invalid_request",
+        )
+
+    def _provider_failure(
+        self,
+        error: VideoEditorError,
+        *,
+        reservation_id: str,
+        attempts: list[ProviderAttemptUsage],
+    ) -> VideoEditorError:
+        if not attempts:
+            return error
+        usage = self._aggregate_usage(reservation_id, attempts)
+        return VideoEditorError(
+            error.category,
+            str(error),
+            code=error.code,
+            safe_details={"usage": json.dumps(usage.safe_payload(), sort_keys=True)},
         )
 
     @staticmethod
