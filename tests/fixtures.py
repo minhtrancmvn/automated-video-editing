@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import math
 import subprocess
+import wave
 from pathlib import Path
+
+import cv2
+import numpy as np
 
 
 def create_media_fixture(
@@ -39,3 +44,56 @@ def create_media_fixture(
     if completed.returncode != 0:
         raise RuntimeError(completed.stderr.strip() or "ffmpeg fixture creation failed")
     return path
+
+
+def create_segmentation_fixture(root: Path) -> tuple[Path, Path]:
+    """Create deterministic four-second proxy and mono PCM evidence fixture."""
+    root.mkdir(parents=True, exist_ok=True)
+    proxy = root / "segmentation-proxy.avi"
+    audio = root / "segmentation-audio.wav"
+    fps = 20
+    width = 160
+    height = 120
+    writer = cv2.VideoWriter(
+        str(proxy), cv2.VideoWriter_fourcc(*"MJPG"), fps, (width, height)
+    )
+    if not writer.isOpened():
+        raise RuntimeError("OpenCV fixture video writer failed")
+    for frame_index in range(4 * fps):
+        second = frame_index / fps
+        if second < 2:
+            frame = np.full((height, width, 3), (30, 80, 180), dtype=np.uint8)
+            if second >= 1:
+                x = 10 + int((second - 1) * 100)
+                cv2.rectangle(frame, (x, 45), (x + 24, 69), (240, 240, 240), -1)
+        else:
+            frame = np.full((height, width, 3), (40, 180, 40), dtype=np.uint8)
+            cv2.line(frame, (0, 0), (width - 1, height - 1), (200, 40, 200), 3)
+            cv2.line(frame, (0, height - 1), (width - 1, 0), (200, 40, 200), 3)
+            if second < 2.5:
+                frame = cv2.GaussianBlur(frame, (21, 21), 0)
+            elif second < 3:
+                frame.fill(255)
+            elif second < 3.5:
+                frame.fill(0)
+        writer.write(frame)
+    writer.release()
+
+    sample_rate = 16_000
+    samples: list[int] = []
+    for index in range(4 * sample_rate):
+        second = index / sample_rate
+        if second < 1:
+            value = 0
+        elif 2.75 <= second < 2.77:
+            value = 28_000
+        else:
+            value = int(8_000 * math.sin(2 * math.pi * 440 * second))
+        samples.append(value)
+    pcm = np.asarray(samples, dtype="<i2")
+    with wave.open(str(audio), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(sample_rate)
+        output.writeframes(pcm.tobytes())
+    return proxy, audio

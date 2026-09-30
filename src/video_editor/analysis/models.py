@@ -120,6 +120,58 @@ class AnalysisChunkData(AnalysisModel):
         return self
 
 
+class EvidenceRange(AnalysisModel):
+    """Proxy interval mapped exactly to its original source interval."""
+
+    start: FiniteDecimal = Field(ge=0)
+    end: FiniteDecimal = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_interval(self) -> Self:
+        """Reject empty or reversed evidence intervals."""
+        if self.end <= self.start:
+            raise ValueError("evidence range end must be greater than start")
+        return self
+
+
+class IntervalEvidence(AnalysisModel):
+    """Identified local evidence spanning one exact interval."""
+
+    evidence_id: NonEmptyString
+    proxy_range: EvidenceRange
+    source_range: SourceRange
+
+
+class ScoredEvidence(IntervalEvidence):
+    """Normalized local evidence score over one interval."""
+
+    score: float = Field(ge=0, le=1, allow_inf_nan=False)
+
+
+class LocalSegmentation(AnalysisModel):
+    """Deterministic source-mapped local media evidence."""
+
+    schema_version: int = Field(ge=1)
+    implementation_version: NonEmptyString
+    settings_hash: NonEmptyString
+    source_id: NonEmptyString
+    source_identity: NonEmptyString
+    proxy_settings_hash: NonEmptyString
+    proxy_tool_version: NonEmptyString
+    scenes: tuple[IntervalEvidence, ...]
+    silence_ranges: tuple[IntervalEvidence, ...]
+    speech_presence_ranges: tuple[IntervalEvidence, ...]
+    audio_energy: tuple[ScoredEvidence, ...]
+    audio_transients: tuple[ScoredEvidence, ...]
+    motion: tuple[ScoredEvidence, ...]
+    motion_continuity: tuple[ScoredEvidence, ...]
+    blur: tuple[ScoredEvidence, ...]
+    shake: tuple[ScoredEvidence, ...]
+    exposure: tuple[ScoredEvidence, ...]
+    obstruction: tuple[ScoredEvidence, ...]
+    candidate_windows: tuple[IntervalEvidence, ...]
+
+
 class AnalysisResultData(AnalysisModel):
     """Provider-neutral metadata for one normalized analysis result."""
 
