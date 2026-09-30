@@ -148,12 +148,31 @@ class GeminiAdapter:
             stream = authorization.stream
             if not isinstance(stream, IOBase):
                 raise TypeError("AuthorizedUpload stream must be an IOBase")
-            remote = self._retry(
-                lambda: self._client.files.upload(
+            try:
+                if not stream.seekable():
+                    raise OSError("stream is not seekable")
+                start_offset = stream.tell()
+                if (
+                    stream.seek(start_offset) != start_offset
+                    or stream.tell() != start_offset
+                ):
+                    raise OSError("stream did not preserve its authorized offset")
+            except (OSError, ValueError) as exc:
+                raise self._invalid_upload_stream() from exc
+
+            def upload_attempt() -> Any:
+                try:
+                    position = stream.seek(start_offset)
+                except (OSError, ValueError) as exc:
+                    raise self._invalid_upload_stream() from exc
+                if position != start_offset or stream.tell() != start_offset:
+                    raise self._invalid_upload_stream()
+                return self._client.files.upload(
                     file=stream,
                     config={"mime_type": "video/mp4"},
                 )
-            )
+
+            remote = self._retry(upload_attempt)
         return self._uploaded_file(remote, authorization.manifest_id)
 
     def wait_until_active(self, upload: UploadedFile) -> UploadedFile:
@@ -339,9 +358,7 @@ class GeminiAdapter:
                     config=config,
                 )
             except Exception as error:  # noqa: BLE001 - SDK hierarchy is open-ended
-                returned_response = getattr(error, "response", None)
-                if returned_response is not None:
-                    attempts.append(self._attempt_usage(returned_response))
+                attempts.append(self._unknown_attempt(error))
                 mapped = self._provider_error(error)
             if mapped is not None:
                 if not self._is_retryable(mapped) or attempt == max_attempts:
@@ -441,34 +458,60 @@ class GeminiAdapter:
             if modality_value in {"VIDEO", "AUDIO", "IMAGE"}:
                 media_input_tokens += int(getattr(detail, "token_count", 0) or 0)
         prompt_tokens = int(getattr(metadata, "prompt_token_count", 0) or 0)
+        candidates_tokens = int(getattr(metadata, "candidates_token_count", 0) or 0)
+        thoughts_tokens = int(getattr(metadata, "thoughts_token_count", 0) or 0)
         return ProviderAttemptUsage(
             request_id=str(getattr(response, "response_id", None) or "unknown"),
+            status="succeeded",
             prompt_tokens=prompt_tokens,
             media_input_tokens=media_input_tokens,
             text_input_tokens=max(0, prompt_tokens - media_input_tokens),
-            output_tokens=int(getattr(metadata, "response_token_count", 0) or 0),
+            candidates_tokens=candidates_tokens,
+            thoughts_tokens=thoughts_tokens,
+            output_tokens=candidates_tokens + thoughts_tokens,
             total_tokens=int(getattr(metadata, "total_token_count", 0) or 0),
+        )
+
+    @staticmethod
+    def _unknown_attempt(error: Exception) -> ProviderAttemptUsage:
+        response = getattr(error, "response", None)
+        request_id = "unknown"
+        if response is not None:
+            headers = getattr(response, "headers", None)
+            if headers is not None:
+                request_id = str(
+                    headers.get("x-request-id")
+                    or headers.get("x-goog-request-id")
+                    or "unknown"
+                )
+        return ProviderAttemptUsage(
+            request_id=request_id,
+            status="failed_unknown_billing",
         )
 
     def _aggregate_usage(
         self, reservation_id: str, attempts: list[ProviderAttemptUsage]
     ) -> ProviderUsage:
-        actual_cost = (
-            None
-            if self._pricing is None
-            else sum(
-                (
-                    maximum_request_cost(
-                        self._pricing,
-                        attempt.media_input_tokens,
-                        attempt.text_input_tokens,
-                        attempt.output_tokens,
-                    )
-                    for attempt in attempts
-                ),
-                Decimal(0),
-            )
-        )
+        actual_cost: Decimal | None = None
+        if self._pricing is not None:
+            actual_cost = Decimal(0)
+            for attempt in attempts:
+                media_tokens = attempt.media_input_tokens
+                text_tokens = attempt.text_input_tokens
+                output_tokens = attempt.output_tokens
+                if (
+                    attempt.status != "succeeded"
+                    or media_tokens is None
+                    or text_tokens is None
+                    or output_tokens is None
+                ):
+                    continue
+                actual_cost += maximum_request_cost(
+                    self._pricing,
+                    media_tokens,
+                    text_tokens,
+                    output_tokens,
+                )
         settled_cost = (
             None
             if actual_cost is None
@@ -479,11 +522,22 @@ class GeminiAdapter:
             reservation_id=reservation_id,
             attempts=tuple(attempts),
             request_ids=tuple(attempt.request_id for attempt in attempts),
-            prompt_tokens=sum(attempt.prompt_tokens for attempt in attempts),
-            media_input_tokens=sum(attempt.media_input_tokens for attempt in attempts),
-            text_input_tokens=sum(attempt.text_input_tokens for attempt in attempts),
-            output_tokens=sum(attempt.output_tokens for attempt in attempts),
-            total_tokens=sum(attempt.total_tokens for attempt in attempts),
+            prompt_tokens=sum(attempt.prompt_tokens or 0 for attempt in attempts),
+            media_input_tokens=sum(
+                attempt.media_input_tokens or 0 for attempt in attempts
+            ),
+            text_input_tokens=sum(
+                attempt.text_input_tokens or 0 for attempt in attempts
+            ),
+            candidates_tokens=sum(
+                attempt.candidates_tokens or 0 for attempt in attempts
+            ),
+            thoughts_tokens=sum(attempt.thoughts_tokens or 0 for attempt in attempts),
+            output_tokens=sum(attempt.output_tokens or 0 for attempt in attempts),
+            total_tokens=sum(attempt.total_tokens or 0 for attempt in attempts),
+            has_unknown_billing=any(
+                attempt.status == "failed_unknown_billing" for attempt in attempts
+            ),
             actual_cost_usd=settled_cost,
         )
 
@@ -612,6 +666,14 @@ class GeminiAdapter:
     def _sleep(self, attempt: int) -> None:
         delay = self._retry_policy.base_delay_seconds * (2 ** (attempt - 1))
         self._sleeper(float(delay))
+
+    @staticmethod
+    def _invalid_upload_stream() -> VideoEditorError:
+        return VideoEditorError(
+            ErrorCategory.PROVIDER,
+            "Authorized upload stream cannot be safely rewound",
+            code="provider_invalid_upload_stream",
+        )
 
     @staticmethod
     def _invalid_response() -> VideoEditorError:

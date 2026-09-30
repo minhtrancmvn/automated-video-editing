@@ -242,3 +242,65 @@ $ git diff --check
 ```
 
 Full-project `ruff format --check .` still reports the checked-in implementation-plan Markdown would be reformatted. Formatter output was restored to avoid unrelated plan churn; all source and test files pass format check.
+
+# Task 6 Fix Round 2A Report
+
+## Rereview result
+
+Read `task-6-rereview-1.md`: verdict was **Needs fix round 2. Block merge.** Round 2A scope was locked-SDK schema compatibility, upload rewind safety, real usage metadata, and explicit unknown-billing generation attempts. Persisted reservation proof and live lifecycle remain deferred to round 2B.
+
+## Recovery boundary
+
+- Started branch `feature/task6-fix-round-2a` from feature checkpoint `9d9ef30`.
+- Cherry-picked `89beb01`, `48d8194`, `f823376`, `3ee78cb`, and `eb13b07` in order. Resulting commits are `5d5310e`, `90e3ce9`, `42c8406`, `2d181d4`, and `6d1e6a3`.
+- No subagents, network calls, live Gemini tests, credential use, source uploads, persisted reservation changes, or live lifecycle changes.
+
+## Observed RED
+
+Locked `google-genai 1.75.0` rejected both Pydantic response models during `_GenerateContentConfig_to_mldev` request preparation because generated Decimal timestamp schemas contained unsupported `anyOf` numeric branches and `exclusiveMinimum`. Upload retry consumed complete bytes on first attempt and read `b""` on second attempt. Non-seekable and mispositioning streams did not fail closed. Real SDK usage metadata produced zero output because adapter read nonexistent `response_token_count`. Terminal `APIError` omitted attempt accounting because its HTTP `response` is not generated usage metadata.
+
+Direct RED command selected eight regression tests and produced `8 failed, 39 deselected` before production edits.
+
+## Fixes
+
+- Added `WithJsonSchema({"type": "string"})` to provider timestamps. Runtime parsing still requires JSON strings, converts through `Decimal`, rejects non-finite values, enforces non-negative/positive fields, validates interval order, and checks requested-range containment after parsing.
+- Added direct locked-SDK 1.75.0 request-transformer tests for broad and candidate schemas. Both transformed schemas contain string-only timestamps with no `anyOf` or `exclusiveMinimum`.
+- Upload now captures authorized starting offset, verifies seekability and exact positioning, seeks to that offset before every outer retry, and fails closed with `provider_invalid_upload_stream` before provider dispatch when rewind cannot be proven. Fake upload consumes bytes before raising; retry receives identical complete bytes from same open descriptor.
+- Replaced `response_token_count` with locked SDK `candidates_token_count`. Added separately exposed `thoughts_tokens`; Task 2 has one generated-output price bucket, so priced `output_tokens` conservatively includes candidates plus thoughts.
+- Replaced error-response usage inference with one `ProviderAttemptUsage` per generation call. Successful calls have `status="succeeded"` and real SDK metadata. Failed calls have `status="failed_unknown_billing"`, optional request ID from HTTP headers, and unknown token fields. Aggregate known cost excludes unknown fields while `has_unknown_billing=True` prevents callers from treating known cost as complete settlement evidence.
+- Fakes now use real `GenerateContentResponseUsageMetadata` and `ModalityTokenCount` SDK models. Real `httpx.Response` proves `APIError.response` is HTTP response only.
+
+## GitNexus
+
+Pre-edit impact checks for upload, generation, usage aggregation, attempt models, and timestamp models returned target missing from stale index, zero direct callers, zero affected processes, and risk `UNKNOWN`; no HIGH or CRITICAL warning. Final unstaged detection found four changed files, zero indexed changed symbols, zero affected processes, and `low` risk. Branch comparison against `main` found 37 cumulative feature files / 108 indexed symbols, zero affected processes, and `low` risk.
+
+## Verification
+
+```text
+$ uv run pytest tests/unit/test_gemini.py -v -m 'not gemini_live' -k 'locked_sdk or upload_retry_rewinds or upload_fails_closed or total_generation_attempt_cap or terminal_provider_error or usage_payload'
+8 passed, 39 deselected in 0.71s
+
+$ uv run pytest tests/unit/test_gemini.py -q -m 'not gemini_live'
+46 passed, 1 deselected in 0.63s
+
+$ uv run pytest -q -m 'not gemini_live'
+636 passed, 1 deselected, 1 warning in 47.78s
+
+$ uv run mypy src --ignore-missing-imports --show-error-codes
+Success: no issues found in 29 source files
+
+$ uv run ruff check . --config pyproject.toml
+All checks passed!
+
+$ uv run ruff format --check src/video_editor/analysis/gemini.py src/video_editor/analysis/models.py tests/unit/test_gemini.py --config pyproject.toml
+3 files already formatted
+
+$ uv build
+Successfully built dist/video_editor-0.1.0.tar.gz
+Successfully built dist/video_editor-0.1.0-py3-none-any.whl
+
+$ git diff --check
+<no output; exit 0>
+```
+
+`bandit` is not installed in the locked environment, so security scan was unavailable. Full tests emitted one existing multiprocessing `fork()` deprecation warning. Live marker stayed deselected. No network/live action ran.

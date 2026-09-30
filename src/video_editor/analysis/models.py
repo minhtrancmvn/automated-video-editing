@@ -15,6 +15,7 @@ from pydantic import (
     StrictBool,
     StrictFloat,
     StringConstraints,
+    WithJsonSchema,
     model_validator,
 )
 
@@ -37,7 +38,11 @@ def _strict_json_decimal(value: object) -> Decimal:
 
 
 FiniteDecimal = Annotated[Decimal, Field(allow_inf_nan=False)]
-ProviderDecimal = Annotated[Decimal, BeforeValidator(_strict_json_decimal)]
+ProviderDecimal = Annotated[
+    Decimal,
+    BeforeValidator(_strict_json_decimal),
+    WithJsonSchema({"type": "string"}),
+]
 StrictScore = Annotated[StrictFloat, Field(ge=0, le=1, allow_inf_nan=False)]
 NonEmptyString = Annotated[str, StringConstraints(min_length=1)]
 
@@ -306,18 +311,21 @@ class AnalysisRequestContext(AnalysisModel):
 
 
 class ProviderAttemptUsage(AnalysisModel):
-    """Verified usage from one billable provider generation attempt."""
+    """Usage outcome from one provider generation call."""
 
     request_id: NonEmptyString
-    prompt_tokens: int = Field(ge=0)
-    media_input_tokens: int = Field(ge=0)
-    text_input_tokens: int = Field(ge=0)
-    output_tokens: int = Field(ge=0)
-    total_tokens: int = Field(ge=0)
+    status: Literal["succeeded", "failed_unknown_billing"]
+    prompt_tokens: int | None = Field(default=None, ge=0)
+    media_input_tokens: int | None = Field(default=None, ge=0)
+    text_input_tokens: int | None = Field(default=None, ge=0)
+    candidates_tokens: int | None = Field(default=None, ge=0)
+    thoughts_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    total_tokens: int | None = Field(default=None, ge=0)
 
 
 class ProviderUsage(AnalysisModel):
-    """Aggregate verified usage for every returned generation response."""
+    """Known aggregate usage plus explicit unknown-billing state."""
 
     reservation_id: NonEmptyString
     attempts: tuple[ProviderAttemptUsage, ...] = Field(min_length=1)
@@ -325,8 +333,11 @@ class ProviderUsage(AnalysisModel):
     prompt_tokens: int = Field(ge=0)
     media_input_tokens: int = Field(ge=0)
     text_input_tokens: int = Field(ge=0)
+    candidates_tokens: int = Field(ge=0)
+    thoughts_tokens: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
     total_tokens: int = Field(ge=0)
+    has_unknown_billing: bool
     actual_cost_usd: FiniteDecimal | None = Field(default=None, ge=0)
 
     def safe_payload(self) -> dict[str, object]:

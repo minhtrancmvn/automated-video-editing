@@ -17,8 +17,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
-from google.genai import errors
+from google import genai
+from google.genai import errors, models, types
 from pydantic import ValidationError
 
 from video_editor.analysis.models import AnalysisRequestContext, RequestReservation
@@ -62,15 +64,15 @@ SECRET = "AIza-not-a-real-key"
 class ParsedResponse:
     parsed: object
     response_id: str = "request-123"
-    usage_metadata: object = field(
-        default_factory=lambda: SimpleNamespace(
+    usage_metadata: types.GenerateContentResponseUsageMetadata = field(
+        default_factory=lambda: types.GenerateContentResponseUsageMetadata(
             prompt_token_count=11,
-            response_token_count=17,
-            candidates_token_count=999,
-            total_token_count=28,
+            candidates_token_count=17,
+            thoughts_token_count=3,
+            total_token_count=31,
             prompt_tokens_details=[
-                SimpleNamespace(modality="VIDEO", token_count=7),
-                SimpleNamespace(modality="TEXT", token_count=4),
+                types.ModalityTokenCount(modality="VIDEO", token_count=7),
+                types.ModalityTokenCount(modality="TEXT", token_count=4),
             ],
         )
     )
@@ -83,6 +85,8 @@ class ParsedResponse:
 class FakeFiles:
     def __init__(self) -> None:
         self.uploads: list[tuple[object, object]] = []
+        self.uploaded_bytes: list[bytes] = []
+        self.upload_file_descriptors: list[int | None] = []
         self.upload_stream_closed: list[bool] = []
         self.upload_responses: deque[object] = deque()
         self.get_responses: deque[object] = deque()
@@ -111,6 +115,15 @@ class FakeFiles:
         self.upload_calls += 1
         self.uploads.append((file, config))
         self.upload_stream_closed.append(bool(getattr(file, "closed", False)))
+        fileno = getattr(file, "fileno", None)
+        try:
+            self.upload_file_descriptors.append(fileno() if callable(fileno) else None)
+        except (OSError, io.UnsupportedOperation):
+            self.upload_file_descriptors.append(None)
+        read = getattr(file, "read", None)
+        if not callable(read):
+            raise TypeError("upload file must be readable")
+        self.uploaded_bytes.append(read())
         response = (
             self.upload_responses.popleft()
             if self.upload_responses
@@ -419,6 +432,58 @@ def test_upload_consumes_exact_authorized_stream_while_context_is_open(
     assert upload_config == {"mime_type": "video/mp4"}
 
 
+def test_upload_retry_rewinds_same_authorized_stream_to_start_offset(
+    adapter: Any,
+    fake_client: FakeClient,
+    tmp_path: Path,
+) -> None:
+    transient = errors.ServerError(503, {"error": {"message": "unavailable"}})
+    fake_client.files.upload_responses.extend(
+        [transient, FakeFiles.response(state="PROCESSING")]
+    )
+    proxy = tmp_path / "authorized-proxy.mp4"
+    proxy.write_bytes(b"prefix-complete proxy bytes")
+    stream = proxy.open("rb")
+    stream.seek(len(b"prefix-"))
+    descriptor = stream.fileno()
+
+    adapter.upload(AuthorizedUpload("manifest-1", stream))
+
+    assert fake_client.files.upload_calls == 2
+    assert fake_client.files.uploaded_bytes == [b"complete proxy bytes"] * 2
+    assert fake_client.files.uploads[0][0] is fake_client.files.uploads[1][0]
+    assert fake_client.files.upload_file_descriptors == [descriptor, descriptor]
+    assert stream.closed
+
+
+class NonSeekableStream(io.BytesIO):
+    def seekable(self) -> bool:
+        return False
+
+
+class MispositioningStream(io.BytesIO):
+    def seek(self, offset: int, whence: int = 0) -> int:
+        super().seek(offset + 1, whence)
+        return self.tell()
+
+
+@pytest.mark.parametrize(
+    "stream",
+    [NonSeekableStream(b"proxy"), MispositioningStream(b"proxy")],
+)
+def test_upload_fails_closed_for_unrewindable_stream(
+    adapter: Any,
+    fake_client: FakeClient,
+    stream: io.BytesIO,
+) -> None:
+    with pytest.raises(VideoEditorError) as caught:
+        adapter.upload(AuthorizedUpload("manifest-1", stream))
+
+    assert caught.value.code == "provider_invalid_upload_stream"
+    assert fake_client.files.upload_calls == 0
+    assert stream.closed
+
+
 def test_upload_rejects_path_and_manifest_protocol_before_client_call(
     adapter: Any, fake_client: FakeClient
 ) -> None:
@@ -520,6 +585,56 @@ def test_broad_request_uses_exact_model_static_metadata_and_strict_schema(
     assert config.response_schema is BroadScanResponse
     assert isinstance(result.response, BroadScanResponse)
     assert result.response.chunk_id == broad_chunk.chunk_id
+
+
+@pytest.mark.parametrize(
+    "response_model",
+    [BroadScanResponse, CandidateRefinementResponse],
+)
+def test_locked_sdk_prepares_string_only_timestamp_response_schema(
+    gemini_contract: None,
+    response_model: object,
+) -> None:
+    assert response_model is not None
+    client = genai.Client(api_key=SECRET)
+    try:
+        transformed = models._GenerateContentConfig_to_mldev(
+            client._api_client,
+            types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=response_model,
+            ),
+            {},
+            None,
+        )
+    finally:
+        client.close()
+
+    response_schema = transformed["responseSchema"].model_dump(
+        by_alias=True,
+        exclude_none=True,
+    )
+    timestamp_schemas: list[dict[str, object]] = []
+
+    def collect_timestamps(value: object) -> None:
+        if isinstance(value, dict):
+            properties = value.get("properties")
+            if isinstance(properties, dict):
+                for name in ("start", "end"):
+                    timestamp = properties.get(name)
+                    if isinstance(timestamp, dict):
+                        timestamp_schemas.append(timestamp)
+            for child in value.values():
+                collect_timestamps(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect_timestamps(child)
+
+    collect_timestamps(response_schema)
+    assert timestamp_schemas
+    assert all(schema.get("type") == "STRING" for schema in timestamp_schemas)
+    assert all("anyOf" not in schema for schema in timestamp_schemas)
+    assert all("exclusiveMinimum" not in schema for schema in timestamp_schemas)
 
 
 def test_broad_prompt_is_versioned_bounded_and_forbids_semantic_expansion(
@@ -886,11 +1001,14 @@ def test_total_generation_attempt_cap_includes_transient_retry_and_repair(
     )
 
     assert fake_client.models.calls == 3
-    assert result.usage.request_ids == ("request-malformed", "request-123")
+    assert result.usage.request_ids == ("unknown", "request-malformed", "request-123")
     assert result.usage.prompt_tokens == 22
-    assert result.usage.output_tokens == 34
-    assert result.usage.total_tokens == 56
-    assert result.usage.actual_cost_usd == Decimal("0.000090")
+    assert result.usage.candidates_tokens == 34
+    assert result.usage.thoughts_tokens == 6
+    assert result.usage.output_tokens == 40
+    assert result.usage.total_tokens == 62
+    assert result.usage.has_unknown_billing
+    assert result.usage.actual_cost_usd == Decimal("0.000105")
 
 
 def test_malformed_structured_response_receives_one_schema_repair_only(
@@ -919,18 +1037,23 @@ def test_malformed_structured_response_receives_one_schema_repair_only(
     )
 
 
-def test_terminal_provider_error_exposes_aggregate_returned_usage(
+def test_terminal_provider_error_records_unknown_billing_attempt(
     adapter: Any,
     fake_client: FakeClient,
     broad_chunk: object,
     broad_request: AnalysisRequestContext,
 ) -> None:
-    returned = ParsedResponse(
-        parsed=None,
-        response_id="request-failed",
+    http_response = httpx.Response(
+        400,
+        headers={"x-goog-request-id": "http-request-456"},
     )
-    failure = errors.ClientError(400, {"error": {"message": "invalid request"}})
-    failure.response = returned
+    failure = errors.ClientError(
+        400,
+        {"error": {"message": "invalid request"}},
+        response=http_response,
+    )
+    assert failure.response is http_response
+    assert not hasattr(failure.response, "usage_metadata")
     fake_client.models.responses.append(failure)
     upload = upload_active(adapter)
 
@@ -941,8 +1064,22 @@ def test_terminal_provider_error_exposes_aggregate_returned_usage(
 
     usage = json.loads(caught.value.safe_details["usage"])
     assert usage["reservation_id"] == "reservation-broad-1"
-    assert usage["request_ids"] == ["request-failed"]
-    assert usage["actual_cost_usd"] == "0.000045"
+    assert usage["request_ids"] == ["http-request-456"]
+    assert usage["attempts"] == [
+        {
+            "request_id": "http-request-456",
+            "status": "failed_unknown_billing",
+            "prompt_tokens": None,
+            "media_input_tokens": None,
+            "text_input_tokens": None,
+            "candidates_tokens": None,
+            "thoughts_tokens": None,
+            "output_tokens": None,
+            "total_tokens": None,
+        }
+    ]
+    assert usage["has_unknown_billing"] is True
+    assert usage["actual_cost_usd"] == "0"
 
 
 def test_live_contract_preflight_rejects_before_upload(
@@ -1024,20 +1161,26 @@ def test_usage_payload_preserves_request_id_and_redacts_key_from_repr_and_errors
         "attempts": [
             {
                 "request_id": "request-123",
+                "status": "succeeded",
                 "prompt_tokens": 11,
                 "media_input_tokens": 7,
                 "text_input_tokens": 4,
-                "output_tokens": 17,
-                "total_tokens": 28,
+                "candidates_tokens": 17,
+                "thoughts_tokens": 3,
+                "output_tokens": 20,
+                "total_tokens": 31,
             }
         ],
         "request_ids": ["request-123"],
         "prompt_tokens": 11,
         "media_input_tokens": 7,
         "text_input_tokens": 4,
-        "output_tokens": 17,
-        "total_tokens": 28,
-        "actual_cost_usd": "0.000045",
+        "candidates_tokens": 17,
+        "thoughts_tokens": 3,
+        "output_tokens": 20,
+        "total_tokens": 31,
+        "has_unknown_billing": False,
+        "actual_cost_usd": "0.000053",
     }
     assert SECRET not in repr(adapter)
     sdk_error = errors.ClientError(
