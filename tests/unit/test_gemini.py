@@ -1142,6 +1142,62 @@ def test_remote_upload_cleanup_runs_from_finally_on_analysis_failure(
     assert fake_client.files.deleted == ["files/proxy-1"]
 
 
+def test_successful_response_without_usage_metadata_is_unknown_billing(
+    adapter: Any,
+    fake_client: FakeClient,
+    broad_chunk: object,
+    broad_request: AnalysisRequestContext,
+) -> None:
+    upload = upload_active(adapter)
+    fake_client.models.responses.append(
+        ParsedResponse(
+            parsed=fixture_payload("broad-response.json"),
+            response_id="request-no-usage",
+            usage_metadata=None,  # type: ignore[arg-type] - SDK response can omit output metadata
+        )
+    )
+
+    result = adapter.broad_scan(
+        upload, broad_chunk, broad_request, prompt_version="broad-v1"
+    )
+
+    assert result.usage.request_ids == ("request-no-usage",)
+    assert result.usage.attempts[0].status == "failed_unknown_billing"
+    assert result.usage.attempts[0].prompt_tokens is None
+    assert result.usage.has_unknown_billing
+    assert result.usage.actual_cost_usd == Decimal(0)
+
+
+def test_explicit_complete_zero_usage_remains_known_zero_cost(
+    adapter: Any,
+    fake_client: FakeClient,
+    broad_chunk: object,
+    broad_request: AnalysisRequestContext,
+) -> None:
+    upload = upload_active(adapter)
+    fake_client.models.responses.append(
+        ParsedResponse(
+            parsed=fixture_payload("broad-response.json"),
+            response_id="request-zero-usage",
+            usage_metadata=types.GenerateContentResponseUsageMetadata(
+                prompt_token_count=0,
+                candidates_token_count=0,
+                thoughts_token_count=0,
+                total_token_count=0,
+                prompt_tokens_details=[],
+            ),
+        )
+    )
+
+    result = adapter.broad_scan(
+        upload, broad_chunk, broad_request, prompt_version="broad-v1"
+    )
+
+    assert result.usage.attempts[0].status == "succeeded"
+    assert not result.usage.has_unknown_billing
+    assert result.usage.actual_cost_usd == Decimal(0)
+
+
 def test_usage_payload_preserves_request_id_and_redacts_key_from_repr_and_errors(
     adapter: Any,
     fake_client: FakeClient,

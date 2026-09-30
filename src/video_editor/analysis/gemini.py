@@ -450,6 +450,18 @@ class GeminiAdapter:
     @staticmethod
     def _attempt_usage(response: Any) -> ProviderAttemptUsage:
         metadata = getattr(response, "usage_metadata", None)
+        request_id = str(getattr(response, "response_id", None) or "unknown")
+        required_counts = (
+            getattr(metadata, "prompt_token_count", None),
+            getattr(metadata, "candidates_token_count", None),
+            getattr(metadata, "thoughts_token_count", None),
+            getattr(metadata, "total_token_count", None),
+        )
+        if metadata is None or any(count is None for count in required_counts):
+            return ProviderAttemptUsage(
+                request_id=request_id,
+                status="failed_unknown_billing",
+            )
         details = getattr(metadata, "prompt_tokens_details", None) or ()
         media_input_tokens = 0
         for detail in details:
@@ -461,7 +473,7 @@ class GeminiAdapter:
         candidates_tokens = int(getattr(metadata, "candidates_token_count", 0) or 0)
         thoughts_tokens = int(getattr(metadata, "thoughts_token_count", 0) or 0)
         return ProviderAttemptUsage(
-            request_id=str(getattr(response, "response_id", None) or "unknown"),
+            request_id=request_id,
             status="succeeded",
             prompt_tokens=prompt_tokens,
             media_input_tokens=media_input_tokens,

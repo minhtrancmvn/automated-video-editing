@@ -304,3 +304,39 @@ $ git diff --check
 ```
 
 `bandit` is not installed in the locked environment, so security scan was unavailable. Full tests emitted one existing multiprocessing `fork()` deprecation warning. Live marker stayed deselected. No network/live action ran.
+
+## Final narrow usage-metadata fix
+
+Successful responses now require explicit complete SDK usage counts for prompt, candidates, thoughts, and total tokens before accounting can be marked known. Missing metadata or any missing required count produces `failed_unknown_billing` with `has_unknown_billing=True`; aggregate known cost remains separate and cannot be mistaken for complete settlement evidence. Explicit complete zero counts remain a known successful zero-cost attempt.
+
+Observed RED:
+
+```text
+$ uv run pytest tests/unit/test_gemini.py -v -m 'not gemini_live' -k 'successful_response_without_usage_metadata'
+1 failed, 47 deselected in 0.65s
+E AssertionError: assert 'succeeded' == 'failed_unknown_billing'
+```
+
+Final narrow gates:
+
+```text
+$ uv run pytest tests/unit/test_gemini.py -v -m 'not gemini_live' -k 'successful_response_without_usage_metadata or explicit_complete_zero_usage'
+2 passed, 47 deselected in 0.66s
+
+$ uv run pytest tests/unit/test_gemini.py -q -m 'not gemini_live'
+48 passed, 1 deselected in 0.69s
+
+$ uv run mypy src --ignore-missing-imports --show-error-codes
+Success: no issues found in 29 source files
+
+$ uv run ruff check . --config pyproject.toml
+All checks passed!
+
+$ uv run ruff format --check src/video_editor/analysis/gemini.py tests/unit/test_gemini.py --config pyproject.toml
+2 files already formatted
+
+$ git diff --check
+<no output; exit 0>
+```
+
+Prior full offline suite and build remained fresh; coordinator requested no repeat for this surgical fix. No reservation or live lifecycle code changed.
