@@ -4,15 +4,22 @@ from __future__ import annotations
 
 import re
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 
 from video_editor.models.edit_plan import (
-    EditPlan,
+    EditPlanDocument,
+    EditPlanV2,
     OutputSpec,
+    OutputSpecV2,
+    PlanSource,
+    PlanSourceV2,
     TimelineClip,
+    TimelineClipV2,
     Transition,
+    TransitionV2,
     timeline_duration,
 )
 
@@ -36,7 +43,7 @@ class RenderCommand:
     partial_path: Path
     final_path: Path
     expected_duration: Decimal
-    output: OutputSpec | None = None
+    output: OutputSpec | OutputSpecV2 | None = None
     warnings: tuple[RenderWarning, ...] = ()
 
 
@@ -44,7 +51,7 @@ def _number(value: Decimal) -> str:
     return format(value, "f")
 
 
-def _transition(plan: EditPlan, index: int) -> Transition | None:
+def _transition(plan: EditPlanDocument, index: int) -> Transition | TransitionV2 | None:
     return next(
         (
             item
@@ -81,8 +88,69 @@ def _safe_color(value: str | None) -> str:
     return "black"
 
 
+def _tracked_axis_expression(clip: TimelineClipV2, axis: str) -> str:
+    keyframes = clip.framing.keyframes
+    dimension = "iw" if axis == "x" else "ih"
+    crop_dimension = "ow" if axis == "x" else "oh"
+
+    def position(index: int) -> str:
+        center = keyframes[index].center_x if axis == "x" else keyframes[index].center_y
+        return f"{_number(center)}*{dimension}-{crop_dimension}/2"
+
+    expression = position(len(keyframes) - 1)
+    for index in range(len(keyframes) - 2, -1, -1):
+        current = keyframes[index]
+        following = keyframes[index + 1]
+        start = clip.source_start + current.time
+        end = clip.source_start + following.time
+        delta = (
+            following.center_x - current.center_x
+            if axis == "x"
+            else following.center_y - current.center_y
+        )
+        interpolated_center = (
+            f"{_number(current.center_x if axis == 'x' else current.center_y)}+"
+            f"{_number(delta)}*(t-{_number(start)})/"
+            f"{_number(following.time - current.time)}"
+        )
+        interpolated = f"({interpolated_center})*{dimension}-{crop_dimension}/2"
+        expression = (
+            f"if(between(t,{_number(start)},{_number(end)}),"
+            f"{interpolated},{expression})"
+        )
+    first_start = clip.source_start + keyframes[0].time
+    expression = f"if(lt(t,{_number(first_start)}),{position(0)},{expression})"
+    return f"min(max({expression},0),{dimension}-{crop_dimension})".replace(",", r"\,")
+
+
+def _tracked_crop_framing(
+    clip: TimelineClipV2,
+    width: int,
+    height: int,
+    frame_rate: Decimal,
+    source_index: int,
+    index: int,
+) -> tuple[str, list[str]]:
+    label = f"vclip{index}"
+    ratio = _number(Decimal(width) / Decimal(height))
+    crop_width = f"if(gte(iw/ih,{ratio}),ih*{ratio},iw)"
+    crop_height = f"if(gte(iw/ih,{ratio}),ih,iw/{ratio})"
+    x = _tracked_axis_expression(clip, "x")
+    y = _tracked_axis_expression(clip, "y")
+    return label, [
+        (
+            f"[{source_index}:v]trim=start={_number(clip.source_start)}:"
+            f"end={_number(clip.source_end)},"
+            f"crop=w='{crop_width}':h='{crop_height}':x='{x}':y='{y}',"
+            f"setpts=PTS/{_number(clip.speed)},fps={_number(frame_rate)},settb=AVTB,"
+            f"scale={width}:{height},setpts=PTS-STARTPTS,"
+            f"format=yuv420p[{label}]"
+        )
+    ]
+
+
 def _video_framing(
-    clip: TimelineClip,
+    clip: TimelineClip | TimelineClipV2,
     width: int,
     height: int,
     frame_rate: Decimal,
@@ -131,7 +199,7 @@ def _video_framing(
 
 def _audio_filter(
     source_index: int,
-    clip: TimelineClip,
+    clip: TimelineClip | TimelineClipV2,
     duration: Decimal,
     label: str,
     use_source: bool,
@@ -149,6 +217,135 @@ def _audio_filter(
         "asetpts=PTS-STARTPTS,aformat=sample_fmts=fltp:"
         f"sample_rates=48000:channel_layouts=stereo,asettb=1/48000[{label}]"
     )
+
+
+def _join_v2_video(
+    graph: list[str],
+    current: str,
+    following: str,
+    transition: TransitionV2,
+    current_duration: Decimal,
+    index: int,
+    output: OutputSpecV2,
+) -> tuple[str, Decimal]:
+    label = f"vjoin{index}"
+    duration = transition.duration
+    if transition.kind == "cut":
+        graph.append(f"[{current}][{following}]concat=n=2:v=1:a=0[{label}]")
+        return label, current_duration
+
+    offset = current_duration - duration
+    if transition.kind == "dissolve":
+        graph.append(
+            f"[{current}][{following}]xfade=transition=fade:"
+            f"duration={_number(duration)}:offset={_number(offset)}[{label}]"
+        )
+    elif transition.kind == "fade":
+        outgoing = f"vfadeout{index}"
+        incoming = f"vfadein{index}"
+        graph.extend(
+            [
+                (
+                    f"[{current}]fade=t=out:st={_number(offset)}:"
+                    f"d={_number(duration)}[{outgoing}]"
+                ),
+                f"[{following}]fade=t=in:st=0:d={_number(duration)}[{incoming}]",
+                (
+                    f"[{outgoing}][{incoming}]xfade=transition=fade:"
+                    f"duration={_number(duration)}:offset={_number(offset)}[{label}]"
+                ),
+            ]
+        )
+    else:
+        black = f"vblack{index}"
+        through_black = f"vblackjoin{index}"
+        graph.extend(
+            [
+                (
+                    f"color=c=black:s={output.width}x{output.height}:"
+                    f"r={_number(output.frame_rate)}:d={_number(duration)},"
+                    f"format=yuv420p,settb=AVTB[{black}]"
+                ),
+                (
+                    f"[{current}][{black}]xfade=transition=fade:"
+                    f"duration={_number(duration)}:offset={_number(offset)}"
+                    f"[{through_black}]"
+                ),
+                (
+                    f"[{through_black}][{following}]xfade=transition=fade:"
+                    f"duration={_number(duration)}:offset={_number(offset)}[{label}]"
+                ),
+            ]
+        )
+    return label, offset
+
+
+def _join_v2_audio(
+    graph: list[str],
+    current: str,
+    following: str,
+    transition: TransitionV2,
+    current_duration: Decimal,
+    index: int,
+) -> str:
+    label = f"ajoin{index}"
+    duration = transition.duration
+    if transition.audio_policy == "cut":
+        graph.append(f"[{current}][{following}]concat=n=2:v=0:a=1[{label}]")
+    elif transition.audio_policy == "crossfade":
+        graph.append(
+            f"[{current}][{following}]acrossfade=d={_number(duration)}:"
+            f"c1=tri:c2=tri[{label}]"
+        )
+    elif transition.kind == "fade_black":
+        silence = f"asilence{index}"
+        through_silence = f"asilencejoin{index}"
+        graph.extend(
+            [
+                (
+                    f"anullsrc=r=48000:cl=stereo,atrim=duration={_number(duration)},"
+                    f"asetpts=PTS-STARTPTS,asettb=1/48000[{silence}]"
+                ),
+                (
+                    f"[{current}][{silence}]acrossfade=d={_number(duration)}:"
+                    f"c1=tri:c2=tri[{through_silence}]"
+                ),
+                (
+                    f"[{through_silence}][{following}]acrossfade="
+                    f"d={_number(duration)}:c1=tri:c2=tri[{label}]"
+                ),
+            ]
+        )
+    else:
+        outgoing = f"afadeout{index}"
+        incoming = f"afadein{index}"
+        offset = current_duration - duration
+        graph.extend(
+            [
+                (
+                    f"[{current}]afade=t=out:st={_number(offset)}:"
+                    f"d={_number(duration)}[{outgoing}]"
+                ),
+                f"[{following}]afade=t=in:st=0:d={_number(duration)}[{incoming}]",
+                (
+                    f"[{outgoing}][{incoming}]acrossfade=d={_number(duration)}:"
+                    f"c1=tri:c2=tri[{label}]"
+                ),
+            ]
+        )
+    return label
+
+
+def _plan_media(
+    plan: EditPlanDocument,
+) -> tuple[
+    Sequence[PlanSource | PlanSourceV2],
+    Sequence[TimelineClip | TimelineClipV2],
+]:
+    """Return concretely typed plan sources and clips for strict type checking."""
+    if isinstance(plan, EditPlanV2):
+        return plan.sources, plan.clips
+    return plan.sources, plan.clips
 
 
 def _hardware_probe(ffmpeg: str, encoder: str) -> tuple[bool, str]:
@@ -184,7 +381,7 @@ def _hardware_probe(ffmpeg: str, encoder: str) -> tuple[bool, str]:
 
 
 def compile_render(
-    plan: EditPlan,
+    plan: EditPlanDocument,
     ffmpeg: str,
     encoder: str = "libx264",
     output_dir: Path | None = None,
@@ -209,7 +406,8 @@ def compile_render(
                 )
             )
 
-    source_paths = [source.path.resolve() for source in plan.sources]
+    sources, clips = _plan_media(plan)
+    source_paths = [source.path.resolve() for source in sources]
     source_parents = {source.parent for source in source_paths}
     root = (output_dir or Path.cwd() / ".video-editor-output").resolve()
     if any(
@@ -218,7 +416,11 @@ def compile_render(
     ):
         raise ValueError("render output root cannot overlap source tree")
     root.mkdir(parents=True, exist_ok=True)
-    name = output_name or f"{plan.output.kind}.mp4"
+    name = output_name or (
+        plan.output.filename
+        if isinstance(plan, EditPlanV2)
+        else f"{plan.output.kind}.mp4"
+    )
     if Path(name).name != name or name in {"", ".", ".."}:
         raise ValueError("render output name must be a filename")
     final_path = root / name
@@ -226,26 +428,36 @@ def compile_render(
         raise ValueError("render output cannot overwrite source media")
     partial_path = final_path.with_name(final_path.name + ".partial")
     args: list[str] = [ffmpeg, "-hide_banner", "-y"]
-    for source in plan.sources:
+    for source in sources:
         args.extend(["-i", str(source.path)])
 
-    source_indexes = {source.id: index for index, source in enumerate(plan.sources)}
+    source_indexes = {source.id: index for index, source in enumerate(sources)}
     graph: list[str] = []
     video_labels: list[str] = []
     audio_labels: list[str] = []
     clip_durations: list[Decimal] = []
-    for index, clip in enumerate(plan.clips):
+    for index, clip in enumerate(clips):
         source_index = source_indexes[clip.source_id]
         duration = (clip.source_end - clip.source_start) / clip.speed
         clip_durations.append(duration)
-        video_label, video_graph = _video_framing(
-            clip,
-            plan.output.width,
-            plan.output.height,
-            plan.output.frame_rate,
-            source_index,
-            index,
-        )
+        if isinstance(clip, TimelineClipV2) and clip.framing.mode == "tracked_crop":
+            video_label, video_graph = _tracked_crop_framing(
+                clip,
+                plan.output.width,
+                plan.output.height,
+                plan.output.frame_rate,
+                source_index,
+                index,
+            )
+        else:
+            video_label, video_graph = _video_framing(
+                clip,
+                plan.output.width,
+                plan.output.height,
+                plan.output.frame_rate,
+                source_index,
+                index,
+            )
         graph.extend(video_graph)
         video_labels.append(video_label)
         if plan.output.audio == "none":
@@ -253,7 +465,7 @@ def compile_render(
         audio_label = f"aclip{index}"
         # Silence policy is explicit and must never inspect or map source audio.
         use_source_audio = (
-            plan.output.audio == "source" and plan.sources[source_index].has_audio
+            plan.output.audio == "source" and sources[source_index].has_audio
         )
         graph.append(
             _audio_filter(
@@ -272,6 +484,30 @@ def compile_render(
     for index in range(1, len(video_labels)):
         transition = _transition(plan, index - 1)
         next_video = video_labels[index]
+        if isinstance(transition, TransitionV2):
+            if not isinstance(plan, EditPlanV2):
+                raise TypeError("version 2 transition requires version 2 plan")
+            current_video, overlap_start = _join_v2_video(
+                graph,
+                current_video,
+                next_video,
+                transition,
+                current_duration,
+                index,
+                plan.output,
+            )
+            current_duration = overlap_start + clip_durations[index]
+            if current_audio is not None:
+                current_audio = _join_v2_audio(
+                    graph,
+                    current_audio,
+                    audio_labels[index],
+                    transition,
+                    current_duration - clip_durations[index] + transition.duration,
+                    index,
+                )
+            continue
+
         video_out = f"vjoin{index}"
         if (
             transition is not None

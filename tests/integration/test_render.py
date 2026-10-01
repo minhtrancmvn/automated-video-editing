@@ -9,6 +9,7 @@ from video_editor.errors import ErrorCategory, VideoEditorError
 from video_editor.media.probe import probe_media
 from video_editor.models.edit_plan import (
     EditPlan,
+    EditPlanV2,
     Framing,
     OutputSpec,
     PlanSource,
@@ -18,7 +19,7 @@ from video_editor.models.edit_plan import (
 )
 from video_editor.rendering.compiler import compile_render
 from video_editor.rendering.runner import run_render
-from video_editor.validation.outputs import validate_output
+from video_editor.validation.outputs import validate_output, validate_phase2_output
 
 pytestmark = pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
@@ -159,6 +160,117 @@ def test_render_mixed_source_frame_rates(tmp_path: Path) -> None:
     result = probe_media(command.final_path)
     assert result.video is not None
     assert result.video.avg_frame_rate == pytest.approx(30, abs=0.1)
+
+
+def test_phase2_validation_reports_persistent_unintended_black_bars(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "letterboxed.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=white:s=1080x1600:r=15:d=2,pad=1080:1920:0:160:color=black",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000:duration=2",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-shortest",
+            str(source),
+        ],
+        check=True,
+        shell=False,
+    )
+    plan = EditPlanV2.model_validate(
+        {
+            "schema_version": 2,
+            "planner_version": "test",
+            "analysis_version": "test",
+            "sources": [
+                {
+                    "id": "source-1",
+                    "path": str(source),
+                    "identity": "sha256:source-1",
+                    "duration": "2",
+                    "has_audio": True,
+                }
+            ],
+            "clips": [
+                {
+                    "clip_id": "clip-1",
+                    "source_id": "source-1",
+                    "source_identity": "sha256:source-1",
+                    "source_start": "0",
+                    "source_end": "2",
+                    "timeline_start": "0",
+                    "speed": "1",
+                    "framing": {"mode": "center_crop"},
+                    "selection_reason": "validation fixture",
+                    "overall_score": "1",
+                    "score_breakdown": {
+                        "positive": {
+                            "action": "1",
+                            "scenic": "1",
+                            "human": "1",
+                            "story": "1",
+                            "technical": "1",
+                            "novelty": "1",
+                            "completeness": "1",
+                            "long_story": "1",
+                            "short": "1",
+                            "vertical": "1",
+                        },
+                        "penalties": {
+                            "blur_exposure": "0",
+                            "shake_obstruction": "0",
+                            "incomplete": "0",
+                            "weak_boundary": "0",
+                            "repetition": "0",
+                            "overlap": "0",
+                        },
+                    },
+                    "analysis_reference": "analysis:1",
+                    "source_proxy_mapping_reference": "mapping:1",
+                    "dedup_group": "group-1",
+                    "chapter_id": "chapter-1",
+                    "event_id": "event-1",
+                    "vertical_suitability": "1",
+                    "confidence": "1",
+                    "planner_version": "test",
+                    "analysis_version": "test",
+                }
+            ],
+            "transitions": [],
+            "output": {
+                "plan_id": "short-01",
+                "filename": "short-01.mp4",
+                "kind": "short",
+                "width": 1080,
+                "height": 1920,
+                "frame_rate": "15",
+                "codec": "libx264",
+                "audio": "source",
+            },
+            "provenance": {"planner": "test"},
+        }
+    )
+
+    evidence = validate_phase2_output(source, plan, [])
+
+    assert evidence.unintended_black_bar_timestamps
+    assert {warning.code for warning in evidence.warnings} == {"persistent_black_bars"}
 
 
 def test_validate_output_rejects_missing_audio_for_silence_policy(
