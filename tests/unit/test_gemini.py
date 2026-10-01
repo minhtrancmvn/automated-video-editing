@@ -1082,6 +1082,139 @@ def test_terminal_provider_error_records_unknown_billing_attempt(
     assert usage["actual_cost_usd"] == "0"
 
 
+def test_broad_estimate_covers_video_audio_output_and_all_attempts(
+    broad_chunk: object,
+) -> None:
+    assert GeminiAdapter is not None
+    with AuthorizedUpload("manifest-1", io.BytesIO(b"proxy")) as authorization:
+        maximum = GeminiAdapter.estimate_broad_request_maximum(
+            authorization, broad_chunk, _test_pricing()
+        )
+
+    # Six seconds at 0.5 FPS: three frames and six seconds of audio.
+    media_tokens = 3 * 258 + 6 * 32
+    minimum_per_attempt = (
+        Decimal(media_tokens) * _test_pricing().media_input_usd_per_million_tokens
+        + Decimal(8192) * _test_pricing().output_usd_per_million_tokens
+    ) / Decimal(1_000_000)
+    assert maximum >= minimum_per_attempt * 3
+
+
+def test_candidate_estimate_uses_five_fps_over_its_interval() -> None:
+    assert GeminiAdapter is not None
+    candidate_interval = SimpleNamespace(
+        chunk_id="chunk-1", proxy_start=Decimal(1), proxy_end=Decimal("3.5")
+    )
+    adapter = GeminiAdapter(FakeClient(), pricing=_test_pricing())
+
+    maximum = adapter.maximum_request_cost(
+        "manifest-1", candidate_interval, prompt_version="candidate-v2"
+    )
+
+    # Ceiling of 2.5 seconds at 5 FPS is 13 frames, not broad 0.5 FPS.
+    media_tokens = 13 * 258 + 80
+    minimum_per_attempt = (
+        Decimal(media_tokens) * _test_pricing().media_input_usd_per_million_tokens
+        + Decimal(8192) * _test_pricing().output_usd_per_million_tokens
+    ) / Decimal(1_000_000)
+    assert maximum >= minimum_per_attempt * 3
+
+
+def test_estimate_scales_with_total_retry_and_repair_attempt_budget(
+    broad_chunk: object,
+) -> None:
+    assert GeminiAdapter is not None
+    two_attempts = GeminiAdapter(
+        FakeClient(), retry_policy=RetryPolicy(max_attempts=2), pricing=_test_pricing()
+    )
+    four_attempts = GeminiAdapter(
+        FakeClient(), retry_policy=RetryPolicy(max_attempts=4), pricing=_test_pricing()
+    )
+
+    first = two_attempts.maximum_request_cost(
+        "manifest-1", broad_chunk, prompt_version="broad-v1"
+    )
+    second = four_attempts.maximum_request_cost(
+        "manifest-1", broad_chunk, prompt_version="broad-v1"
+    )
+
+    assert second >= first * 2 - Decimal("0.000001")
+
+
+def test_generation_caps_output_across_broad_retry_and_schema_repair(
+    adapter: Any,
+    fake_client: FakeClient,
+    broad_chunk: object,
+    broad_request: AnalysisRequestContext,
+) -> None:
+    upload = upload_active(adapter)
+    fake_client.models.responses.extend(
+        [
+            errors.ServerError(503, {"error": {"message": "unavailable"}}),
+            queued_response("malformed-response.json"),
+            queued_response("broad-response.json"),
+        ]
+    )
+
+    adapter.broad_scan(upload, broad_chunk, broad_request, prompt_version="broad-v1")
+
+    assert fake_client.models.calls == 3
+    assert [
+        request["config"].max_output_tokens for request in fake_client.models.requests
+    ] == [8192, 8192, 8192]
+
+
+def test_candidate_generation_has_same_output_cap(
+    adapter: Any,
+    fake_client: FakeClient,
+    candidate: object,
+    candidate_request: AnalysisRequestContext,
+) -> None:
+    upload = upload_active(adapter)
+    fake_client.models.responses.append(queued_response("refinement-response.json"))
+
+    adapter.refine_candidate(
+        upload, candidate, candidate_request, fps=5, prompt_version="candidate-v2"
+    )
+
+    assert fake_client.models.requests[0]["config"].max_output_tokens == 8192
+
+
+def test_oversized_prompt_identity_never_dispatches_generation(
+    adapter: Any,
+    fake_client: FakeClient,
+    broad_chunk: object,
+    broad_request: AnalysisRequestContext,
+) -> None:
+    upload = upload_active(adapter)
+    oversized = broad_request.model_copy(update={"job_id": "x" * 4096})
+
+    with pytest.raises(VideoEditorError) as caught:
+        adapter.broad_scan(upload, broad_chunk, oversized, prompt_version="broad-v1")
+
+    assert caught.value.code == "provider_invalid_request"
+    assert fake_client.models.calls == 0
+
+
+def test_estimate_includes_response_schema_allowance(broad_chunk: object) -> None:
+    assert GeminiAdapter is not None
+    pricing = ModelPricing(
+        model="gemini-2.5-flash",
+        media_input_usd_per_million_tokens=Decimal(0),
+        text_input_usd_per_million_tokens=Decimal(1),
+        output_usd_per_million_tokens=Decimal(0),
+        source_url="https://example.invalid/fixture",
+        effective_date=date(2026, 9, 28),
+    )
+    schema_bytes = len(json.dumps(BroadScanResponse.model_json_schema()).encode())
+    with AuthorizedUpload("manifest-1", io.BytesIO(b"proxy")) as authorization:
+        maximum = GeminiAdapter.estimate_broad_request_maximum(
+            authorization, broad_chunk, pricing
+        )
+
+    assert maximum >= Decimal(3 * (1024 + schema_bytes)) / Decimal(1_000_000)
+
+
 def test_live_contract_preflight_rejects_before_upload(
     fake_client: FakeClient,
     broad_chunk: object,

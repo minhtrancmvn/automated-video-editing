@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import io
 import json
 import os
 import time
@@ -36,8 +35,11 @@ from video_editor.errors import ErrorCategory, VideoEditorError
 MODEL_ID = "gemini-2.5-flash"
 _BROAD_FPS = 0.5
 _RESPONSE_MIME_TYPE = "application/json"
-_LIVE_BROAD_OUTPUT_TOKEN_MAXIMUM = 512
-_LIVE_PROMPT_TOKEN_BYTES = 4
+_OUTPUT_TOKEN_MAXIMUM = 8192
+_VIDEO_TOKENS_PER_FRAME = 258
+_AUDIO_TOKENS_PER_SECOND = 32
+_METADATA_TOKENS_PER_SECOND = 64
+_PROMPT_OVERHEAD_TOKENS = 1024
 _MICRO_USD = Decimal(1_000_000)
 _ResponseT = TypeVar("_ResponseT", BroadScanResponse, CandidateRefinementResponse)
 _ValueT = TypeVar("_ValueT")
@@ -88,6 +90,34 @@ class GeminiAdapter:
         )
 
     @staticmethod
+    def _estimate_request_maximum(
+        chunk: AnalysisChunk,
+        pricing: ModelPricing,
+        *,
+        fps: Decimal,
+        attempts: int,
+        response_model: type[BroadScanResponse | CandidateRefinementResponse],
+    ) -> Decimal:
+        """Reserve static-video media, metadata allowance, and capped output."""
+        duration = chunk.proxy_end - chunk.proxy_start
+        if duration <= 0 or not duration.is_finite():
+            raise ValueError("chunk duration must be finite and positive")
+        seconds = int(duration.to_integral_value(rounding=ROUND_CEILING))
+        frames = int((fps * duration).to_integral_value(rounding=ROUND_CEILING))
+        media_tokens = frames * _VIDEO_TOKENS_PER_FRAME + seconds * (
+            _AUDIO_TOKENS_PER_SECOND + _METADATA_TOKENS_PER_SECOND
+        )
+        schema_bytes = len(json.dumps(response_model.model_json_schema()).encode())
+        text_tokens = _PROMPT_OVERHEAD_TOKENS + schema_bytes
+        per_attempt = maximum_request_cost(
+            pricing, media_tokens, text_tokens, _OUTPUT_TOKEN_MAXIMUM
+        )
+        maximum = per_attempt * attempts
+        return (maximum * _MICRO_USD).to_integral_value(
+            rounding=ROUND_CEILING
+        ) / _MICRO_USD
+
+    @staticmethod
     def estimate_broad_request_maximum(
         authorization: AuthorizedUpload,
         chunk: AnalysisChunk,
@@ -95,51 +125,16 @@ class GeminiAdapter:
         *,
         prompt_version: str = "broad-v1",
     ) -> Decimal:
-        """Calculate conservative maximum cost for one tiny broad live request."""
-        duration = chunk.proxy_end - chunk.proxy_start
-        if duration <= 0 or not duration.is_finite():
-            raise ValueError("chunk duration must be finite and positive")
-        prompt = GeminiAdapter._prompt(
-            prompt_version,
-            request=AnalysisRequestContext(
-                reservation_id="live-reservation",
-                job_id="live-job",
-                manifest_id=authorization.manifest_id,
-                mode="broad",
-                chunk_id=chunk.chunk_id,
-            ),
-            chunk_id=chunk.chunk_id,
-            candidate_id=None,
-            start=chunk.proxy_start,
-            end=chunk.proxy_end,
-        )
-        prompt_bytes = len(prompt.encode("utf-8")) + len(
-            json.dumps(BroadScanResponse.model_json_schema(), sort_keys=True).encode(
-                "utf-8"
-            )
-        )
-        prompt_tokens = max(
-            1,
-            int(
-                (Decimal(prompt_bytes) / _LIVE_PROMPT_TOKEN_BYTES).to_integral_value(
-                    rounding=ROUND_CEILING
-                )
-            ),
-        )
-        media_tokens = int(
-            (Decimal(str(_BROAD_FPS)) * duration).to_integral_value(
-                rounding=ROUND_CEILING
-            )
-        )
-        maximum = maximum_request_cost(
+        """Estimate default-policy broad cost for live preflight without dispatch."""
+        if prompt_version != "broad-v1" or not authorization.manifest_id:
+            raise ValueError("broad preflight requires a supported prompt and manifest")
+        return GeminiAdapter._estimate_request_maximum(
+            chunk,
             pricing,
-            media_tokens,
-            prompt_tokens,
-            _LIVE_BROAD_OUTPUT_TOKEN_MAXIMUM,
+            fps=Decimal(str(_BROAD_FPS)),
+            attempts=RetryPolicy().max_attempts,
+            response_model=BroadScanResponse,
         )
-        return (maximum * _MICRO_USD).to_integral_value(
-            rounding=ROUND_CEILING
-        ) / _MICRO_USD
 
     def maximum_request_cost(
         self,
@@ -148,22 +143,31 @@ class GeminiAdapter:
         *,
         prompt_version: str,
     ) -> Decimal:
-        """Delegate to the conservative broad estimator; scale candidate requests.
-
-        Candidate requests sample at most 5 FPS versus 0.5 FPS broad, so their
-        bound is the broad bound for the same interval multiplied by ten.
-        """
+        """Estimate all generation attempts at the mode's maximum sampling rate."""
         if self._pricing is None:
             raise VideoEditorError(
                 ErrorCategory.BUDGET,
                 "Gemini pricing is required to bound request cost",
                 code="provider_pricing_unavailable",
             )
-        with AuthorizedUpload(manifest_id, io.BytesIO()) as placeholder:
-            broad = self.estimate_broad_request_maximum(
-                placeholder, chunk, self._pricing
+        if not manifest_id or prompt_version not in {"broad-v1", "candidate-v2"}:
+            raise VideoEditorError(
+                ErrorCategory.BUDGET,
+                "Unsupported request cost identity",
+                code="provider_invalid_request",
             )
-        return broad if prompt_version.startswith("broad") else broad * 10
+        fps = Decimal(str(_BROAD_FPS)) if prompt_version == "broad-v1" else Decimal(5)
+        return self._estimate_request_maximum(
+            chunk,
+            self._pricing,
+            fps=fps,
+            attempts=self._retry_policy.max_attempts,
+            response_model=(
+                BroadScanResponse
+                if prompt_version == "broad-v1"
+                else CandidateRefinementResponse
+            ),
+        )
 
     def upload(self, authorization: AuthorizedUpload) -> UploadedFile:
         """Upload exact bytes from one validated upload authorization."""
@@ -308,6 +312,12 @@ class GeminiAdapter:
             start=start,
             end=end,
         )
+        if len(prompt.encode()) > _PROMPT_OVERHEAD_TOKENS:
+            raise VideoEditorError(
+                ErrorCategory.PROVIDER,
+                "Gemini prompt exceeds reserved text allowance",
+                code="provider_invalid_request",
+            )
         active = self.wait_until_active(upload)
         part = types.Part(
             file_data=types.FileData(file_uri=active.uri, mime_type=active.mime_type),
@@ -320,6 +330,7 @@ class GeminiAdapter:
         config = types.GenerateContentConfig(
             response_mime_type=_RESPONSE_MIME_TYPE,
             response_schema=response_model,
+            max_output_tokens=_OUTPUT_TOKEN_MAXIMUM,
         )
         attempts: list[ProviderAttemptUsage] = []
         remaining_attempts = self._retry_policy.max_attempts
