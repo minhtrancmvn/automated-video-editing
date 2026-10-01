@@ -234,6 +234,40 @@ def test_dedup_edges_reject_lower_ranked_candidate_with_winner_reference(
     assert by_id["candidate-b"].rejections[0].winner_candidate_id == "candidate-a"
 
 
+@pytest.mark.parametrize(
+    ("left_updates", "right_updates"),
+    [
+        (
+            {"source_id": "source-a", "source_start": D("0"), "source_end": D("5")},
+            {"source_id": "source-a", "source_start": D("5"), "source_end": D("10")},
+        ),
+        (
+            {"source_id": "source-a", "source_start": D("0"), "source_end": D("5")},
+            {"source_id": "source-a", "source_start": D("6"), "source_end": D("10")},
+        ),
+        (
+            {"source_id": "source-a", "source_start": D("0"), "source_end": D("5")},
+            {"source_id": "source-b", "source_start": D("0"), "source_end": D("5")},
+        ),
+    ],
+    ids=("boundary-touching", "disjoint", "different-source"),
+)
+def test_zero_temporal_threshold_requires_positive_overlap(
+    left_updates: dict[str, object],
+    right_updates: dict[str, object],
+) -> None:
+    ranked = rank_candidates(
+        [
+            candidate_fixture("candidate-a", **left_updates),
+            candidate_fixture("candidate-b", **right_updates),
+        ],
+        unrestricted_settings(temporal_overlap_threshold=D("0")),
+    )
+
+    assert len({candidate.dedup_group_id for candidate in ranked}) == 2
+    assert all(candidate.selected for candidate in ranked)
+
+
 def test_connected_component_id_is_stable_and_transitive() -> None:
     first = candidate_fixture(
         "candidate-a",
@@ -316,6 +350,136 @@ def test_diversity_quotas_record_machine_readable_reason_and_winner(
     assert by_id["candidate-b"].rejections[0].reason_code == reason_code
     assert by_id["candidate-b"].rejections[0].winner_candidate_id == "candidate-a"
     assert by_id["candidate-c"].selected is True
+
+
+@pytest.mark.parametrize(
+    ("field", "setting", "reason_code"),
+    [
+        ("category", "max_category_share", "category_quota"),
+        ("source_id", "max_source_share", "source_quota"),
+        ("event_id", "max_event_share", "event_quota"),
+        ("location_id", "max_location_share", "location_quota"),
+    ],
+)
+def test_zero_share_has_zero_capacity(
+    field: str,
+    setting: str,
+    reason_code: str,
+) -> None:
+    ranked = rank_candidates(
+        [candidate_fixture("candidate-a", **{field: "value"})],
+        unrestricted_settings(max_selected=4, **{setting: D("0")}),
+    )
+
+    assert ranked[0].selected is False
+    assert ranked[0].reason_codes == (reason_code,)
+    assert ranked[0].rejections[0].winner_candidate_id is None
+
+
+@pytest.mark.parametrize(
+    ("field", "setting", "reason_code"),
+    [
+        ("category", "max_category_share", "category_quota"),
+        ("source_id", "max_source_share", "source_quota"),
+        ("event_id", "max_event_share", "event_quota"),
+        ("location_id", "max_location_share", "location_quota"),
+    ],
+)
+def test_positive_fractional_share_has_minimum_one_fixed_slot(
+    field: str,
+    setting: str,
+    reason_code: str,
+) -> None:
+    ranked = rank_candidates(
+        [
+            candidate_fixture(
+                "candidate-a",
+                source_start=D("0"),
+                source_end=D("5"),
+                **{field: "shared"},
+            ),
+            candidate_fixture(
+                "candidate-b",
+                source_start=D("10"),
+                source_end=D("15"),
+                **{field: "shared"},
+            ),
+        ],
+        unrestricted_settings(max_selected=3, **{setting: D("0.1")}),
+    )
+
+    assert ranked[0].selected is True
+    assert ranked[1].selected is False
+    assert ranked[1].reason_codes == (reason_code,)
+    assert ranked[1].rejections[0].winner_candidate_id == "candidate-a"
+
+
+@pytest.mark.parametrize(
+    ("field", "setting"),
+    [
+        ("category", "max_category_share"),
+        ("source_id", "max_source_share"),
+        ("event_id", "max_event_share"),
+        ("location_id", "max_location_share"),
+    ],
+)
+def test_fixed_quota_capacity_uses_target_slots_with_fewer_candidates(
+    field: str,
+    setting: str,
+) -> None:
+    ranked = rank_candidates(
+        [
+            candidate_fixture(
+                "candidate-a",
+                source_start=D("0"),
+                source_end=D("5"),
+                **{field: "shared"},
+            ),
+            candidate_fixture(
+                "candidate-b",
+                source_start=D("10"),
+                source_end=D("15"),
+                **{field: "shared"},
+            ),
+        ],
+        unrestricted_settings(max_selected=10, **{setting: D("0.2")}),
+    )
+
+    assert all(candidate.selected for candidate in ranked)
+
+
+@pytest.mark.parametrize(
+    ("field", "setting"),
+    [
+        ("category", "max_category_share"),
+        ("source_id", "max_source_share"),
+        ("event_id", "max_event_share"),
+        ("location_id", "max_location_share"),
+    ],
+)
+def test_fixed_quota_allows_distinct_values(
+    field: str,
+    setting: str,
+) -> None:
+    ranked = rank_candidates(
+        [
+            candidate_fixture(
+                "candidate-a",
+                source_start=D("0"),
+                source_end=D("5"),
+                **{field: "first"},
+            ),
+            candidate_fixture(
+                "candidate-b",
+                source_start=D("10"),
+                source_end=D("15"),
+                **{field: "second"},
+            ),
+        ],
+        unrestricted_settings(max_selected=2, **{setting: D("0.5")}),
+    )
+
+    assert all(candidate.selected for candidate in ranked)
 
 
 def test_category_cannot_dominate_when_alternatives_clear_threshold() -> None:

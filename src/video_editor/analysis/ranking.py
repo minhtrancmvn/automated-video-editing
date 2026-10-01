@@ -228,7 +228,8 @@ def _duplicates(
 ) -> bool:
     if left.exact_event_id is not None and left.exact_event_id == right.exact_event_id:
         return True
-    if _overlap_ratio(left, right) >= settings.temporal_overlap_threshold:
+    overlap_ratio = _overlap_ratio(left, right)
+    if overlap_ratio > 0 and overlap_ratio >= settings.temporal_overlap_threshold:
         return True
     visual = _supplied_similarity(left, right, "visual")
     if visual is not None and _clamp(visual) >= settings.visual_similarity_threshold:
@@ -294,24 +295,21 @@ def _quota_reason(
     selected: Sequence[RankingCandidateEvidence],
     settings: RankingSettings,
     target_count: int,
-) -> tuple[str, str] | None:
+) -> tuple[str, str | None] | None:
     checks: tuple[tuple[str, str, Decimal], ...] = (
         ("category", "category_quota", settings.max_category_share),
         ("source_id", "source_quota", settings.max_source_share),
         ("event_id", "event_quota", settings.max_event_share),
         ("location_id", "location_quota", settings.max_location_share),
     )
-    projected_total = len(selected) + 1
     for field, reason, share in checks:
         value = getattr(candidate, field)
         if value is None:
             continue
-        allowed = max(1, int(share * target_count))
-        count = sum(getattr(item, field) == value for item in selected)
-        if count >= allowed and count + 1 > share * projected_total:
-            winner = next(
-                item.candidate_id for item in selected if getattr(item, field) == value
-            )
+        allowed = 0 if share == 0 else max(1, int(share * target_count))
+        matching = [item for item in selected if getattr(item, field) == value]
+        if len(matching) >= allowed:
+            winner = matching[0].candidate_id if matching else None
             return reason, winner
     return None
 
@@ -332,7 +330,7 @@ def rank_candidates(
         key=lambda candidate: _rank_key(candidate, scores[candidate.candidate_id]),
         reverse=True,
     )
-    target_count = min(settings.max_selected, len(ordered))
+    target_count = settings.max_selected
     selected: list[RankingCandidateEvidence] = []
     group_winners: dict[str, str] = {}
     rejections: dict[str, list[Rejection]] = {}
