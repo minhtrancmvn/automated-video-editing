@@ -295,13 +295,14 @@ def _quota_reason(
     selected: Sequence[RankingCandidateEvidence],
     settings: RankingSettings,
     target_count: int,
-) -> tuple[str, str | None] | None:
+) -> tuple[str, str | None, Decimal] | None:
     checks: tuple[tuple[str, str, Decimal], ...] = (
         ("category", "category_quota", settings.max_category_share),
         ("source_id", "source_quota", settings.max_source_share),
         ("event_id", "event_quota", settings.max_event_share),
         ("location_id", "location_quota", settings.max_location_share),
     )
+    exceeded: list[tuple[str, str | None, Decimal]] = []
     for field, reason, share in checks:
         value = getattr(candidate, field)
         if value is None:
@@ -310,8 +311,10 @@ def _quota_reason(
         matching = [item for item in selected if getattr(item, field) == value]
         if len(matching) >= allowed:
             winner = matching[0].candidate_id if matching else None
-            return reason, winner
-    return None
+            exceeded.append((reason, winner, share))
+    return next((quota for quota in exceeded if quota[2] == 0), None) or next(
+        iter(exceeded), None
+    )
 
 
 def rank_candidates(
@@ -334,6 +337,7 @@ def rank_candidates(
     selected: list[RankingCandidateEvidence] = []
     group_winners: dict[str, str] = {}
     rejections: dict[str, list[Rejection]] = {}
+    deferred: list[RankingCandidateEvidence] = []
 
     for candidate in ordered:
         candidate_rejections = rejections.setdefault(candidate.candidate_id, [])
@@ -353,18 +357,38 @@ def rank_candidates(
                 )
             )
             continue
-        if len(selected) >= settings.max_selected:
-            candidate_rejections.append(Rejection(reason_code="selection_limit"))
-            continue
         quota = _quota_reason(candidate, selected, settings, target_count)
         if quota is not None:
-            reason, winner = quota
+            reason, winner, share = quota
             candidate_rejections.append(
                 Rejection(reason_code=reason, winner_candidate_id=winner)
             )
+            if share > 0:
+                deferred.append(candidate)
+            continue
+        if len(selected) >= settings.max_selected:
+            candidate_rejections.append(Rejection(reason_code="selection_limit"))
             continue
         selected.append(candidate)
         group_winners[group_id] = candidate.candidate_id
+
+    for candidate in deferred:
+        if len(selected) >= settings.max_selected:
+            break
+        group_id = groups[candidate.candidate_id]
+        if group_id in group_winners:
+            rejections[candidate.candidate_id] = [
+                Rejection(
+                    reason_code="duplicate",
+                    winner_candidate_id=group_winners[group_id],
+                )
+            ]
+            continue
+        quota = _quota_reason(candidate, selected, settings, target_count)
+        if quota is None or quota[2] > 0:
+            rejections[candidate.candidate_id].clear()
+            selected.append(candidate)
+            group_winners[group_id] = candidate.candidate_id
 
     selected_ids = {candidate.candidate_id for candidate in selected}
     return tuple(

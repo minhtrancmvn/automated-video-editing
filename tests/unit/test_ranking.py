@@ -333,7 +333,7 @@ def test_diversity_quotas_record_machine_readable_reason_and_winner(
         "source_start": D("20"),
         "source_end": D("25"),
     }
-    settings = unrestricted_settings(max_selected=4, **{setting: D("0.25")})
+    settings = unrestricted_settings(max_selected=2, **{setting: D("0.5")})
 
     ranked = rank_candidates(
         [
@@ -385,7 +385,7 @@ def test_zero_share_has_zero_capacity(
         ("location_id", "max_location_share", "location_quota"),
     ],
 )
-def test_positive_fractional_share_has_minimum_one_fixed_slot(
+def test_positive_fractional_share_has_minimum_one_primary_slot_then_fills_fallback(
     field: str,
     setting: str,
     reason_code: str,
@@ -408,10 +408,8 @@ def test_positive_fractional_share_has_minimum_one_fixed_slot(
         unrestricted_settings(max_selected=3, **{setting: D("0.1")}),
     )
 
-    assert ranked[0].selected is True
-    assert ranked[1].selected is False
-    assert ranked[1].reason_codes == (reason_code,)
-    assert ranked[1].rejections[0].winner_candidate_id == "candidate-a"
+    assert all(candidate.selected for candidate in ranked)
+    assert all(not candidate.rejections for candidate in ranked)
 
 
 @pytest.mark.parametrize(
@@ -516,3 +514,126 @@ def test_category_cannot_dominate_when_alternatives_clear_threshold() -> None:
         candidate for candidate in ranked if candidate.candidate_id == "action-2"
     )
     assert rejected.reason_codes == ("category_quota",)
+
+
+def test_single_location_fallback_fills_all_available_slots() -> None:
+    ranked = rank_candidates(
+        [
+            candidate_fixture(
+                f"candidate-{index}",
+                action=D("1") - D(index) / D("10"),
+                location_id="location-shared",
+                source_start=D(index * 10),
+                source_end=D(index * 10 + 5),
+            )
+            for index in range(4)
+        ],
+        unrestricted_settings(max_selected=4, max_location_share=D("0.5")),
+    )
+
+    assert [candidate.candidate_id for candidate in ranked if candidate.selected] == [
+        "candidate-0",
+        "candidate-1",
+        "candidate-2",
+        "candidate-3",
+    ]
+    assert all(not candidate.rejections for candidate in ranked)
+
+
+def test_location_quota_keeps_qualifying_alternatives_when_slots_are_full() -> None:
+    ranked = rank_candidates(
+        [
+            candidate_fixture(
+                "dominant-0",
+                action=D("1"),
+                source_id="source-dominant-0",
+                location_id="location-dominant",
+                source_start=D("0"),
+                source_end=D("5"),
+            ),
+            candidate_fixture(
+                "dominant-1",
+                action=D("0.9"),
+                source_id="source-dominant-1",
+                location_id="location-dominant",
+                source_start=D("10"),
+                source_end=D("15"),
+            ),
+            candidate_fixture(
+                "alternative-0",
+                action=D("0.8"),
+                category="scenic",
+                source_id="source-alternative-0",
+                location_id="location-alternative",
+                source_start=D("20"),
+                source_end=D("25"),
+            ),
+            candidate_fixture(
+                "alternative-1",
+                action=D("0.7"),
+                category="scenic",
+                source_id="source-alternative-1",
+                location_id="location-alternative",
+                source_start=D("30"),
+                source_end=D("35"),
+            ),
+            candidate_fixture(
+                "dominant-2",
+                action=D("0.6"),
+                source_id="source-dominant-2",
+                location_id="location-dominant",
+                source_start=D("40"),
+                source_end=D("45"),
+            ),
+        ],
+        unrestricted_settings(
+            max_selected=4,
+            max_category_share=D("1"),
+            max_source_share=D("1"),
+            max_event_share=D("1"),
+            max_location_share=D("0.5"),
+        ),
+    )
+    by_id = {candidate.candidate_id: candidate for candidate in ranked}
+
+    assert {candidate.candidate_id for candidate in ranked if candidate.selected} == {
+        "dominant-0",
+        "dominant-1",
+        "alternative-0",
+        "alternative-1",
+    }
+    assert by_id["dominant-2"].reason_codes == ("location_quota",)
+    assert by_id["dominant-2"].rejections[0].winner_candidate_id == "dominant-0"
+
+
+def test_zero_location_share_stays_absolute_after_earlier_positive_quota() -> None:
+    ranked = rank_candidates(
+        [
+            candidate_fixture(
+                "allowed",
+                action=D("1"),
+                category="action",
+                location_id=None,
+                source_start=D("0"),
+                source_end=D("5"),
+            ),
+            candidate_fixture(
+                "forbidden",
+                action=D("0.9"),
+                category="action",
+                location_id="location-forbidden",
+                source_start=D("10"),
+                source_end=D("15"),
+            ),
+        ],
+        unrestricted_settings(
+            max_selected=2,
+            max_category_share=D("0.5"),
+            max_location_share=D("0"),
+        ),
+    )
+    by_id = {candidate.candidate_id: candidate for candidate in ranked}
+
+    assert by_id["allowed"].selected is True
+    assert by_id["forbidden"].selected is False
+    assert by_id["forbidden"].reason_codes == ("location_quota",)
