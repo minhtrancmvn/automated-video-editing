@@ -401,6 +401,8 @@ def test_tracked_crop_evaluates_source_time_before_speed_retiming(
     tracked_filter = graph.split(";", 1)[0]
 
     assert tracked_filter.index("crop=") < tracked_filter.index("setpts=PTS/2")
+    assert r"if(between(t\,1\,5)" in tracked_filter
+    assert r"0.50*(t-1)/4" in tracked_filter
 
 
 @pytest.mark.parametrize(
@@ -438,6 +440,40 @@ def test_v2_transition_graphs_and_duration(
     assert audio_fragment in graph
     expected = Decimal(8) if kind == "cut" else Decimal("7.5")
     assert command.expected_duration == expected
+
+
+@pytest.mark.parametrize("kind", ["dissolve", "fade", "fade_black"])
+def test_v2_non_cut_transition_with_cut_audio_trims_visual_overlap(
+    tmp_path: Path, kind: str
+) -> None:
+    graph = _graph(_v2_plan(tmp_path, transition_kind=kind, audio_policy="cut"))
+
+    assert "atrim=end=3.5,asetpts=PTS-STARTPTS[acut0_1]" in graph
+    assert "[acut0_1][aclip1]concat=n=2:v=0:a=1[ajoin1]" in graph
+
+
+def test_v2_fade_black_allocates_fades_and_bounded_hold(tmp_path: Path) -> None:
+    graph = _graph(
+        _v2_plan(
+            tmp_path,
+            transition_kind="fade_black",
+            audio_policy="fade_out_in",
+        )
+    )
+
+    assert (
+        "trim=start=3.5:end=3.666666666666666666666666667,"
+        "setpts=PTS-STARTPTS,"
+        "fade=t=out:st=0:d=0.1666666666666666666666666667" in graph
+    )
+    assert "color=c=black:s=1080x1920:r=30:d=0.1666666666666666666666666667" in graph
+    assert "fade=t=in:st=0:d=0.1666666666666666666666666667" in graph
+    assert "concat=n=5:v=1:a=0[vjoin1]" in graph
+    assert (
+        "anullsrc=r=48000:cl=stereo,atrim=duration=0.1666666666666666666666666667"
+        in graph
+    )
+    assert "concat=n=5:v=0:a=1[ajoin1]" in graph
 
 
 def test_v1_command_graph_remains_compatible(tmp_path: Path) -> None:

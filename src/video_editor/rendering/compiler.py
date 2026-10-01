@@ -101,8 +101,8 @@ def _tracked_axis_expression(clip: TimelineClipV2, axis: str) -> str:
     for index in range(len(keyframes) - 2, -1, -1):
         current = keyframes[index]
         following = keyframes[index + 1]
-        start = clip.source_start + current.time
-        end = clip.source_start + following.time
+        start = clip.source_start + current.time * clip.speed
+        end = clip.source_start + following.time * clip.speed
         delta = (
             following.center_x - current.center_x
             if axis == "x"
@@ -111,14 +111,14 @@ def _tracked_axis_expression(clip: TimelineClipV2, axis: str) -> str:
         interpolated_center = (
             f"{_number(current.center_x if axis == 'x' else current.center_y)}+"
             f"{_number(delta)}*(t-{_number(start)})/"
-            f"{_number(following.time - current.time)}"
+            f"{_number((following.time - current.time) * clip.speed)}"
         )
         interpolated = f"({interpolated_center})*{dimension}-{crop_dimension}/2"
         expression = (
             f"if(between(t,{_number(start)},{_number(end)}),"
             f"{interpolated},{expression})"
         )
-    first_start = clip.source_start + keyframes[0].time
+    first_start = clip.source_start + keyframes[0].time * clip.speed
     expression = f"if(lt(t,{_number(first_start)}),{position(0)},{expression})"
     return f"min(max({expression},0),{dimension}-{crop_dimension})".replace(",", r"\,")
 
@@ -257,23 +257,44 @@ def _join_v2_video(
             ]
         )
     else:
+        phase = duration / Decimal(3)
+        outgoing_body = f"vblackoutbody{index}"
+        outgoing_fade = f"vblackoutfade{index}"
         black = f"vblack{index}"
-        through_black = f"vblackjoin{index}"
+        incoming_fade = f"vblackinfade{index}"
+        incoming_body = f"vblackinbody{index}"
         graph.extend(
             [
+                (f"[{current}]split=2[{outgoing_body}src][{outgoing_fade}src]"),
+                (
+                    f"[{outgoing_body}src]trim=end={_number(offset)},"
+                    f"setpts=PTS-STARTPTS,setsar=1[{outgoing_body}]"
+                ),
+                (
+                    f"[{outgoing_fade}src]trim=start={_number(offset)}:"
+                    f"end={_number(offset + phase)},setpts=PTS-STARTPTS,"
+                    f"fade=t=out:st=0:d={_number(phase)},"
+                    f"setsar=1[{outgoing_fade}]"
+                ),
                 (
                     f"color=c=black:s={output.width}x{output.height}:"
-                    f"r={_number(output.frame_rate)}:d={_number(duration)},"
-                    f"format=yuv420p,settb=AVTB[{black}]"
+                    f"r={_number(output.frame_rate)}:d={_number(phase)},"
+                    f"format=yuv420p,settb=AVTB,setsar=1,"
+                    f"trim=duration={_number(phase)},setpts=PTS-STARTPTS[{black}]"
+                ),
+                (f"[{following}]split=2[{incoming_fade}src][{incoming_body}src]"),
+                (
+                    f"[{incoming_fade}src]trim=end={_number(phase)},"
+                    f"setpts=PTS-STARTPTS,fade=t=in:st=0:d={_number(phase)},"
+                    f"setsar=1[{incoming_fade}]"
                 ),
                 (
-                    f"[{current}][{black}]xfade=transition=fade:"
-                    f"duration={_number(duration)}:offset={_number(offset)}"
-                    f"[{through_black}]"
+                    f"[{incoming_body}src]trim=start={_number(duration)},"
+                    f"setpts=PTS-STARTPTS,setsar=1[{incoming_body}]"
                 ),
                 (
-                    f"[{through_black}][{following}]xfade=transition=fade:"
-                    f"duration={_number(duration)}:offset={_number(offset)}[{label}]"
+                    f"[{outgoing_body}][{outgoing_fade}][{black}]"
+                    f"[{incoming_fade}][{incoming_body}]concat=n=5:v=1:a=0[{label}]"
                 ),
             ]
         )
@@ -291,28 +312,62 @@ def _join_v2_audio(
     label = f"ajoin{index}"
     duration = transition.duration
     if transition.audio_policy == "cut":
-        graph.append(f"[{current}][{following}]concat=n=2:v=0:a=1[{label}]")
+        if duration > 0:
+            outgoing = f"acut{index - 1}_{index}"
+            graph.extend(
+                [
+                    (
+                        f"[{current}]atrim=end={_number(current_duration - duration)},"
+                        f"asetpts=PTS-STARTPTS[{outgoing}]"
+                    ),
+                    f"[{outgoing}][{following}]concat=n=2:v=0:a=1[{label}]",
+                ]
+            )
+        else:
+            graph.append(f"[{current}][{following}]concat=n=2:v=0:a=1[{label}]")
     elif transition.audio_policy == "crossfade":
         graph.append(
             f"[{current}][{following}]acrossfade=d={_number(duration)}:"
             f"c1=tri:c2=tri[{label}]"
         )
     elif transition.kind == "fade_black":
+        phase = duration / Decimal(3)
+        offset = current_duration - duration
+        outgoing_body = f"ablackoutbody{index}"
+        outgoing_fade = f"ablackoutfade{index}"
         silence = f"asilence{index}"
-        through_silence = f"asilencejoin{index}"
+        incoming_fade = f"ablackinfade{index}"
+        incoming_body = f"ablackinbody{index}"
         graph.extend(
             [
+                f"[{current}]asplit=2[{outgoing_body}src][{outgoing_fade}src]",
                 (
-                    f"anullsrc=r=48000:cl=stereo,atrim=duration={_number(duration)},"
+                    f"[{outgoing_body}src]atrim=end={_number(offset)},"
+                    f"asetpts=PTS-STARTPTS[{outgoing_body}]"
+                ),
+                (
+                    f"[{outgoing_fade}src]atrim=start={_number(offset)}:"
+                    f"end={_number(offset + phase)},asetpts=PTS-STARTPTS,"
+                    f"afade=t=out:st=0:d={_number(phase)}"
+                    f"[{outgoing_fade}]"
+                ),
+                (
+                    f"anullsrc=r=48000:cl=stereo,atrim=duration={_number(phase)},"
                     f"asetpts=PTS-STARTPTS,asettb=1/48000[{silence}]"
                 ),
+                f"[{following}]asplit=2[{incoming_fade}src][{incoming_body}src]",
                 (
-                    f"[{current}][{silence}]acrossfade=d={_number(duration)}:"
-                    f"c1=tri:c2=tri[{through_silence}]"
+                    f"[{incoming_fade}src]atrim=end={_number(phase)},"
+                    f"asetpts=PTS-STARTPTS,afade=t=in:st=0:d={_number(phase)}"
+                    f"[{incoming_fade}]"
                 ),
                 (
-                    f"[{through_silence}][{following}]acrossfade="
-                    f"d={_number(duration)}:c1=tri:c2=tri[{label}]"
+                    f"[{incoming_body}src]atrim=start={_number(duration)},"
+                    f"asetpts=PTS-STARTPTS[{incoming_body}]"
+                ),
+                (
+                    f"[{outgoing_body}][{outgoing_fade}][{silence}]"
+                    f"[{incoming_fade}][{incoming_body}]concat=n=5:v=0:a=1[{label}]"
                 ),
             ]
         )

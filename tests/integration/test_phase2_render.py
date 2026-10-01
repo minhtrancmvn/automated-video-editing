@@ -63,6 +63,7 @@ def _clip(
     *,
     timeline_start: Decimal,
     framing: dict[str, Any],
+    speed: Decimal = Decimal(1),
 ) -> dict[str, Any]:
     return {
         "clip_id": clip_id,
@@ -71,7 +72,7 @@ def _clip(
         "source_start": "0",
         "source_end": "2",
         "timeline_start": str(timeline_start),
-        "speed": "1",
+        "speed": str(speed),
         "framing": framing,
         "selection_reason": "synthetic fixture",
         "overall_score": "0.8",
@@ -93,7 +94,9 @@ def _plan(
     *,
     filename: str,
     transition_kind: str | None = None,
+    audio_policy: str | None = None,
     framing: dict[str, Any] | None = None,
+    speed: Decimal = Decimal(1),
 ) -> EditPlanV2:
     duration = (
         Decimal("0.4")
@@ -113,6 +116,7 @@ def _plan(
             "sha256:source-1",
             timeline_start=Decimal(0),
             framing=framing or {"mode": "center_crop"},
+            speed=speed,
         )
     ]
     transitions: list[dict[str, Any]] = []
@@ -122,7 +126,7 @@ def _plan(
                 "clip-2",
                 "source-2",
                 "sha256:source-2",
-                timeline_start=Decimal(2) - duration,
+                timeline_start=Decimal(2) / speed - duration,
                 framing={"mode": "center_crop"},
             )
         )
@@ -135,7 +139,8 @@ def _plan(
                 "relation": relation[transition_kind],
                 "reason": "synthetic semantic boundary",
                 "confidence": "0.9",
-                "audio_policy": (
+                "audio_policy": audio_policy
+                or (
                     "cut"
                     if transition_kind == "cut"
                     else "crossfade"
@@ -244,6 +249,18 @@ def _red_subject_retention(path: Path, sample_count: int = 20) -> Decimal:
     return Decimal(retained) / Decimal(decoded)
 
 
+def _frame_mean_at(path: Path, timestamp: Decimal) -> float:
+    capture = cv2.VideoCapture(str(path))
+    try:
+        capture.set(cv2.CAP_PROP_POS_MSEC, float(timestamp * 1000))
+        ok, frame = capture.read()
+    finally:
+        capture.release()
+    if not ok or frame is None:
+        raise AssertionError(f"could not decode frame at {timestamp}s")
+    return float(np.mean(frame))
+
+
 def test_tracked_crop_render_retains_moving_subject_and_quality_evidence(
     tmp_path: Path,
 ) -> None:
@@ -265,7 +282,7 @@ def test_tracked_crop_render_retains_moving_subject_and_quality_evidence(
                 "fallback": "tracked",
             },
             {
-                "time": "2",
+                "time": "1",
                 "center_x": "0.70",
                 "center_y": "0.5",
                 "subject_box_id": "box-2",
@@ -273,7 +290,12 @@ def test_tracked_crop_render_retains_moving_subject_and_quality_evidence(
             },
         ],
     }
-    plan = _plan([source], filename="short-01.mp4", framing=framing)
+    plan = _plan(
+        [source],
+        filename="short-01.mp4",
+        framing=framing,
+        speed=Decimal(2),
+    )
     track = CropTrack(
         track_id="track-1",
         clip_id="clip-1",
@@ -324,7 +346,7 @@ def test_tracked_crop_render_retains_moving_subject_and_quality_evidence(
                 fallback="tracked",
             ),
             CropKeyframe(
-                time="2",
+                time="1",
                 center_x="0.70",
                 center_y="0.5",
                 subject_box_id="box-2",
@@ -437,3 +459,42 @@ def test_real_semantic_transition_renders_have_expected_media(
     )
     assert not evidence.unintended_black_bar_timestamps
     assert not evidence.audio_discontinuity_timestamps
+    if kind == "fade_black":
+        assert _frame_mean_at(command.final_path, Decimal("1.76")) < 5
+        assert _frame_mean_at(command.final_path, Decimal("1.82")) < 5
+        assert _frame_mean_at(command.final_path, Decimal("1.5")) > 20
+        assert _frame_mean_at(command.final_path, Decimal("2.1")) > 20
+
+
+@pytest.mark.parametrize(
+    ("kind", "filename"),
+    [
+        ("dissolve", "short-06.mp4"),
+        ("fade", "short-07.mp4"),
+        ("fade_black", "short-08.mp4"),
+    ],
+)
+def test_real_non_cut_transition_with_cut_audio_matches_timeline_duration(
+    tmp_path: Path, kind: str, filename: str
+) -> None:
+    source_dir = tmp_path / "sources"
+    source_dir.mkdir()
+    first = source_dir / "first.mp4"
+    second = source_dir / "second.mp4"
+    _make_source(first, "red")
+    _make_source(second, "green")
+    plan = _plan(
+        [first, second],
+        filename=filename,
+        transition_kind=kind,
+        audio_policy="cut",
+    )
+    command = compile_render(plan, "ffmpeg", output_dir=tmp_path / "renders")
+
+    run_render(command, lambda: None)
+    probe = probe_media(command.final_path)
+
+    assert probe.audio is not None
+    assert abs(Decimal(str(probe.duration)) - command.expected_duration) <= Decimal(
+        "0.20"
+    )
