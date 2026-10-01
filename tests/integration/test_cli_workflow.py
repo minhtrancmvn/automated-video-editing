@@ -184,3 +184,21 @@ def test_run_prints_progress_to_stderr_and_result_to_stdout(
     assert result.exit_code == 0, result.output
     assert result.stdout == "{'ok': True}\n"
     assert result.stderr == "job abc: [1/6] inspect started\n"
+
+
+def test_cloud_run_without_api_key_fails_with_structured_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    config = tmp_path / "config.toml"
+    config.write_text(
+        f"""[paths]\ninput_dir = \"{input_dir}\"\nworkspace_dir = \"{tmp_path}/workspace\"\ncache_dir = \"{tmp_path}/cache\"\noutput_dir = \"{tmp_path}/output\"\nstate_dir = \"{tmp_path}/state\"\n[settings]\nstorage_reserve_bytes = 0\ncloud_enabled = true\n[gemini]\nenabled = true\n"""
+    )
+
+    result = CliRunner().invoke(app, ["run", str(input_dir), "--config", str(config)])
+
+    assert result.exit_code == 10
+    assert "provider_configuration" in result.output
+    assert "Traceback" not in result.output

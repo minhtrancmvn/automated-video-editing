@@ -55,3 +55,38 @@ def test_error_safe_details_are_copied() -> None:
     )
     details["request_id"] = "changed"
     assert error.safe_details == {"request_id": "request-123"}
+
+
+def test_phase1_mode_keeps_six_stages_and_phase2_declares_nine(
+    tmp_path: Path,
+) -> None:
+    from video_editor.workflow import (
+        PHASE1_STAGES,
+        PHASE2_STAGES,
+        STAGE_IMPLEMENTATION_VERSIONS,
+    )
+
+    config = AppConfig(
+        PathSettings(
+            *(
+                tmp_path / name
+                for name in ("input", "workspace", "cache", "output", "state")
+            )
+        ),
+        0,
+    )
+    with JobStore(config.paths.state_dir / "jobs.sqlite") as store:
+        assert WorkflowService(config, store).stages == PHASE1_STAGES
+    assert PHASE1_STAGES == ("inspect", "proxy", "plan", "render", "validate", "report")
+    assert PHASE2_STAGES == (
+        "inspect",
+        "proxy",
+        "segment",
+        "analyze",
+        "rank",
+        "plan",
+        "render",
+        "validate",
+        "report",
+    )
+    assert set(STAGE_IMPLEMENTATION_VERSIONS) == set(PHASE2_STAGES)
