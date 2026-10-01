@@ -425,3 +425,42 @@ def test_all_evidence_ids_are_unique_and_stable(tmp_path: Path) -> None:
     assert first_ids
     assert first_ids == second_ids
     assert len(first_ids) == len(set(first_ids))
+
+
+def _overshoot_mapping(proxy: Path, frames: int) -> ProxyMapping:
+    import cv2
+
+    capture = cv2.VideoCapture(str(proxy))
+    fps = D(str(capture.get(cv2.CAP_PROP_FPS)))
+    count = D(str(capture.get(cv2.CAP_PROP_FRAME_COUNT)))
+    capture.release()
+    proxy_end = count / fps - D(frames) / fps
+    return ProxyMapping(
+        source_id="source-1",
+        source_start=D("100"),
+        source_end=D("100") + proxy_end,
+        proxy_start=D("0"),
+        proxy_end=proxy_end,
+        source_identity="bounded-v1:controlled-fixture",
+        settings_hash="proxy-settings-hash",
+        tool_version="fixture-v1",
+    )
+
+
+def test_segmentation_accepts_two_frame_positive_decoder_overshoot(
+    tmp_path: Path,
+) -> None:
+    proxy, _ = create_segmentation_fixture(tmp_path)
+    mapping = _overshoot_mapping(proxy, 2)
+
+    result = segment_media(proxy, None, mapping)
+
+    assert result.scenes[-1].proxy_range.end == mapping.proxy_end
+    assert result.scenes[-1].source_range.end == mapping.source_end
+
+
+def test_segmentation_rejects_three_frame_decoder_overshoot(tmp_path: Path) -> None:
+    proxy, _ = create_segmentation_fixture(tmp_path)
+
+    with pytest.raises(ValueError, match="decoded proxy duration"):
+        segment_media(proxy, None, _overshoot_mapping(proxy, 3))

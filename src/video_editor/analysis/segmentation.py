@@ -500,6 +500,17 @@ def _candidate_windows(
     return tuple(windows)
 
 
+def _frame_rate(proxy: Path) -> Decimal:
+    capture = cv2.VideoCapture(str(proxy))
+    try:
+        fps = capture.get(cv2.CAP_PROP_FPS) if capture.isOpened() else 0.0
+    finally:
+        capture.release()
+    if not np.isfinite(fps) or fps <= 0:
+        raise ValueError("proxy has invalid frame timing")
+    return Decimal(str(fps))
+
+
 def segment_media(
     proxy: Path,
     audio: Path | None,
@@ -510,7 +521,11 @@ def segment_media(
     active = settings or SegmentationSettings()
     samples, duration = _read_video(proxy, active)
     mapped_duration = mapping.proxy_end - mapping.proxy_start
-    if abs(duration - mapped_duration) > Decimal("0.05"):
+    # Encoders may emit up to two trailing frames past the mapped end; samples at or
+    # after proxy_end are dropped below, so evidence stays mapping-anchored.
+    overshoot_limit = max(Decimal("0.05"), 2 / _frame_rate(proxy))
+    difference = duration - mapped_duration
+    if difference < Decimal("-0.05") or difference > overshoot_limit:
         raise ValueError("decoded proxy duration does not match mapping")
     samples = [
         (timestamp + mapping.proxy_start, frame)

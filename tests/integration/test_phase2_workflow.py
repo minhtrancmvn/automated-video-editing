@@ -356,8 +356,11 @@ def test_provider_auth_failure_is_redacted_and_key_never_persisted(
     with pytest.raises(VideoEditorError) as caught:
         phase2.service.run(phase2.input_dir)
 
+    assert phase2.provider.broad_calls >= 1
+    assert caught.value.code == "analysis_incomplete"
     job_id = caught.value.safe_details["job_id"]
     state = phase2.service.status(job_id)
+    assert state["stages"]["analyze"]["error"]["code"] == "analysis_incomplete"
     assert SECRET not in json.dumps(state, default=str)
     assert SECRET not in str(caught.value)
     database = phase2.config.paths.state_dir / "jobs.sqlite3"

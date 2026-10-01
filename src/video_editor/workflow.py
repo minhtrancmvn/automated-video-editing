@@ -8,13 +8,52 @@ import os
 import stat as stat_module
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, TypeVar, cast
 
 from pydantic import ValidationError
 
-from video_editor.analysis.models import AnalysisProvider
+from video_editor.analysis.budget import job_budget
+from video_editor.analysis.evidence import (
+    EVIDENCE_MAP_VERSION,
+    TRANSITION_MAP_VERSION,
+    derive_transition_evidence,
+    map_ranking_evidence,
+    subject_seeds,
+)
+from video_editor.analysis.models import (
+    AnalysisChunkData,
+    AnalysisProvider,
+    BroadCandidate,
+    CandidateRefinementResponse,
+    CandidateWindow,
+    CropTrack,
+    LocalSegmentation,
+    SourceRange,
+)
+from video_editor.analysis.orchestrator import (
+    AnalysisCacheIdentity,
+    AnalysisOutcome,
+    BroadAnalysisRequest,
+    CandidateAnalysisRequest,
+    run_broad_analysis,
+    run_candidate_refinement,
+)
+from video_editor.analysis.proxy_chunks import (
+    create_cloud_proxy_chunk,
+    plan_chunk_ranges,
+    register_proxy_manifest,
+)
+from video_editor.analysis.ranking import (
+    RankedCandidate,
+    RankingSettings,
+    rank_candidates,
+)
+from video_editor.analysis.segmentation import segment_media
+from video_editor.analysis.tracking import track_subject
 from video_editor.config import AppConfig
 from video_editor.errors import ErrorCategory, VideoEditorError
 from video_editor.media.capabilities import detect_capabilities
@@ -26,6 +65,7 @@ from video_editor.media.discovery import (
 )
 from video_editor.media.probe import MediaProbe, probe_media
 from video_editor.media.proxies import (
+    ProxyMapping,
     ProxySettings,
     create_analysis_media,
     valid_cached_media,
@@ -42,16 +82,20 @@ from video_editor.media.storage import (
 )
 from video_editor.models.edit_plan import (
     EditPlan,
+    EditPlanV2,
+    PlanSourceV2,
     load_plan,
+    load_plan_document,
     timeline_duration,
     write_plan,
 )
 from video_editor.persistence.database import JobStore, StageStatus
+from video_editor.planning.highlight_plan import create_highlight_plans
 from video_editor.planning.sample_plan import create_sample_plans
 from video_editor.rendering.compiler import compile_render
 from video_editor.rendering.runner import run_render
 from video_editor.reporting import write_json_report, write_markdown_report
-from video_editor.validation.outputs import validate_output
+from video_editor.validation.outputs import validate_output, validate_phase2_output
 
 PHASE1_STAGES = ("inspect", "proxy", "plan", "render", "validate", "report")
 PHASE2_STAGES = (
@@ -92,6 +136,68 @@ EXIT_CODES = {
     ErrorCategory.BUDGET: 19,
 }
 _T = TypeVar("_T")
+BROAD_PROMPT_VERSION = "broad-v1"
+CANDIDATE_PROMPT_VERSION = "candidate-v2"
+RANKING_SETTINGS = RankingSettings()
+_PROVIDER = "gemini"
+
+
+@dataclass
+class _ChunkWindow:
+    chunk_id: str
+    proxy_start: Decimal
+    proxy_end: Decimal
+
+
+def _mapping(data: dict[str, Any]) -> ProxyMapping:
+    return ProxyMapping(
+        source_id=str(data["source_id"]),
+        source_start=Decimal(str(data["source_start"])),
+        source_end=Decimal(str(data["source_end"])),
+        proxy_start=Decimal(str(data["proxy_start"])),
+        proxy_end=Decimal(str(data["proxy_end"])),
+        source_identity=str(data["source_identity"]),
+        settings_hash=str(data["settings_hash"]),
+        tool_version=str(data["tool_version"]),
+    )
+
+
+_MICRO = Decimal("0.000001")
+
+
+def _plain_track(track: CropTrack) -> CropTrack:
+    """Quantize keyframes so plan JSON never uses exponent notation."""
+    return track.model_copy(
+        update={
+            "keyframes": tuple(
+                keyframe.model_copy(
+                    update={
+                        "time": keyframe.time.quantize(_MICRO),
+                        "center_x": keyframe.center_x.quantize(_MICRO),
+                        "center_y": keyframe.center_y.quantize(_MICRO),
+                    }
+                )
+                for keyframe in track.keyframes
+            )
+        }
+    )
+
+
+def _gate_error(
+    job_id: str, outcome: AnalysisOutcome, stage_detail: str
+) -> VideoEditorError:
+    code = outcome.state
+    category = (
+        ErrorCategory.BUDGET if code == "budget_exhausted" else ErrorCategory.ANALYSIS
+    )
+    missing = [item.model_dump(mode="json") for item in outcome.coverage.missing]
+    return VideoEditorError(
+        category,
+        f"{stage_detail} {code}: coverage {outcome.coverage.ratio}, "
+        f"{len(missing)} missing ranges",
+        code=code,
+        safe_details={"job_id": job_id, "missing": json.dumps(missing)},
+    )
 
 
 def _hash(value: Any) -> str:
@@ -293,6 +399,11 @@ class WorkflowService:
                     f"plan source identity changed: {path}",
                 )
 
+    def _version(self, name: str) -> str:
+        if self.config.cloud_enabled:
+            return STAGE_IMPLEMENTATION_VERSIONS[name]
+        return IMPLEMENTATION_VERSION
+
     def _stage_keys(self, fingerprint: Any, settings: Any) -> tuple[str, str]:
         return _hash(fingerprint), _hash(settings)
 
@@ -311,7 +422,7 @@ class WorkflowService:
             name,
             input_hash,
             settings_hash,
-            IMPLEMENTATION_VERSION,
+            self._version(name),
             preserve_artifacts=preserve_artifacts,
         )
 
@@ -375,7 +486,7 @@ class WorkflowService:
             if not path.is_file() or path.stat().st_size <= 0:
                 return False
             if name == "plan":
-                load_plan(path)
+                load_plan_document(path)
             elif name == "proxy":
                 if not self._proxy_artifact_valid(path, metadata):
                     path.unlink(missing_ok=True)
@@ -383,8 +494,12 @@ class WorkflowService:
             elif name == "render":
                 if not metadata or not isinstance(metadata.get("plan"), str):
                     return False
-                plan = load_plan(Path(metadata["plan"]))
-                validate_output(path, plan.output, timeline_duration(plan))
+                document = load_plan_document(Path(metadata["plan"]))
+                if "plan_digest" in metadata and metadata["plan_digest"] != (
+                    hashlib.sha256(Path(metadata["plan"]).read_bytes()).hexdigest()
+                ):
+                    return False
+                validate_output(path, document.output, timeline_duration(document))
             elif name == "inspect" or (name == "report" and path.suffix == ".json"):
                 value = json.loads(path.read_text())
                 if not isinstance(value, dict):
@@ -427,7 +542,7 @@ class WorkflowService:
             stage
             and stage.get("input_fingerprint") == input_hash
             and stage.get("settings_hash") == settings_hash
-            and stage.get("implementation_version") == IMPLEMENTATION_VERSION
+            and stage.get("implementation_version") == self._version(name)
             and self._completed(job, name)
         )
 
@@ -1071,7 +1186,7 @@ class WorkflowService:
             and stage.get("status") == StageStatus.COMPLETED
             and stage.get("input_fingerprint") == input_hash
             and stage.get("settings_hash") == settings_hash
-            and stage.get("implementation_version") == IMPLEMENTATION_VERSION
+            and stage.get("implementation_version") == self._version("validate")
             and self._validate_recorded_outputs(rendered)
         ):
             return cast(dict[str, Any], stage["result"])
@@ -1232,6 +1347,643 @@ class WorkflowService:
             lambda: self._write_report_stage(job_id, state, started=True),
         )
 
+    # ----- Phase 2 (cloud_enabled) stages -----
+
+    def _phase2_stage(
+        self,
+        job_id: str,
+        name: str,
+        fingerprint: Any,
+        settings: Any,
+        category: ErrorCategory,
+        operation: Callable[[], dict[str, Any]],
+    ) -> dict[str, Any]:
+        job = self.store.get_job(job_id)
+        if self._stage_reusable(job, name, fingerprint, settings):
+            return cast(dict[str, Any], job["stages"][name]["result"])
+        upstream = _hash([fingerprint, settings])
+
+        def run() -> dict[str, Any]:
+            result = {**operation(), "upstream": upstream}
+            self.store.complete_stage(job_id, name, result)
+            return result
+
+        return self._run_stage(job_id, name, fingerprint, settings, category, run)
+
+    def _ensure_segment(self, job_id: str, proxied: dict[str, Any]) -> dict[str, Any]:
+        def operation() -> dict[str, Any]:
+            job = self.store.get_job(job_id)
+            sources = {str(item["source_id"]): item for item in job.get("sources", [])}
+            cache = self._configured_destination(self.config.paths.cache_dir, job_id)
+            # Cloud chunk generation requires a private, job-owned generated root.
+            cache.chmod(0o700)
+            segmentations: dict[str, str] = {}
+            chunks: list[dict[str, Any]] = []
+            for artifact in proxied.get("artifacts", []):
+                mapping = _mapping(artifact["mapping"])
+                audio = artifact.get("audio")
+                segmentation = segment_media(
+                    Path(artifact["proxy"]), Path(audio) if audio else None, mapping
+                )
+                path = cache / f"segment-{mapping.source_id}.json"
+                path.write_text(segmentation.model_dump_json() + "\n")
+                self.store.save_artifact(job_id, "segment", path)
+                segmentations[mapping.source_id] = str(path)
+                source = sources[mapping.source_id]
+                duration = mapping.source_end - mapping.source_start
+                for start, end in plan_chunk_ranges(duration, []):
+                    manifest = create_cloud_proxy_chunk(
+                        Path(source["path"]),
+                        cache,
+                        mapping,
+                        mapping.source_start + start,
+                        mapping.source_start + end,
+                        job_id=job_id,
+                        source_fingerprint=str(source["fingerprint"]),
+                        paths=self.config.paths,
+                        store=self.store,
+                    )
+                    register_proxy_manifest(manifest, self.store)
+                    data = manifest.data
+                    chunks.append(
+                        {
+                            "manifest_id": manifest.manifest_id,
+                            "chunk_id": manifest.chunk_id,
+                            "source_id": manifest.source_id,
+                            "digest": manifest.digest,
+                            "source_identity": data.source_identity,
+                            "source_fingerprint": data.source_fingerprint,
+                            "mapping_version": data.mapping_version,
+                            "source_start": str(data.source_start),
+                            "source_end": str(data.source_end),
+                            "proxy_start": str(data.proxy_start),
+                            "proxy_end": str(data.proxy_end),
+                            "width": data.video_width,
+                            "height": data.video_height,
+                        }
+                    )
+            return {"segmentations": segmentations, "chunks": chunks}
+
+        return self._phase2_stage(
+            job_id,
+            "segment",
+            proxied.get("artifacts", []),
+            {"segment": STAGE_IMPLEMENTATION_VERSIONS["segment"]},
+            ErrorCategory.ANALYSIS,
+            operation,
+        )
+
+    def _require_provider(self) -> AnalysisProvider:
+        if self.provider is None:
+            raise VideoEditorError(
+                ErrorCategory.CONFIGURATION,
+                "cloud analysis requires a configured provider",
+                code="provider_configuration",
+            )
+        return self.provider
+
+    def _broad_identity(self, chunk: dict[str, Any]) -> AnalysisCacheIdentity:
+        return AnalysisCacheIdentity(
+            source_identity=chunk["source_identity"],
+            source_fingerprint=chunk["source_fingerprint"],
+            proxy_digest=chunk["digest"],
+            mapping_version=chunk["mapping_version"],
+            source_start=Decimal(chunk["source_start"]),
+            source_end=Decimal(chunk["source_end"]),
+            mode="broad",
+            fps=self.config.gemini.broad_fps,
+            media_width=int(chunk["width"]),
+            media_height=int(chunk["height"]),
+            provider=_PROVIDER,
+            model=self.config.gemini.model,
+            prompt_version=BROAD_PROMPT_VERSION,
+            response_schema_version="broad-v1",
+            implementation_version=STAGE_IMPLEMENTATION_VERSIONS["analyze"],
+        )
+
+    def _ensure_analyze(self, job_id: str, segmented: dict[str, Any]) -> dict[str, Any]:
+        settings = {
+            "provider": _PROVIDER,
+            "model": self.config.gemini.model,
+            "broad_prompt": BROAD_PROMPT_VERSION,
+            "candidate_prompt": CANDIDATE_PROMPT_VERSION,
+            "cost_cap_per_hour": str(self.config.gemini.max_cost_per_source_hour_usd),
+        }
+
+        def operation() -> dict[str, Any]:
+            provider = self._require_provider()
+            chunks = segmented.get("chunks", [])
+            ranges = [
+                SourceRange(
+                    source_id=item["source_id"],
+                    start=Decimal(item["source_start"]),
+                    end=Decimal(item["source_end"]),
+                )
+                for item in chunks
+            ]
+            try:
+                self.store.budget_state(job_id)
+            except KeyError:
+                total = sum((item.end - item.start for item in ranges), Decimal(0))
+                self.store.initialize_budget(
+                    job_id,
+                    job_budget(total, self.config.gemini.max_cost_per_source_hour_usd),
+                )
+            requests = [
+                BroadAnalysisRequest(
+                    manifest_id=item["manifest_id"],
+                    chunk_id=item["chunk_id"],
+                    cache_identity=self._broad_identity(item),
+                    maximum_cost_usd=provider.maximum_request_cost(
+                        item["manifest_id"],
+                        _ChunkWindow(
+                            item["chunk_id"],
+                            Decimal(item["proxy_start"]),
+                            Decimal(item["proxy_end"]),
+                        ),
+                        prompt_version=BROAD_PROMPT_VERSION,
+                    ),
+                )
+                for item in chunks
+            ]
+            outcome = run_broad_analysis(
+                store=self.store,
+                paths=self.config.paths,
+                provider=provider,
+                job_id=job_id,
+                expected_ranges=ranges,
+                requests=requests,
+            )
+            if outcome.state != "complete":
+                raise _gate_error(job_id, outcome, "broad analysis")
+            candidate_requests: list[CandidateAnalysisRequest] = []
+            broad_by_id: dict[str, tuple[str, BroadCandidate]] = {}
+            for item, request, source_range in zip(
+                chunks, requests, ranges, strict=True
+            ):
+                # Cache-only replay of one chunk recovers that chunk's candidates.
+                per_chunk = run_broad_analysis(
+                    store=self.store,
+                    paths=self.config.paths,
+                    provider=provider,
+                    job_id=job_id,
+                    expected_ranges=[source_range],
+                    requests=[request],
+                )
+                for broad in per_chunk.candidates:
+                    if not isinstance(broad, BroadCandidate):
+                        continue
+                    broad_by_id[broad.candidate_id] = (item["chunk_id"], broad)
+                    # Suffix the implementation version per candidate so several
+                    # candidates in one chunk never share one cache key.
+                    identity = request.cache_identity.model_copy(
+                        update={
+                            "mode": "candidate",
+                            "prompt_version": CANDIDATE_PROMPT_VERSION,
+                            "response_schema_version": "candidate-v2",
+                            "implementation_version": (
+                                f"{STAGE_IMPLEMENTATION_VERSIONS['analyze']}:"
+                                f"{broad.candidate_id}"
+                            ),
+                        }
+                    )
+                    candidate_requests.append(
+                        CandidateAnalysisRequest(
+                            manifest_id=item["manifest_id"],
+                            candidate=CandidateWindow(
+                                chunk_id=item["chunk_id"],
+                                candidate_id=broad.candidate_id,
+                                start=broad.start,
+                                end=broad.end,
+                            ),
+                            cache_identity=identity,
+                            maximum_cost_usd=provider.maximum_request_cost(
+                                item["manifest_id"],
+                                _ChunkWindow(item["chunk_id"], broad.start, broad.end),
+                                prompt_version=CANDIDATE_PROMPT_VERSION,
+                            ),
+                        )
+                    )
+            segmentations = [
+                LocalSegmentation.model_validate_json(Path(path).read_text())
+                for path in segmented.get("segmentations", {}).values()
+            ]
+            refined = run_candidate_refinement(
+                store=self.store,
+                paths=self.config.paths,
+                provider=provider,
+                job_id=job_id,
+                broad_outcome=outcome,
+                requests=candidate_requests,
+                segmentations=segmentations,
+            )
+            if refined.state != "complete":
+                raise _gate_error(job_id, refined, "candidate refinement")
+            candidates = [
+                {
+                    "chunk_id": broad_by_id[item.candidate_id][0],
+                    "broad": broad_by_id[item.candidate_id][1].model_dump(mode="json"),
+                    "refined": item.model_dump(mode="json"),
+                }
+                for item in refined.candidates
+                if isinstance(item, CandidateRefinementResponse)
+                and item.candidate_id in broad_by_id
+            ]
+            return {
+                "coverage": outcome.coverage.model_dump(mode="json"),
+                "candidates": candidates,
+                "budget": self.store.budget_state(job_id).model_dump(mode="json"),
+                "request_count": len(requests) + len(candidate_requests),
+            }
+
+        return self._phase2_stage(
+            job_id, "analyze", segmented, settings, ErrorCategory.ANALYSIS, operation
+        )
+
+    def _chunk_data(self, job_id: str, chunk_id: str) -> AnalysisChunkData:
+        record = self.store.get_analysis_chunk_for_job(job_id, chunk_id)
+        if record is None:
+            raise VideoEditorError(
+                ErrorCategory.STATE, f"missing analysis chunk: {chunk_id}"
+            )
+        return AnalysisChunkData.model_validate(record["data"])
+
+    def _ensure_rank(
+        self, job_id: str, segmented: dict[str, Any], analyzed: dict[str, Any]
+    ) -> dict[str, Any]:
+        def operation() -> dict[str, Any]:
+            segmentations = {
+                source_id: LocalSegmentation.model_validate_json(Path(path).read_text())
+                for source_id, path in segmented.get("segmentations", {}).items()
+            }
+            evidence = []
+            for item in analyzed.get("candidates", []):
+                chunk = self._chunk_data(job_id, item["chunk_id"])
+                evidence.append(
+                    map_ranking_evidence(
+                        BroadCandidate.model_validate(item["broad"]),
+                        CandidateRefinementResponse.model_validate(item["refined"]),
+                        chunk,
+                        segmentations[chunk.source_id],
+                    )
+                )
+            ranked = rank_candidates(evidence, RANKING_SETTINGS)
+            return {"ranked": [item.model_dump(mode="json") for item in ranked]}
+
+        return self._phase2_stage(
+            job_id,
+            "rank",
+            analyzed,
+            {
+                "evidence_map": EVIDENCE_MAP_VERSION,
+                "ranking": RANKING_SETTINGS.model_dump(mode="json"),
+            },
+            ErrorCategory.ANALYSIS,
+            operation,
+        )
+
+    def _ensure_highlight_plan(
+        self,
+        job_id: str,
+        proxied: dict[str, Any],
+        analyzed: dict[str, Any],
+        ranked_result: dict[str, Any],
+    ) -> dict[str, Any]:
+        def operation() -> dict[str, Any]:
+            job = self.store.get_job(job_id)
+            probes = self._source_probes(job)
+            groups = self._groups(job)
+            mappings = {
+                str(item["source_id"]): (Path(item["proxy"]), _mapping(item["mapping"]))
+                for item in proxied.get("artifacts", [])
+            }
+            refined = {
+                item["refined"]["candidate_id"]: (
+                    CandidateRefinementResponse.model_validate(item["refined"]),
+                    self._chunk_data(job_id, item["chunk_id"]),
+                )
+                for item in analyzed.get("candidates", [])
+            }
+            ranked = [
+                RankedCandidate.model_validate(item)
+                for item in ranked_result.get("ranked", [])
+            ]
+            tracks: list[CropTrack] = []
+            for candidate in ranked:
+                video = probes[candidate.source_id].video
+                if (
+                    not candidate.selected
+                    or video is None
+                    or video.width is None
+                    or video.height is None
+                ):
+                    continue
+                proxy, mapping = mappings[candidate.source_id]
+                response, chunk = refined[candidate.candidate_id]
+                tracks.append(
+                    _plain_track(
+                        track_subject(
+                            proxy,
+                            mapping,
+                            clip_id=candidate.candidate_id,
+                            candidate_start=candidate.source_start,
+                            candidate_end=candidate.source_end,
+                            subject_observations=subject_seeds(response, chunk),
+                            source_size=(int(video.width), int(video.height)),
+                            output_size=(1080, 1920),
+                            settings=self.config.crop,
+                        )
+                    )
+                )
+            chapters: dict[str, str] = {}
+            positions: dict[str, tuple[int, int]] = {}
+            for group_index, group in enumerate(groups):
+                for member_index, member in enumerate(group.members):
+                    chapters[member.source.fingerprint] = group.group_id
+                    positions[member.source.fingerprint] = (group_index, member_index)
+            ordered = sorted(
+                (item for item in ranked if item.selected),
+                key=lambda item: (
+                    positions[item.source_id],
+                    item.source_start,
+                    item.candidate_id,
+                ),
+            )
+            sources = [
+                PlanSourceV2(
+                    id=source_id,
+                    path=Path(str(probes[source_id].path)),
+                    identity=mapping.source_identity,
+                    duration=Decimal(str(probes[source_id].duration)),
+                    has_audio=probes[source_id].audio is not None,
+                )
+                for source_id, (_, mapping) in mappings.items()
+            ]
+            plan_set = create_highlight_plans(
+                ranked,
+                groups,
+                tracks,
+                sources,
+                derive_transition_evidence(ordered, chapters),
+                self.config.highlights,
+            )
+            output = self._configured_destination(self.config.paths.output_dir, job_id)
+            plan_dir = output / "plans"
+            plan_dir.mkdir(parents=True, exist_ok=True)
+            source_paths = [source.path for source in sources]
+            paths: list[str] = []
+            for plan in (plan_set.long, *plan_set.shorts):
+                path = plan_dir / f"{Path(plan.output.filename).stem}.json"
+                self._protect_sources(path, source_paths)
+                write_plan(plan, path)
+                self.store.save_artifact(
+                    job_id,
+                    "plan",
+                    path,
+                    {
+                        "plan_id": plan.output.plan_id,
+                        "filename": plan.output.filename,
+                        "digest": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    },
+                )
+                paths.append(str(path))
+            return {
+                "plans": paths,
+                "tracks": [track.model_dump(mode="json") for track in tracks],
+                "themes": list(plan_set.themes),
+                "chapters": list(plan_set.long_evidence.chapter_progression),
+                "transition_map": TRANSITION_MAP_VERSION,
+            }
+
+        return self._phase2_stage(
+            job_id,
+            "plan",
+            ranked_result,
+            {
+                "planner": STAGE_IMPLEMENTATION_VERSIONS["plan"],
+                "highlights": vars(self.config.highlights),
+                "crop": vars(self.config.crop),
+                "transition_map": TRANSITION_MAP_VERSION,
+            },
+            ErrorCategory.PLAN,
+            operation,
+        )
+
+    def _render_v2(
+        self, job_id: str, path: Path, plan: EditPlanV2, output_root: Path
+    ) -> dict[str, Any]:
+        metadata: dict[str, Any] = {
+            "plan": str(path),
+            "plan_id": plan.output.plan_id,
+            "plan_digest": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "warnings": [],
+        }
+        final = output_root / plan.output.filename
+        self._protect_sources(final, [source.path for source in plan.sources])
+        # Persist expected final before render; resume validates each output alone.
+        self.store.save_artifact(job_id, "render", final, metadata)
+        if self._artifact_valid("render", final, metadata):
+            return {"output": str(final), **metadata}
+        command = compile_render(
+            plan, "ffmpeg", output_dir=output_root, output_name=plan.output.filename
+        )
+        metadata["warnings"] = [warning.message for warning in command.warnings]
+
+        def persist_published(published: Path) -> None:
+            self.store.save_artifact(job_id, "render", published, metadata)
+
+        with self._render_lock:
+            run_render(command, lambda: None, persist_published)
+        validate_output(command.final_path, plan.output, timeline_duration(plan))
+        self.store.save_artifact(job_id, "render", command.final_path, metadata)
+        return {"output": str(command.final_path), **metadata}
+
+    def _ensure_render_v2(self, job_id: str, planned: dict[str, Any]) -> dict[str, Any]:
+        plan_paths = [Path(value) for value in planned.get("plans", [])]
+
+        def operation() -> dict[str, Any]:
+            output = self._configured_destination(self.config.paths.output_dir, job_id)
+            job = self.store.get_job(job_id)
+            plans = [cast(EditPlanV2, load_plan_document(path)) for path in plan_paths]
+            estimate = max(
+                _MIN_WRITE_BYTES,
+                max(
+                    _duration_seconds(cast(Any, plan))
+                    * plan.output.width
+                    * plan.output.height
+                    // 8
+                    for plan in plans
+                ),
+            )
+            self._destination_volume(
+                output, estimate, self._expected_destination_volume(job, "output")
+            )
+            output.mkdir(parents=True, exist_ok=True)
+            outputs = [
+                self._render_v2(job_id, path, plan, output)
+                for path, plan in zip(plan_paths, plans, strict=True)
+            ]
+            return {"outputs": outputs, "estimated_bytes": estimate}
+
+        fingerprint = [
+            {"path": str(path), "digest": hashlib.sha256(path.read_bytes()).hexdigest()}
+            for path in plan_paths
+        ]
+        return self._phase2_stage(
+            job_id,
+            "render",
+            fingerprint,
+            {"encoder": "libx264", "render_concurrency": 1},
+            ErrorCategory.RENDER,
+            operation,
+        )
+
+    def _ensure_validate_v2(
+        self, job_id: str, planned: dict[str, Any], rendered: dict[str, Any]
+    ) -> dict[str, Any]:
+        tracks = [CropTrack.model_validate(item) for item in planned.get("tracks", [])]
+
+        def operation() -> dict[str, Any]:
+            checked: list[dict[str, Any]] = []
+            for item in rendered.get("outputs", []):
+                plan = cast(EditPlanV2, load_plan_document(Path(item["plan"])))
+                result = validate_phase2_output(Path(item["output"]), plan, tracks)
+                video = result.probe.video
+                checked.append(
+                    {
+                        "path": item["output"],
+                        "plan_id": plan.output.plan_id,
+                        "kind": plan.output.kind,
+                        "theme": plan.output.theme_summary,
+                        "width": video.width if video else None,
+                        "height": video.height if video else None,
+                        "duration": result.probe.duration,
+                        "crop_track_ids": list(result.crop_track_ids),
+                        "subject_retention_ratio": str(result.subject_retention_ratio),
+                        "transitions": [
+                            {"kind": transition.kind, "relation": transition.relation}
+                            for transition in plan.transitions
+                        ],
+                        "warnings": [warning.code for warning in result.warnings],
+                    }
+                )
+            return {"outputs": checked}
+
+        fingerprint = rendered.get("outputs", [])
+        settings: dict[str, Any] = {
+            "validation": STAGE_IMPLEMENTATION_VERSIONS["validate"]
+        }
+        if not all(Path(item["output"]).is_file() for item in fingerprint):
+            settings["missing_output"] = True
+        return self._phase2_stage(
+            job_id, "validate", fingerprint, settings, ErrorCategory.OUTPUT, operation
+        )
+
+    def _phase2_report_state(
+        self,
+        job_id: str,
+        inspected: dict[str, Any],
+        segmented: dict[str, Any],
+        analyzed: dict[str, Any],
+        ranked: dict[str, Any],
+        planned: dict[str, Any],
+        validated: dict[str, Any],
+    ) -> dict[str, Any]:
+        state = self._report_state(
+            job_id,
+            inspected,
+            {"plans": []},
+            {"outputs": [], "estimated_bytes": 0},
+            validated,
+        )
+        candidates = ranked.get("ranked", [])
+        rejection_counts: dict[str, int] = {}
+        for item in candidates:
+            for rejection in item.get("rejections", []):
+                code = rejection["reason_code"]
+                rejection_counts[code] = rejection_counts.get(code, 0) + 1
+        state["selected_moments"] = [
+            {
+                key: item[key]
+                for key in (
+                    "candidate_id",
+                    "source_id",
+                    "source_start",
+                    "source_end",
+                    "category",
+                    "score",
+                )
+            }
+            for item in candidates
+            if item.get("selected")
+        ]
+        state["analysis"] = {
+            "provider": _PROVIDER,
+            "model": self.config.gemini.model,
+            "broad_fps": str(self.config.gemini.broad_fps),
+            "manifests": [
+                {
+                    key: item[key]
+                    for key in (
+                        "manifest_id",
+                        "chunk_id",
+                        "source_id",
+                        "digest",
+                        "source_start",
+                        "source_end",
+                    )
+                }
+                for item in segmented.get("chunks", [])
+            ],
+            "coverage": analyzed.get("coverage", {}),
+            "budget": analyzed.get("budget", {}),
+            "request_count": analyzed.get("request_count", 0),
+            "candidate_count": len(candidates),
+            "rejection_counts": rejection_counts,
+            "evidence_map": EVIDENCE_MAP_VERSION,
+            "chapters": planned.get("chapters", []),
+            "short_themes": planned.get("themes", []),
+        }
+        state["cloud_usage"] = analyzed.get("budget", {}).get("spent_usd", "0")
+        state["fallbacks"] = [
+            warning
+            for output in validated.get("outputs", [])
+            for warning in output.get("warnings", [])
+        ]
+        return state
+
+    def _execute_phase2(
+        self, job_id: str, input_path: Path
+    ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+        try:
+            inspected = self._ensure_inspect(job_id, input_path)
+            proxied = self._ensure_proxy(job_id)
+            segmented = self._ensure_segment(job_id, proxied)
+            analyzed = self._ensure_analyze(job_id, segmented)
+            ranked = self._ensure_rank(job_id, segmented, analyzed)
+            planned = self._ensure_highlight_plan(job_id, proxied, analyzed, ranked)
+            rendered = self._ensure_render_v2(job_id, planned)
+            validated = self._ensure_validate_v2(job_id, planned, rendered)
+        except VideoEditorError as exc:
+            exc.safe_details.setdefault("job_id", job_id)
+            if exc.code in {"analysis_incomplete", "budget_exhausted"}:
+                gate = {
+                    "code": exc.code,
+                    "missing": json.loads(exc.safe_details.get("missing", "[]")),
+                }
+                workspace = self._configured_destination(
+                    self.config.paths.workspace_dir, job_id
+                )
+                path = workspace / "analysis-gate.json"
+                path.write_text(json.dumps(gate, sort_keys=True) + "\n")
+                self.store.save_artifact(job_id, "analyze", path, gate)
+            raise
+        state = self._phase2_report_state(
+            job_id, inspected, segmented, analyzed, ranked, planned, validated
+        )
+        reports = self._ensure_report(job_id, state)
+        return state, reports, list(rendered.get("outputs", []))
+
     def _validate_recorded_destinations(self, job: dict[str, Any]) -> None:
         for name, root in (
             ("workspace", self.config.paths.workspace_dir),
@@ -1254,22 +2006,18 @@ class WorkflowService:
             )
         self._validate_recorded_destinations(job)
         if self.config.cloud_enabled:
-            # Fail closed: never emit Phase 1 sample edits for a cloud-mode job.
-            raise VideoEditorError(
-                ErrorCategory.STATE,
-                "phase 2 segment/analyze/rank stages are not wired yet",
-                code="phase2_not_implemented",
-                safe_details={"job_id": job_id},
+            report_state, reports, outputs = self._execute_phase2(job_id, input_path)
+        else:
+            inspected = self._ensure_inspect(job_id, input_path)
+            self._ensure_proxy(job_id)
+            planned = self._ensure_plan(job_id)
+            rendered = self._ensure_render(job_id, planned)
+            validated = self._ensure_validate(job_id, rendered)
+            report_state = self._report_state(
+                job_id, inspected, planned, rendered, validated
             )
-        inspected = self._ensure_inspect(job_id, input_path)
-        self._ensure_proxy(job_id)
-        planned = self._ensure_plan(job_id)
-        rendered = self._ensure_render(job_id, planned)
-        validated = self._ensure_validate(job_id, rendered)
-        report_state = self._report_state(
-            job_id, inspected, planned, rendered, validated
-        )
-        reports = self._ensure_report(job_id, report_state)
+            reports = self._ensure_report(job_id, report_state)
+            outputs = rendered.get("outputs", [])
         self.store.complete_job(job_id)
         # Rewrite reports from the authoritative completed job so the persisted
         # report never carries the pre-completion running status.
@@ -1281,7 +2029,7 @@ class WorkflowService:
                 write_markdown_report(final_state, path)
         return {
             "job_id": job_id,
-            "outputs": rendered.get("outputs", []),
+            "outputs": outputs,
             "reports": reports.get("artifacts", []),
         }
 
@@ -1328,9 +2076,20 @@ class WorkflowService:
     def status(self, job_id: str) -> dict[str, Any]:
         self._require_open_store()
         try:
-            return self.store.get_job(job_id)
+            job = self.store.get_job(job_id)
         except KeyError as exc:
             raise VideoEditorError(ErrorCategory.STATE, str(exc)) from exc
+        # Surface structured gate codes recorded alongside a failed stage.
+        for artifact in job.get("artifacts", []):
+            metadata = artifact.get("metadata")
+            stage = job.get("stages", {}).get(artifact.get("stage"), {})
+            if (
+                isinstance(metadata, dict)
+                and "code" in metadata
+                and isinstance(stage.get("error"), dict)
+            ):
+                stage["error"] = {**stage["error"], **metadata}
+        return job
 
     def resume(self, job_id: str) -> dict[str, Any]:
         self._require_open_store()
