@@ -8,7 +8,7 @@ import subprocess
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -619,7 +619,7 @@ def test_tampered_proxy_is_rejected_before_provider_upload(
     def tamper_after_segmentation(
         job_id: str, proxied: dict[str, Any]
     ) -> dict[str, Any]:
-        segmented = ensure_segment(job_id, proxied)
+        segmented = cast(dict[str, Any], ensure_segment(job_id, proxied))
         manifest = phase2.store.get_job(job_id)["proxy_manifests"][0]
         proxy_path = Path(manifest["data"]["artifact_path"])
         proxy_path.write_bytes(proxy_path.read_bytes() + b"tampered")

@@ -164,7 +164,18 @@ def _job_id(output: str) -> str:
     return match.group(1)
 
 
-def _normalize_phase2_artifact(value: Any, *, job_id: str, job_output: Path) -> Any:
+def _normalize_phase2_artifact(
+    value: Any,
+    *,
+    job_id: str,
+    job_output: Path,
+    run_ids: dict[str, str],
+) -> Any:
+    def normalize_run_id(raw_id: str) -> str:
+        if raw_id not in run_ids:
+            run_ids[raw_id] = f"<RUN_ID_{len(run_ids) + 1}>"
+        return run_ids[raw_id]
+
     volatile_keys = {
         "job_id",
         "started_at",
@@ -194,12 +205,13 @@ def _normalize_phase2_artifact(value: Any, *, job_id: str, job_output: Path) -> 
         run_identity_keys = {"manifest_id", "chunk_id"}
         return {
             key: (
-                "<RUN_ID>"
+                normalize_run_id(item)
                 if key in run_identity_keys and isinstance(item, str)
                 else _normalize_phase2_artifact(
                     "<JOB_ID>" if key == "job_id" else item,
                     job_id=job_id,
                     job_output=job_output,
+                    run_ids=run_ids,
                 )
             )
             for key, item in value.items()
@@ -207,7 +219,9 @@ def _normalize_phase2_artifact(value: Any, *, job_id: str, job_output: Path) -> 
         }
     if isinstance(value, list):
         return [
-            _normalize_phase2_artifact(item, job_id=job_id, job_output=job_output)
+            _normalize_phase2_artifact(
+                item, job_id=job_id, job_output=job_output, run_ids=run_ids
+            )
             for item in value
         ]
     if isinstance(value, str):
@@ -215,12 +229,22 @@ def _normalize_phase2_artifact(value: Any, *, job_id: str, job_output: Path) -> 
             str(job_output), "<JOB_OUTPUT>"
         )
         # Analysis chunks, provider candidates, and derived dedup groups receive
-        # run-specific IDs; normalize identifiers while preserving their links.
+        # run-specific IDs; map each distinct ID consistently across artifacts.
         normalized = re.sub(
-            r"analysis-chunk-[0-9a-f]{64}", "analysis-chunk-<RUN>", normalized
+            r"analysis-chunk-[0-9a-f]{64}",
+            lambda match: f"analysis-chunk-{normalize_run_id(match.group())}",
+            normalized,
         )
-        normalized = re.sub(r"dedup-[0-9a-f]{16}", "dedup-<RUN>", normalized)
-        normalized = re.sub(r"crop-[0-9a-f]{20}", "crop-<RUN>", normalized)
+        normalized = re.sub(
+            r"dedup-[0-9a-f]{16}",
+            lambda match: f"dedup-{normalize_run_id(match.group())}",
+            normalized,
+        )
+        normalized = re.sub(
+            r"crop-[0-9a-f]{20}",
+            lambda match: f"crop-{normalize_run_id(match.group())}",
+            normalized,
+        )
         return normalized
     return value
 
@@ -248,6 +272,28 @@ def _phase2_json_differences(first: Any, second: Any, path: str = "$") -> list[s
             differences.append(f"{path}: lengths {len(first)} != {len(second)}")
         return differences
     return [] if first == second else [f"{path}: {first!r} != {second!r}"]
+
+
+def test_run_id_normalization_preserves_distinct_references() -> None:
+    chunk_a = "analysis-chunk-" + "a" * 64
+    chunk_b = "analysis-chunk-" + "b" * 64
+    artifact = {
+        "chunks": [{"chunk_id": chunk_a}, {"chunk_id": chunk_b}],
+        "references": [chunk_a, chunk_b],
+    }
+    swapped_references = {
+        **artifact,
+        "references": [chunk_b, chunk_a],
+    }
+    normalized = _normalize_phase2_artifact(
+        artifact, job_id="job", job_output=Path("out"), run_ids={}
+    )
+    normalized_swapped = _normalize_phase2_artifact(
+        swapped_references, job_id="job", job_output=Path("out"), run_ids={}
+    )
+
+    assert normalized["chunks"][0]["chunk_id"] != normalized["chunks"][1]["chunk_id"]
+    assert normalized["references"] != normalized_swapped["references"]
 
 
 def _source_names(plan_path: Path) -> list[str]:
@@ -697,25 +743,42 @@ def test_phase2_public_cli_creates_full_offline_outputs_and_resumes(
     ]
     second_report = json.loads((second_job_output / "report.json").read_text())
     assert len(first_plans) == len(second_plans) == 3
+    first_run_ids: dict[str, str] = {}
+    second_run_ids: dict[str, str] = {}
     normalized_first_plans = [
-        _normalize_phase2_artifact(plan, job_id=job_id, job_output=job_output)
+        _normalize_phase2_artifact(
+            plan,
+            job_id=job_id,
+            job_output=job_output,
+            run_ids=first_run_ids,
+        )
         for plan in first_plans
     ]
     normalized_second_plans = [
         _normalize_phase2_artifact(
-            plan, job_id=second_job_id, job_output=second_job_output
+            plan,
+            job_id=second_job_id,
+            job_output=second_job_output,
+            run_ids=second_run_ids,
         )
         for plan in second_plans
     ]
+    assert set(first_run_ids.values()) == set(second_run_ids.values())
     assert not _phase2_json_differences(
         normalized_first_plans,
         normalized_second_plans,
     )
     normalized_first_report = _normalize_phase2_artifact(
-        first_report, job_id=job_id, job_output=job_output
+        first_report,
+        job_id=job_id,
+        job_output=job_output,
+        run_ids=first_run_ids,
     )
     normalized_second_report = _normalize_phase2_artifact(
-        second_report, job_id=second_job_id, job_output=second_job_output
+        second_report,
+        job_id=second_job_id,
+        job_output=second_job_output,
+        run_ids=second_run_ids,
     )
     report_differences = _phase2_json_differences(
         normalized_first_report,
