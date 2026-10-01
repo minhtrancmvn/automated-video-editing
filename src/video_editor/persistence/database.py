@@ -842,11 +842,15 @@ class JobStore:
         data: AnalysisResultData,
         *,
         validated: bool,
+        normalized: Mapping[str, Any] | None = None,
     ) -> None:
         """Persist one provider-neutral normalized analysis result."""
         if type(data) is not AnalysisResultData:
             raise TypeError("data must be exact AnalysisResultData")
-        data_json = _json_without_secrets(data.model_dump(mode="json"))
+        payload = data.model_dump(mode="json")
+        if normalized is not None:
+            payload["normalized"] = dict(normalized)
+        data_json = _json_without_secrets(payload)
         with self._transaction() as connection:
             self._job_exists(connection, job_id)
             chunk = connection.execute(
@@ -857,18 +861,31 @@ class JobStore:
                 raise KeyError(f"unknown analysis chunk: {chunk_id}")
             if chunk["job_id"] != job_id:
                 raise ValueError("analysis chunk belongs to another job")
-            conflicting = connection.execute(
-                """SELECT result_id, job_id, cache_key FROM analysis_results
-                WHERE result_id = ? OR (job_id = ? AND cache_key = ?)""",
-                (result_id, job_id, cache_key),
-            ).fetchall()
-            if conflicting and any(
-                row["result_id"] != result_id
-                or row["job_id"] != job_id
-                or row["cache_key"] != cache_key
-                for row in conflicting
+            result_owner = connection.execute(
+                "SELECT job_id, cache_key FROM analysis_results WHERE result_id = ?",
+                (result_id,),
+            ).fetchone()
+            if result_owner is not None and (
+                result_owner["job_id"] != job_id
+                or result_owner["cache_key"] != cache_key
             ):
                 raise ValueError("result ID or cache key is already assigned")
+            cached = connection.execute(
+                """SELECT result_id, chunk_id, mode, validated
+                FROM analysis_results WHERE job_id = ? AND cache_key = ?""",
+                (job_id, cache_key),
+            ).fetchone()
+            if cached is not None and cached["result_id"] != result_id:
+                if (
+                    bool(cached["validated"])
+                    or cached["chunk_id"] != chunk_id
+                    or cached["mode"] != mode
+                ):
+                    raise ValueError("result ID or cache key is already assigned")
+                connection.execute(
+                    "DELETE FROM analysis_results WHERE result_id = ?",
+                    (cached["result_id"],),
+                )
             connection.execute(
                 """INSERT INTO analysis_results(
                     result_id, job_id, cache_key, chunk_id, mode,
@@ -900,6 +917,10 @@ class JobStore:
         ).fetchone()
         if row is None:
             return None
+        payload = _row_json(row["data_json"])
+        normalized = (
+            payload.pop("normalized", None) if isinstance(payload, dict) else None
+        )
         return {
             "result_id": row["result_id"],
             "job_id": row["job_id"],
@@ -907,7 +928,8 @@ class JobStore:
             "chunk_id": row["chunk_id"],
             "mode": row["mode"],
             "validated": bool(row["validated"]),
-            "data": _row_json(row["data_json"]),
+            "data": payload,
+            **({"normalized": normalized} if normalized is not None else {}),
         }
 
     def initialize_budget(self, job_id: str, limit_usd: Decimal) -> None:
@@ -1055,6 +1077,27 @@ class JobStore:
         if row is None:
             raise KeyError(f"unknown analysis request: {request_id}")
         return cast(sqlite3.Row, row)
+
+    def verify_request_dispatchable(self, reservation: RequestReservation) -> None:
+        """Verify persisted ownership, identity, mode, status, and maximum."""
+        row = self.connection.execute(
+            """SELECT request_id, job_id, cache_key, mode, status,
+                      maximum_cost_microusd, data_json
+            FROM analysis_requests WHERE request_id = ?""",
+            (reservation.request_id,),
+        ).fetchone()
+        maximum = _usd_to_microusd(reservation.maximum_cost_usd, ROUND_CEILING)
+        if row is None:
+            raise KeyError(f"unknown analysis request: {reservation.request_id}")
+        if (
+            row["job_id"] != reservation.job_id
+            or row["cache_key"] != reservation.cache_key
+            or row["mode"] != reservation.mode
+            or row["status"] != "reserved"
+            or int(row["maximum_cost_microusd"]) != maximum
+            or row["data_json"] != reservation.model_dump_json()
+        ):
+            raise ValueError("persisted request is not dispatchable for reservation")
 
     def mark_request_dispatched(self, request_id: str) -> None:
         """Record that provider dispatch began while preserving reservation."""
