@@ -548,10 +548,28 @@ class BroadScanResponse(AnalysisModel):
     candidates: tuple[BroadCandidate, ...]
 
 
+class CandidateSubjectBox(AnalysisModel):
+    """Timestamped normalized subject box used only as a local tracking seed."""
+
+    time: ProviderDecimal = Field(ge=0)
+    x: StrictScore
+    y: StrictScore
+    w: StrictScore
+    h: StrictScore
+    priority: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_bounds(self) -> Self:
+        """Keep a non-empty box inside the normalized frame."""
+        if self.w <= 0 or self.h <= 0 or self.x + self.w > 1 or self.y + self.h > 1:
+            raise ValueError("subject box must lie inside the frame")
+        return self
+
+
 class CandidateRefinementResponse(TimeRange):
     """Strict detailed candidate semantics bounded to one requested interval."""
 
-    schema_version: Literal["candidate-v1"]
+    schema_version: Literal["candidate-v2"]
     chunk_id: NonEmptyString
     candidate_id: NonEmptyString
     action_completeness: StrictScore
@@ -564,6 +582,14 @@ class CandidateRefinementResponse(TimeRange):
     adjacent_scene_compatibility: StrictScore
     speech_meaning_summary: NonEmptyString | None = None
     confidence: StrictScore
+    subject_boxes: tuple[CandidateSubjectBox, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_subject_boxes(self) -> Self:
+        """Require every subject seed inside the refined candidate interval."""
+        if any(not self.start <= box.time <= self.end for box in self.subject_boxes):
+            raise ValueError("subject box time must lie inside candidate interval")
+        return self
 
 
 class ProviderResult[ResponseT](AnalysisModel):
@@ -601,6 +627,16 @@ class AnalysisProvider(Protocol):
         prompt_version: str,
     ) -> ProviderResult[CandidateRefinementResponse]:
         """Analyze one candidate under a persisted reservation."""
+        ...
+
+    def maximum_request_cost(
+        self,
+        manifest_id: str,
+        chunk: AnalysisChunk,
+        *,
+        prompt_version: str,
+    ) -> Decimal:
+        """Return a conservative maximum USD cost for one request interval."""
         ...
 
     def delete_upload(self, upload: UploadedFile) -> None:

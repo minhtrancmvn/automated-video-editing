@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import time
@@ -139,6 +140,30 @@ class GeminiAdapter:
         return (maximum * _MICRO_USD).to_integral_value(
             rounding=ROUND_CEILING
         ) / _MICRO_USD
+
+    def maximum_request_cost(
+        self,
+        manifest_id: str,
+        chunk: AnalysisChunk,
+        *,
+        prompt_version: str,
+    ) -> Decimal:
+        """Delegate to the conservative broad estimator; scale candidate requests.
+
+        Candidate requests sample at most 5 FPS versus 0.5 FPS broad, so their
+        bound is the broad bound for the same interval multiplied by ten.
+        """
+        if self._pricing is None:
+            raise VideoEditorError(
+                ErrorCategory.BUDGET,
+                "Gemini pricing is required to bound request cost",
+                code="provider_pricing_unavailable",
+            )
+        with AuthorizedUpload(manifest_id, io.BytesIO()) as placeholder:
+            broad = self.estimate_broad_request_maximum(
+                placeholder, chunk, self._pricing
+            )
+        return broad if prompt_version.startswith("broad") else broad * 10
 
     def upload(self, authorization: AuthorizedUpload) -> UploadedFile:
         """Upload exact bytes from one validated upload authorization."""
@@ -579,11 +604,11 @@ class GeminiAdapter:
                     "Do not identify any person.",
                 )
             )
-        if prompt_version == "candidate-v1" and candidate_id is not None:
+        if prompt_version == "candidate-v2" and candidate_id is not None:
             return "\n".join(
                 (
                     "mode: candidate",
-                    "prompt_version: candidate-v1",
+                    "prompt_version: candidate-v2",
                     f"reservation_id: {request.reservation_id}",
                     f"job_id: {request.job_id}",
                     f"chunk_id: {chunk_id}",
@@ -591,6 +616,10 @@ class GeminiAdapter:
                     f"interval: {interval}",
                     "Return only JSON matching response schema.",
                     "Speech meaning may be summarized only for this candidate interval.",
+                    (
+                        "Return timestamped normalized subject_boxes (time, x, y, w, h,"
+                        " priority) inside the interval as tracking seeds only."
+                    ),
                     "Do not identify any person.",
                 )
             )

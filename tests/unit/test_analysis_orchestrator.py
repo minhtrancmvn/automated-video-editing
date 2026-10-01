@@ -128,7 +128,7 @@ class FakeProvider:
         return ProviderResult(
             response=CandidateRefinementResponse.model_validate(
                 {
-                    "schema_version": "candidate-v1",
+                    "schema_version": "candidate-v2",
                     "chunk_id": candidate.chunk_id,
                     "candidate_id": candidate.candidate_id,
                     "start": format(candidate.start, "f"),
@@ -849,8 +849,8 @@ def test_candidate_budget_exhaustion_emits_no_candidate_provider_call(
             update={
                 "mode": "candidate",
                 "fps": D(2),
-                "prompt_version": "candidate-v1",
-                "response_schema_version": "candidate-v1",
+                "prompt_version": "candidate-v2",
+                "response_schema_version": "candidate-v2",
             }
         )
         request = CandidateAnalysisRequest(
@@ -1053,8 +1053,8 @@ def _candidate_request(index: int, score: float) -> CandidateAnalysisRequest:
             "source_end": D(index),
             "mode": "candidate",
             "fps": D(2),
-            "prompt_version": "candidate-v1",
-            "response_schema_version": "candidate-v1",
+            "prompt_version": "candidate-v2",
+            "response_schema_version": "candidate-v2",
             "proxy_digest": f"digest-{chunk_id}",
         }
     )

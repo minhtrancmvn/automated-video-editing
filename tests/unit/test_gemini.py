@@ -680,7 +680,7 @@ def test_candidate_request_uses_bounded_fps_and_duration_string_offsets(
         candidate,
         candidate_request,
         fps=fps,
-        prompt_version="candidate-v1",
+        prompt_version="candidate-v2",
     )
 
     assert CandidateRefinementResponse is not None
@@ -708,13 +708,13 @@ def test_candidate_prompt_is_versioned_and_bounds_speech_meaning(
         candidate,
         candidate_request,
         fps=3,
-        prompt_version="candidate-v1",
+        prompt_version="candidate-v2",
     )
 
     prompt = request_prompt(fake_client.models.requests[0])
     for required in (
         "mode: candidate",
-        "prompt_version: candidate-v1",
+        "prompt_version: candidate-v2",
         "reservation_id: reservation-candidate-1",
         "job_id: job-1",
         "chunk_id: chunk-1",
@@ -729,7 +729,7 @@ def test_candidate_prompt_is_versioned_and_bounds_speech_meaning(
 
 @pytest.mark.parametrize(
     ("operation", "prompt_version"),
-    [("broad", "broad-v2"), ("candidate", "candidate-v2")],
+    [("broad", "broad-v2"), ("candidate", "candidate-v1")],
 )
 def test_unknown_prompt_version_is_rejected_before_generation(
     adapter: Any,

@@ -123,7 +123,7 @@ class FakeAnalysisProvider:
         return ProviderResult(
             response=CandidateRefinementResponse.model_validate(
                 {
-                    "schema_version": "candidate-v1",
+                    "schema_version": "candidate-v2",
                     "chunk_id": candidate.chunk_id,
                     "candidate_id": candidate.candidate_id,
                     "start": format(candidate.start, "f"),
@@ -138,10 +138,26 @@ class FakeAnalysisProvider:
                     "adjacent_scene_compatibility": 0.8,
                     "speech_meaning_summary": None,
                     "confidence": 0.9,
+                    "subject_boxes": [
+                        {
+                            "time": format(candidate.start, "f"),
+                            "x": float((40 + 40 * candidate.start) / 640) - 0.01,
+                            "y": 0.37,
+                            "w": 0.15,
+                            "h": 0.26,
+                            "priority": 0,
+                        }
+                    ],
                 }
             ),
             usage=_usage(request.reservation_id),
         )
+
+    def maximum_request_cost(
+        self, manifest_id: str, chunk: Any, *, prompt_version: str
+    ) -> Decimal:
+        del manifest_id, chunk, prompt_version
+        return D("0.0001")
 
     def delete_upload(self, upload: UploadedFile) -> None:
         self.deleted.append(upload.name)
@@ -191,7 +207,7 @@ def _make_source(path: Path, color: str, seconds: int = 8) -> Path:
             "-f",
             "lavfi",
             "-i",
-            f"color=c=white:s=80x80:r=30:d={seconds}",
+            f"testsrc=s=80x80:r=30:d={seconds}",
             "-f",
             "lavfi",
             "-i",
