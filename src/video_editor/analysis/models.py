@@ -274,6 +274,62 @@ class CandidateWindow(AnalysisModel):
         return self
 
 
+class PairwiseSimilarity(AnalysisModel):
+    """Supplied visual or semantic similarity to another candidate."""
+
+    other_candidate_id: NonEmptyString
+    visual: FiniteDecimal | None = None
+    semantic: FiniteDecimal | None = None
+    evidence_ids: tuple[NonEmptyString, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_measurement(self) -> Self:
+        """Require at least one supplied similarity measurement."""
+        if self.visual is None and self.semantic is None:
+            raise ValueError("visual or semantic similarity is required")
+        return self
+
+
+class RankingCandidateEvidence(AnalysisModel):
+    """Validated normalized evidence consumed by deterministic ranking."""
+
+    candidate_id: NonEmptyString
+    source_id: NonEmptyString
+    source_start: FiniteDecimal = Field(ge=0)
+    source_end: FiniteDecimal = Field(gt=0)
+    category: NonEmptyString
+    event_id: NonEmptyString | None = None
+    exact_event_id: NonEmptyString | None = None
+    location_id: NonEmptyString | None = None
+    confidence: FiniteDecimal
+    action: FiniteDecimal
+    scenic: FiniteDecimal
+    human: FiniteDecimal
+    story: FiniteDecimal
+    technical: FiniteDecimal
+    novelty: FiniteDecimal
+    completeness: FiniteDecimal
+    long_story: FiniteDecimal
+    short: FiniteDecimal
+    vertical: FiniteDecimal
+    blur_exposure: FiniteDecimal
+    shake_obstruction: FiniteDecimal
+    incomplete: FiniteDecimal
+    weak_boundary: FiniteDecimal
+    repetition: FiniteDecimal
+    overlap: FiniteDecimal
+    evidence_ids: tuple[NonEmptyString, ...]
+    technical_failure_codes: tuple[NonEmptyString, ...] = ()
+    similarities: tuple[PairwiseSimilarity, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_interval(self) -> Self:
+        """Reject empty or reversed source intervals."""
+        if self.source_end <= self.source_start:
+            raise ValueError("candidate source end must be greater than start")
+        return self
+
+
 class UploadedFile(AnalysisModel):
     """Provider upload identity linked to its authorization manifest ID."""
 
