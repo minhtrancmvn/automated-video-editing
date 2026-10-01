@@ -245,3 +245,129 @@ def test_gemini_maximum_request_cost_fails_closed_without_pricing() -> None:
     with pytest.raises(VideoEditorError) as caught:
         adapter.maximum_request_cost("m-1", _chunk(), prompt_version="broad-v1")
     assert caught.value.code == "provider_pricing_unavailable"
+
+
+def _scene(scene_id: str, setting: str, start: str = "0", end: str = "5") -> Any:
+    from video_editor.analysis.models import BroadScene
+
+    return BroadScene.model_validate(
+        {
+            "scene_id": scene_id,
+            "start": start,
+            "end": end,
+            "summary": "fixture scene",
+            "actions": ["walk"],
+            "setting": setting,
+            "scenic_interest": 0.5,
+            "human_interaction": 0.5,
+            "story_milestone": False,
+            "technical_problems": [],
+            "vertical_suitability": 0.5,
+            "confidence": 0.9,
+        }
+    )
+
+
+def test_evidence_map_takes_event_and_location_from_overlapping_scene() -> None:
+    evidence = map_ranking_evidence(
+        _broad(),
+        _refined(),
+        _chunk(),
+        _segmentation(),
+        scenes=(_scene("scene-a", " Beach "), _scene("scene-b", "Pier", "4", "5")),
+    )
+    assert evidence.event_id == "chunk-1:scene-a"
+    assert evidence.exact_event_id == "chunk-1:scene-a@11-13"
+    assert evidence.location_id == "beach"
+    bare = map_ranking_evidence(_broad(), _refined(), _chunk(), _segmentation())
+    assert (bare.event_id, bare.exact_event_id, bare.location_id) == (None, None, None)
+
+
+def _scene_ranked(
+    specs: list[tuple[str, str, str, str, str]], settings: RankingSettings
+) -> list[Any]:
+    evidence = [
+        map_ranking_evidence(
+            _broad(),
+            _refined(candidate_id=candidate_id, start=start, end=end, subject_boxes=[]),
+            _chunk("s-1", "0"),
+            _segmentation(),
+            scenes=(_scene(scene_id, setting, "0", "5"),),
+        )
+        for candidate_id, start, end, scene_id, setting in specs
+    ]
+    ranked = rank_candidates(evidence, settings)
+    order = {spec[0]: index for index, spec in enumerate(specs)}
+    return sorted(ranked, key=lambda item: order[item.candidate_id])
+
+
+def test_scene_identity_makes_event_and_location_transitions_reachable() -> None:
+    specs = [
+        ("a", "0", "1", "s1", "beach"),
+        ("b", "1", "2", "s1", "beach"),
+        ("c", "2", "3", "s1", "beach"),
+        ("d", "3.5", "4", "s1", "beach"),
+        ("e", "4", "4.5", "s2", "pier"),
+        ("f", "4.5", "5", "s2", "pier"),
+    ]
+    settings = RankingSettings(
+        max_source_share=D(1),
+        max_event_share=D(1),
+        max_location_share=D(1),
+        max_category_share=D(1),
+    )
+    evidence = [
+        map_ranking_evidence(
+            _broad(),
+            _refined(candidate_id=cid, start=start, end=end, subject_boxes=[]),
+            _chunk("s-1", "0"),
+            _segmentation(),
+            scenes=(_scene(scene, setting, start, end),),
+        )
+        for cid, start, end, scene, setting in specs
+    ]
+    ranked = sorted(
+        rank_candidates(evidence, settings), key=lambda item: item.candidate_id
+    )
+    relations = {
+        (item.from_candidate_id, item.to_candidate_id): item.relation
+        for item in derive_transition_evidence(ranked, {"s-1": "ch-1"})
+    }
+    assert relations[("d", "e")] == "location_change"
+    same_scene = sorted(
+        _scene_ranked(specs, settings), key=lambda item: item.candidate_id
+    )
+    relations = {
+        (item.from_candidate_id, item.to_candidate_id): item.relation
+        for item in derive_transition_evidence(same_scene, {"s-1": "ch-1"})
+    }
+    assert relations[("b", "c")] == "continuous_action"
+    assert relations[("c", "d")] == "same_event"
+
+
+def test_scene_identity_activates_ranking_event_and_location_quotas() -> None:
+    specs = [
+        (f"c{index}", str(index), str(index + 1), "s1", "beach") for index in range(4)
+    ]
+    ranked = _scene_ranked(
+        specs,
+        RankingSettings(
+            max_source_share=D(1),
+            max_category_share=D(1),
+            max_location_share=D(1),
+            max_event_share=D("0.25"),
+            max_selected=4,
+        ),
+    )
+    assert any("event_quota" in item.reason_codes for item in ranked)
+    ranked = _scene_ranked(
+        specs,
+        RankingSettings(
+            max_source_share=D(1),
+            max_category_share=D(1),
+            max_event_share=D(1),
+            max_location_share=D("0.25"),
+            max_selected=4,
+        ),
+    )
+    assert any("location_quota" in item.reason_codes for item in ranked)

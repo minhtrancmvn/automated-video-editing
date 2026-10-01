@@ -130,3 +130,40 @@ Final status: DONE. All 9 tests in `test_phase2_workflow.py` pass and Phase 1 st
 - `status()` merges the `analysis-gate.json` record (`code`, `missing`) into the failed stage's error. This side file stays as directed.
 - Real cloud runs still fail closed at the reservation step until gemini-2.5-flash pricing is pinned.
 - The Phase 2 integration tests are slow, about 120s for 9 real-ffmpeg tests.
+
+## Fix Round 1 (task-12-review.md: #1, #2, #4; #3 parked as a pre-live blocker)
+
+### Impact
+- `_report_state`: LOW (1 direct).
+- `_run_stage`: MEDIUM (8 direct, 0 processes). It gains a keyword-only `preserve_artifacts` override, and the default behaviour is unchanged.
+- `map_ranking_evidence`: not in the code-intelligence index (new file). Its only callers are `_ensure_rank` and the tests.
+
+### RED (each confirmed failing before the fix)
+- #1: `test_changed_short_plan_rerenders_only_that_output_and_drops_orphans` failed on `assert short.stat().st_mtime_ns != short_mtime`. The stale short was reused because its digest was compared with itself.
+- #2: `test_reports_never_contain_generated_or_upload_paths` failed because report.json contained the proxy path `cache/<job>/<hash>.proxy.mp4`.
+- #4: three `test_evidence.py` tests failed:
+  - `test_evidence_map_takes_event_and_location_from_overlapping_scene`
+  - `test_scene_identity_makes_event_and_location_transitions_reachable`
+  - `test_scene_identity_activates_ranking_event_and_location_quotas`
+
+### Fixes
+1. Render reuse (`_ensure_render_v2`, `_render_v2`):
+   - The recorded render artifacts are snapshotted before the render stage starts.
+   - An output is reused only when its stored `plan_digest` equals the current digest, or when the output is newer than its plan (crash before save, as in Phase 1). It must also pass `_artifact_valid`.
+   - Phase 2 stages now start with `preserve_artifacts=False`, and render re-saves only the current plan set. Orphan render rows are therefore dropped. Files on disk are never deleted, and the test asserts the orphan file still exists.
+2. Report payload (`_report_job_view`, applied to the Phase 2 report state and to the final authoritative rewrite):
+   - Drops `proxy_manifests` and `analysis_results`.
+   - Removes stage `result` payloads, which contained cache and workspace paths.
+   - Keeps only plan/render/report artifacts.
+   - `analysis.manifests` remains as the safe summary. The Phase 1 report is unchanged, including `sources[].path`.
+3. Event and location in `evidence-map-v1` (no version bump):
+   - The analyze stage records each chunk's broad scenes, read through `find_analysis_result` and `analysis_cache_key`.
+   - `map_ranking_evidence(..., scenes=...)` picks the most-overlapping scene (ties: earliest start, then `scene_id`). It sets `event_id = chunk_id:scene_id`, `exact_event_id = event_id@start-end`, and `location_id = setting` stripped and lowercased.
+   - `same_event`, `location_change` and `continuous_action` are now reachable, and the event/location quotas take effect.
+
+### Gates
+- Focused: `test_evidence.py` 12 passed; `test_phase2_workflow.py` 11 passed.
+- Full offline (`-m 'not gemini_live'`): 787 passed, 1 deselected.
+- `mypy src`: clean. Ruff check and format: clean. `uv build`: ok. `video-editor --help`: ok. `git diff --check`: clean.
+- Code-intelligence `detect_changes`: low risk, 0 affected processes.
+- No docs, plan, task_plan, CLAUDE.md or AGENTS.md drift.

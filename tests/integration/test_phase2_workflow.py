@@ -456,3 +456,54 @@ def test_missing_short_rerenders_only_that_output(phase2: Phase2Env) -> None:
     assert outputs["short-01.mp4"].is_file()
     assert outputs["long.mp4"].stat().st_mtime_ns == long_mtime
     assert [Path(item["output"]).name for item in resumed["outputs"]] == list(outputs)
+
+
+def test_changed_short_plan_rerenders_only_that_output_and_drops_orphans(
+    phase2: Phase2Env,
+) -> None:
+    result = phase2.service.run(phase2.input_dir)
+    job_id = result["job_id"]
+    outputs = {Path(item["output"]).name: item for item in result["outputs"]}
+    short = Path(outputs["short-01.mp4"]["output"])
+    long = Path(outputs["long.mp4"]["output"])
+    short_mtime = short.stat().st_mtime_ns
+    long_mtime = long.stat().st_mtime_ns
+    plan_path = Path(outputs["short-01.mp4"]["plan"])
+    plan = json.loads(plan_path.read_text())
+    plan["output"]["theme_summary"] = "edited theme, same clips and duration"
+    plan_path.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n")
+    orphan = long.parent / "short-09.mp4"
+    orphan.write_bytes(b"stale output from an older plan set")
+    phase2.store.save_artifact(
+        job_id, "render", orphan, {"plan": str(plan_path), "plan_digest": "old"}
+    )
+
+    phase2.service.resume(job_id)
+
+    assert short.stat().st_mtime_ns != short_mtime
+    assert long.stat().st_mtime_ns == long_mtime
+    state = phase2.service.status(job_id)
+    render_paths = {Path(item["path"]).name for item in _artifacts(state, "render")}
+    assert "short-09.mp4" not in render_paths
+    assert orphan.is_file()
+
+
+def test_reports_never_contain_generated_or_upload_paths(phase2: Phase2Env) -> None:
+    result = phase2.service.run(phase2.input_dir)
+    job_id = result["job_id"]
+    texts = [Path(path).read_text() for path in result["reports"]]
+    manifests = phase2.store.get_job(job_id)["proxy_manifests"]
+    assert manifests
+    forbidden = {
+        str(phase2.config.paths.cache_dir / job_id),
+        str(phase2.config.paths.workspace_dir / job_id),
+    }
+    for item in manifests:
+        forbidden.update(
+            str(item["data"][key]) for key in ("artifact_path", "generated_root")
+        )
+    for text in texts:
+        for value in forbidden:
+            assert value not in text
+        assert "proxy_manifests" not in text
+        assert "analysis_results" not in text

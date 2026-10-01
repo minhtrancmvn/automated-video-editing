@@ -28,6 +28,8 @@ from video_editor.analysis.models import (
     AnalysisChunkData,
     AnalysisProvider,
     BroadCandidate,
+    BroadScanResponse,
+    BroadScene,
     CandidateRefinementResponse,
     CandidateWindow,
     CropTrack,
@@ -39,6 +41,7 @@ from video_editor.analysis.orchestrator import (
     AnalysisOutcome,
     BroadAnalysisRequest,
     CandidateAnalysisRequest,
+    analysis_cache_key,
     run_broad_analysis,
     run_candidate_refinement,
 )
@@ -163,6 +166,26 @@ def _mapping(data: dict[str, Any]) -> ProxyMapping:
 
 
 _MICRO = Decimal("0.000001")
+_REPORT_ARTIFACT_STAGES = frozenset({"plan", "render", "report"})
+
+
+def _report_job_view(state: dict[str, Any]) -> dict[str, Any]:
+    """Drop raw manifests, cached results, and generated-path stage records."""
+    view = {
+        key: value
+        for key, value in state.items()
+        if key not in {"proxy_manifests", "analysis_results"}
+    }
+    view["stages"] = {
+        name: {key: value for key, value in stage.items() if key != "result"}
+        for name, stage in state.get("stages", {}).items()
+    }
+    view["artifacts"] = [
+        item
+        for item in state.get("artifacts", [])
+        if item.get("stage") in _REPORT_ARTIFACT_STAGES
+    ]
+    return view
 
 
 def _plain_track(track: CropTrack) -> CropTrack:
@@ -588,6 +611,8 @@ class WorkflowService:
         settings: Any,
         category: ErrorCategory,
         operation: Callable[[], _T],
+        *,
+        preserve_artifacts: bool | None = None,
     ) -> _T:
         stage_number = self.stages.index(name) + 1
         if self.progress is not None:
@@ -599,7 +624,9 @@ class WorkflowService:
             name,
             fingerprint,
             settings,
-            preserve_artifacts=name == "render",
+            preserve_artifacts=(
+                name == "render" if preserve_artifacts is None else preserve_artifacts
+            ),
         )
         try:
             result = operation()
@@ -1368,7 +1395,15 @@ class WorkflowService:
             self.store.complete_stage(job_id, name, result)
             return result
 
-        return self._run_stage(job_id, name, fingerprint, settings, category, run)
+        return self._run_stage(
+            job_id,
+            name,
+            fingerprint,
+            settings,
+            category,
+            run,
+            preserve_artifacts=False,
+        )
 
     def _ensure_segment(self, job_id: str, proxied: dict[str, Any]) -> dict[str, Any]:
         def operation() -> dict[str, Any]:
@@ -1518,6 +1553,7 @@ class WorkflowService:
                 raise _gate_error(job_id, outcome, "broad analysis")
             candidate_requests: list[CandidateAnalysisRequest] = []
             broad_by_id: dict[str, tuple[str, BroadCandidate]] = {}
+            scenes_by_chunk: dict[str, list[dict[str, Any]]] = {}
             for item, request, source_range in zip(
                 chunks, requests, ranges, strict=True
             ):
@@ -1530,6 +1566,17 @@ class WorkflowService:
                     expected_ranges=[source_range],
                     requests=[request],
                 )
+                stored = self.store.find_analysis_result(
+                    job_id, analysis_cache_key(request.cache_identity)
+                )
+                scenes = (
+                    BroadScanResponse.model_validate(stored["normalized"]).scenes
+                    if stored is not None and stored.get("normalized") is not None
+                    else ()
+                )
+                scenes_by_chunk[item["chunk_id"]] = [
+                    scene.model_dump(mode="json") for scene in scenes
+                ]
                 for broad in per_chunk.candidates:
                     if not isinstance(broad, BroadCandidate):
                         continue
@@ -1582,6 +1629,7 @@ class WorkflowService:
             candidates = [
                 {
                     "chunk_id": broad_by_id[item.candidate_id][0],
+                    "scenes": scenes_by_chunk[broad_by_id[item.candidate_id][0]],
                     "broad": broad_by_id[item.candidate_id][1].model_dump(mode="json"),
                     "refined": item.model_dump(mode="json"),
                 }
@@ -1625,6 +1673,10 @@ class WorkflowService:
                         CandidateRefinementResponse.model_validate(item["refined"]),
                         chunk,
                         segmentations[chunk.source_id],
+                        scenes=tuple(
+                            BroadScene.model_validate(scene)
+                            for scene in item.get("scenes", [])
+                        ),
                     )
                 )
             ranked = rank_candidates(evidence, RANKING_SETTINGS)
@@ -1770,7 +1822,12 @@ class WorkflowService:
         )
 
     def _render_v2(
-        self, job_id: str, path: Path, plan: EditPlanV2, output_root: Path
+        self,
+        job_id: str,
+        path: Path,
+        plan: EditPlanV2,
+        output_root: Path,
+        stored: dict[str, Any] | None,
     ) -> dict[str, Any]:
         metadata: dict[str, Any] = {
             "plan": str(path),
@@ -1780,9 +1837,19 @@ class WorkflowService:
         }
         final = output_root / plan.output.filename
         self._protect_sources(final, [source.path for source in plan.sources])
+        # Reuse only an output recorded for this exact plan digest, or one written
+        # after the plan (crash before its artifact was persisted), like Phase 1.
+        reusable = (
+            final.is_file()
+            and (
+                (stored or {}).get("plan_digest") == metadata["plan_digest"]
+                or final.stat().st_mtime_ns >= path.stat().st_mtime_ns
+            )
+            and self._artifact_valid("render", final, metadata)
+        )
         # Persist expected final before render; resume validates each output alone.
         self.store.save_artifact(job_id, "render", final, metadata)
-        if self._artifact_valid("render", final, metadata):
+        if reusable:
             return {"output": str(final), **metadata}
         command = compile_render(
             plan, "ffmpeg", output_dir=output_root, output_name=plan.output.filename
@@ -1800,6 +1867,12 @@ class WorkflowService:
 
     def _ensure_render_v2(self, job_id: str, planned: dict[str, Any]) -> dict[str, Any]:
         plan_paths = [Path(value) for value in planned.get("plans", [])]
+        # Snapshot recorded renders before the stage restarts and drops stale rows.
+        previous = {
+            str(item.get("path")): cast(dict[str, Any], item["metadata"])
+            for item in self.store.get_job(job_id).get("artifacts", [])
+            if item.get("stage") == "render" and isinstance(item.get("metadata"), dict)
+        }
 
         def operation() -> dict[str, Any]:
             output = self._configured_destination(self.config.paths.output_dir, job_id)
@@ -1820,7 +1893,13 @@ class WorkflowService:
             )
             output.mkdir(parents=True, exist_ok=True)
             outputs = [
-                self._render_v2(job_id, path, plan, output)
+                self._render_v2(
+                    job_id,
+                    path,
+                    plan,
+                    output,
+                    previous.get(str(output / plan.output.filename)),
+                )
                 for path, plan in zip(plan_paths, plans, strict=True)
             ]
             return {"outputs": outputs, "estimated_bytes": estimate}
@@ -1944,6 +2023,7 @@ class WorkflowService:
             "chapters": planned.get("chapters", []),
             "short_themes": planned.get("themes", []),
         }
+        state = _report_job_view(state)
         state["cloud_usage"] = analyzed.get("budget", {}).get("spent_usd", "0")
         state["fallbacks"] = [
             warning
@@ -2022,6 +2102,8 @@ class WorkflowService:
         # Rewrite reports from the authoritative completed job so the persisted
         # report never carries the pre-completion running status.
         final_state = {**report_state, **self.store.get_job(job_id)}
+        if self.config.cloud_enabled:
+            final_state = _report_job_view(final_state)
         for path in (Path(value) for value in reports.get("artifacts", [])):
             if path.suffix == ".json":
                 write_json_report(final_state, path)

@@ -8,6 +8,7 @@ from decimal import Decimal
 from video_editor.analysis.models import (
     AnalysisChunkData,
     BroadCandidate,
+    BroadScene,
     CandidateRefinementResponse,
     LocalSegmentation,
     NormalizedSubjectBox,
@@ -62,6 +63,8 @@ def map_ranking_evidence(
     refined: CandidateRefinementResponse,
     chunk: AnalysisChunkData,
     segmentation: LocalSegmentation,
+    *,
+    scenes: Sequence[BroadScene] = (),
 ) -> RankingCandidateEvidence:
     """Map one refined candidate to ranking evidence using table evidence-map-v1.
 
@@ -80,6 +83,10 @@ def map_ranking_evidence(
       repetition            <- refinement.duplicate_similarity
       overlap               <- 0 (temporal overlap is handled by ranking dedup)
       confidence            <- min(broad.confidence, refinement.confidence)
+      event_id              <- "<chunk_id>:<scene_id>" of the most-overlapping broad
+                               scene (ties: earliest start, then scene_id)
+      exact_event_id        <- "<event_id>@<source_start>-<source_end>"
+      location_id           <- that scene's setting, stripped and lowercased
     """
     offset = chunk.source_start - chunk.proxy_start
     start = refined.start + offset
@@ -105,6 +112,21 @@ def map_ranking_evidence(
         for item in (*segmentation.motion, *segmentation.scenes)
         if item.source_range.start < end and item.source_range.end > start
     )
+    scene = min(
+        (
+            item
+            for item in scenes
+            if min(item.end, refined.end) - max(item.start, refined.start) > 0
+        ),
+        key=lambda item: (
+            -(min(item.end, refined.end) - max(item.start, refined.start)),
+            item.start,
+            item.scene_id,
+        ),
+        default=None,
+    )
+    event_id = f"{refined.chunk_id}:{scene.scene_id}" if scene is not None else None
+    setting = scene.setting.strip().lower() if scene is not None else ""
     composition = _d(refined.visual_composition)
     completeness = _d(refined.action_completeness)
     semantic = _d(refined.semantic_importance)
@@ -114,6 +136,13 @@ def map_ranking_evidence(
         source_start=start,
         source_end=end,
         category=broad.category,
+        event_id=event_id,
+        exact_event_id=(
+            f"{event_id}@{format(start, 'f')}-{format(end, 'f')}"
+            if event_id is not None
+            else None
+        ),
+        location_id=setting or None,
         confidence=min(_d(broad.confidence), _d(refined.confidence)),
         action=completeness,
         scenic=composition,
