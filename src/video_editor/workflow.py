@@ -14,6 +14,7 @@ from typing import Any, TypeVar, cast
 
 from pydantic import ValidationError
 
+from video_editor.analysis.models import AnalysisProvider
 from video_editor.config import AppConfig
 from video_editor.errors import ErrorCategory, VideoEditorError
 from video_editor.media.capabilities import detect_capabilities
@@ -52,8 +53,31 @@ from video_editor.rendering.runner import run_render
 from video_editor.reporting import write_json_report, write_markdown_report
 from video_editor.validation.outputs import validate_output
 
-STAGES = ("inspect", "proxy", "plan", "render", "validate", "report")
+PHASE1_STAGES = ("inspect", "proxy", "plan", "render", "validate", "report")
+PHASE2_STAGES = (
+    "inspect",
+    "proxy",
+    "segment",
+    "analyze",
+    "rank",
+    "plan",
+    "render",
+    "validate",
+    "report",
+)
+STAGES = PHASE1_STAGES
 IMPLEMENTATION_VERSION = "phase1-workflow-v2"
+STAGE_IMPLEMENTATION_VERSIONS = {
+    "inspect": "inspect-v2",
+    "proxy": "proxy-v2",
+    "segment": "segment-v1",
+    "analyze": "gemini-static-v1",
+    "rank": "ranking-v1",
+    "plan": "highlight-plan-v1",
+    "render": "render-v3",
+    "validate": "output-validation-v2",
+    "report": "report-v2",
+}
 _MIN_WRITE_BYTES = 1
 EXIT_CODES = {
     ErrorCategory.CONFIGURATION: 10,
@@ -123,10 +147,14 @@ class WorkflowService:
         config: AppConfig,
         store: JobStore,
         progress: Callable[[str], None] | None = None,
+        *,
+        provider: AnalysisProvider | None = None,
     ) -> None:
         self.config = config
         self.store = store
         self.progress = progress
+        self.provider = provider
+        self.stages = PHASE2_STAGES if config.cloud_enabled else PHASE1_STAGES
         # Phase 1 explicitly serializes all renders. Keep configured concurrency
         # validated for forward-compatible config, but never run parallel renders.
         self._render_lock = threading.Lock()
@@ -446,10 +474,10 @@ class WorkflowService:
         category: ErrorCategory,
         operation: Callable[[], _T],
     ) -> _T:
-        stage_number = STAGES.index(name) + 1
+        stage_number = self.stages.index(name) + 1
         if self.progress is not None:
             self.progress(
-                f"job {job_id}: [{stage_number}/{len(STAGES)}] {name} started"
+                f"job {job_id}: [{stage_number}/{len(self.stages)}] {name} started"
             )
         self._start(
             job_id,
@@ -462,7 +490,7 @@ class WorkflowService:
             result = operation()
             if self.progress is not None:
                 self.progress(
-                    f"job {job_id}: [{stage_number}/{len(STAGES)}] {name} completed"
+                    f"job {job_id}: [{stage_number}/{len(self.stages)}] {name} completed"
                 )
             return result
         except VideoEditorError as exc:
@@ -1225,6 +1253,14 @@ class WorkflowService:
                 f"source volume changed for {input_path}: expected {source_volume}, found {current_source_volume}",
             )
         self._validate_recorded_destinations(job)
+        if self.config.cloud_enabled:
+            # Fail closed: never emit Phase 1 sample edits for a cloud-mode job.
+            raise VideoEditorError(
+                ErrorCategory.STATE,
+                "phase 2 segment/analyze/rank stages are not wired yet",
+                code="phase2_not_implemented",
+                safe_details={"job_id": job_id},
+            )
         inspected = self._ensure_inspect(job_id, input_path)
         self._ensure_proxy(job_id)
         planned = self._ensure_plan(job_id)
@@ -1235,6 +1271,14 @@ class WorkflowService:
         )
         reports = self._ensure_report(job_id, report_state)
         self.store.complete_job(job_id)
+        # Rewrite reports from the authoritative completed job so the persisted
+        # report never carries the pre-completion running status.
+        final_state = {**report_state, **self.store.get_job(job_id)}
+        for path in (Path(value) for value in reports.get("artifacts", [])):
+            if path.suffix == ".json":
+                write_json_report(final_state, path)
+            else:
+                write_markdown_report(final_state, path)
         return {
             "job_id": job_id,
             "outputs": rendered.get("outputs", []),

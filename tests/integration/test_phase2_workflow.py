@@ -32,6 +32,7 @@ from video_editor.workflow import PHASE2_STAGES, WorkflowService
 
 D = Decimal
 SECRET = "AIza-offline-secret-never-persisted"
+_DEFAULT_CAP = Decimal("1.00")
 _CATEGORIES = ("action", "scenic", "human", "story")
 
 
@@ -229,7 +230,7 @@ class Phase2Env:
     store: JobStore
 
 
-def _config(tmp_path: Path, cost_cap: Decimal = D("1.00")) -> AppConfig:
+def _config(tmp_path: Path, cost_cap: Decimal = _DEFAULT_CAP) -> AppConfig:
     return AppConfig(
         PathSettings(
             *(
@@ -424,7 +425,9 @@ def test_changed_ranking_settings_invalidate_rank_onward_only(
 
 def test_missing_short_rerenders_only_that_output(phase2: Phase2Env) -> None:
     result = phase2.service.run(phase2.input_dir)
-    outputs = {Path(item["output"]).name: Path(item["output"]) for item in result["outputs"]}
+    outputs = {
+        Path(item["output"]).name: Path(item["output"]) for item in result["outputs"]
+    }
     assert "short-01.mp4" in outputs
     long_mtime = outputs["long.mp4"].stat().st_mtime_ns
     outputs["short-01.mp4"].unlink()

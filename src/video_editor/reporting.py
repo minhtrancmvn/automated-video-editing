@@ -4,13 +4,38 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 _LIMITATION = "Phase 1 uses deterministic sample selection; it is not automatic highlight intelligence."
+_AI_DISCLAIMER = (
+    "Outputs use automatic AI highlight selection; quality, completeness, and "
+    "subject framing are not guaranteed and should be reviewed before publishing."
+)
+_SECRET_KEYS = frozenset({"api_key", "gemini_api_key", "authorization", "credentials"})
+_UPLOAD_PATH_KEYS = frozenset({"source_path", "artifact_path", "generated_root"})
+
+
+def _redact(value: Any, drop: frozenset[str]) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _redact(item, drop)
+            for key, item in value.items()
+            if str(key).lower() not in drop
+        }
+    if isinstance(value, list | tuple):
+        return [_redact(item, drop) for item in value]
+    return value
 
 
 def _payload(job_state: dict[str, Any]) -> dict[str, Any]:
-    payload = dict(job_state)
+    payload = cast(dict[str, Any], _redact(dict(job_state), _SECRET_KEYS))
+    if "analysis" in payload:
+        # Cloud manifests are reported by ID/digest only, never by local upload path.
+        payload["analysis"] = _redact(payload["analysis"], _UPLOAD_PATH_KEYS)
+        payload.setdefault("ai_quality_disclaimer", _AI_DISCLAIMER)
+    payload["snapshot_status"] = (
+        "final" if payload.get("status") == "completed" else "pre_completion"
+    )
     payload.setdefault("selected_moments", [])
     payload.setdefault("skipped_inputs", [])
     payload.setdefault("warnings", [])
@@ -50,6 +75,7 @@ def write_markdown_report(job_state: dict[str, Any], path: Path) -> Path:
         "",
         f"- Job: `{state.get('job_id', 'unknown')}`",
         f"- Status: `{state.get('status', 'unknown')}`",
+        f"- Snapshot: `{state['snapshot_status']}`",
         f"- Cloud usage: {state.get('cloud_usage', 0)}",
         "",
         "## Selected moments",
@@ -82,6 +108,17 @@ def write_markdown_report(job_state: dict[str, Any], path: Path) -> Path:
             "",
         ]
     )
+    if "analysis" in state:
+        lines.extend(
+            [
+                "## Analysis",
+                *_lines(state["analysis"]),
+                "",
+                "## AI quality disclaimer",
+                str(state["ai_quality_disclaimer"]),
+                "",
+            ]
+        )
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines))
