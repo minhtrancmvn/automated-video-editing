@@ -89,14 +89,28 @@ def _read_frames(proxy: Path) -> tuple[list[NDArray[np.uint8]], Decimal]:
     return frames, Decimal(str(fps))
 
 
+def _source_time(frame_index: int, fps: Decimal, mapping: ProxyMapping) -> Decimal:
+    proxy_time = mapping.proxy_start + Decimal(frame_index) / fps
+    proxy_duration = mapping.proxy_end - mapping.proxy_start
+    source_duration = mapping.source_end - mapping.source_start
+    return mapping.source_start + (
+        (proxy_time - mapping.proxy_start) * source_duration / proxy_duration
+    )
+
+
 def _seed_at_frame(
     observations: Sequence[SubjectObservation],
     frame_index: int,
     fps: Decimal,
     mapping: ProxyMapping,
 ) -> SubjectObservation | None:
-    frame_source_time = mapping.source_start + Decimal(frame_index) / fps
-    half_frame = Decimal(1) / fps / 2
+    frame_source_time = _source_time(frame_index, fps, mapping)
+    source_frame_duration = (
+        (mapping.source_end - mapping.source_start)
+        / (mapping.proxy_end - mapping.proxy_start)
+        / fps
+    )
+    half_frame = source_frame_duration / 2
     matching = [
         item
         for item in observations
@@ -202,7 +216,7 @@ def _local_observation(
     seed: SubjectObservation,
     box: NormalizedSubjectBox,
 ) -> SubjectObservation:
-    source_time = mapping.source_start + Decimal(frame_index) / fps
+    source_time = _source_time(frame_index, fps, mapping)
     return SubjectObservation(
         observation_id=f"local-{frame_index:08d}-{seed.observation_id}",
         source_id=mapping.source_id,
@@ -554,13 +568,21 @@ def track_subject(
     if not subject_observations:
         return base
     frames, fps = _read_frames(proxy)
+    decoded_proxy_end = mapping.proxy_start + Decimal(len(frames)) / fps
+    candidate_proxy_end = mapping.proxy_start + (
+        (candidate_end - mapping.source_start)
+        * (mapping.proxy_end - mapping.proxy_start)
+        / (mapping.source_end - mapping.source_start)
+    )
+    if decoded_proxy_end < candidate_proxy_end:
+        return base
     active_seed: SubjectObservation | None = None
     active_box: NormalizedSubjectBox | None = None
     points: NDArray[np.float32] | None = None
     previous_gray: NDArray[np.uint8] | None = None
     local: list[SubjectObservation] = []
     for frame_index, frame in enumerate(frames):
-        frame_source_time = mapping.source_start + Decimal(frame_index) / fps
+        frame_source_time = _source_time(frame_index, fps, mapping)
         if frame_source_time < candidate_start or frame_source_time >= candidate_end:
             previous_gray = cast(
                 NDArray[np.uint8], cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -568,6 +590,7 @@ def track_subject(
             continue
         gray = cast(NDArray[np.uint8], cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
         seed = _seed_at_frame(subject_observations, frame_index, fps, mapping)
+        propagated_successfully = False
         if seed is not None:
             active_seed = seed
             active_box = seed.box
@@ -591,7 +614,13 @@ def track_subject(
                     (gray.shape[1], gray.shape[0]),
                 )
                 points = current_points if active_box is not None else None
-        if active_seed is not None and active_box is not None and points is not None:
+                propagated_successfully = active_box is not None
+        if (
+            propagated_successfully
+            and active_seed is not None
+            and active_box is not None
+            and points is not None
+        ):
             local.append(
                 _local_observation(
                     frame_index,

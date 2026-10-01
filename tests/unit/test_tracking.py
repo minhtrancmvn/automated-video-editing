@@ -5,18 +5,18 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from video_editor.analysis.tracking import (
-    best_static_crop,
-    smooth_crop_track,
-    track_subject,
-    validate_crop_track,
-)
 
 from video_editor.analysis.models import (
     CropKeyframe,
     CropTrack,
     NormalizedSubjectBox,
     SubjectObservation,
+)
+from video_editor.analysis.tracking import (
+    best_static_crop,
+    smooth_crop_track,
+    track_subject,
+    validate_crop_track,
 )
 from video_editor.config import CropSettings
 from video_editor.media.proxies import ProxyMapping
@@ -329,6 +329,119 @@ def test_best_static_fallback_is_deterministic_and_validated() -> None:
     assert first.short_eligible is True
     assert {item.fallback for item in first.keyframes} == {"static"}
     assert validate_crop_track(first, settings=CropSettings()).eligible is True
+
+
+def test_tracker_uses_complete_affine_proxy_mapping_for_local_observation_times(
+    tmp_path: Path,
+) -> None:
+    proxy = create_tracking_fixture(tmp_path)
+    mapping = ProxyMapping(
+        source_id="source-1",
+        source_start=D("100"),
+        source_end=D("112"),
+        proxy_start=D("10"),
+        proxy_end=D("16"),
+        source_identity=IDENTITY,
+        settings_hash="proxy-settings-hash",
+        tool_version="fixture-v1",
+    )
+
+    track = track_subject(
+        proxy,
+        mapping,
+        clip_id="clip-1",
+        candidate_start=D("100"),
+        candidate_end=D("112"),
+        subject_observations=(_subject("seed-1", "100", "0.08", "0.25", priority=2),),
+        source_size=SOURCE_SIZE,
+        output_size=OUTPUT_SIZE,
+        settings=CropSettings(),
+    )
+
+    assert track.observations[0].source_time == D("100.2")
+
+
+def test_seed_frame_without_propagation_is_short_ineligible(tmp_path: Path) -> None:
+    proxy = create_tracking_fixture(tmp_path, frame_count=1)
+    mapping = ProxyMapping(
+        source_id="source-1",
+        source_start=D("100"),
+        source_end=D("100.1"),
+        proxy_start=D("0"),
+        proxy_end=D("0.1"),
+        source_identity=IDENTITY,
+        settings_hash="proxy-settings-hash",
+        tool_version="fixture-v1",
+    )
+
+    track = track_subject(
+        proxy,
+        mapping,
+        clip_id="clip-1",
+        candidate_start=D("100"),
+        candidate_end=D("100.1"),
+        subject_observations=(_subject("seed-1", "100", "0.08", "0.25", priority=2),),
+        source_size=SOURCE_SIZE,
+        output_size=OUTPUT_SIZE,
+        settings=CropSettings(),
+    )
+
+    assert track.observations == ()
+    assert track.short_eligible is False
+
+
+def test_failed_optical_flow_produces_no_local_retention_evidence(
+    tmp_path: Path,
+) -> None:
+    proxy = create_tracking_fixture(tmp_path, occlusion=(1, 2), frame_count=2)
+    mapping = ProxyMapping(
+        source_id="source-1",
+        source_start=D("100"),
+        source_end=D("100.2"),
+        proxy_start=D("0"),
+        proxy_end=D("0.2"),
+        source_identity=IDENTITY,
+        settings_hash="proxy-settings-hash",
+        tool_version="fixture-v1",
+    )
+
+    track = track_subject(
+        proxy,
+        mapping,
+        clip_id="clip-1",
+        candidate_start=D("100"),
+        candidate_end=D("100.2"),
+        subject_observations=(_subject("seed-1", "100", "0.08", "0.25", priority=2),),
+        source_size=SOURCE_SIZE,
+        output_size=OUTPUT_SIZE,
+        settings=CropSettings(),
+    )
+
+    assert track.observations == ()
+    assert track.short_eligible is False
+
+
+def test_truncated_proxy_before_candidate_end_is_short_ineligible(
+    tmp_path: Path,
+) -> None:
+    proxy = create_tracking_fixture(tmp_path)
+    payload = proxy.read_bytes()
+    proxy.write_bytes(payload[: len(payload) // 2])
+
+    track = track_subject(
+        proxy,
+        _mapping(),
+        clip_id="clip-1",
+        candidate_start=D("100"),
+        candidate_end=D("106"),
+        subject_observations=(_subject("seed-1", "100", "0.08", "0.25", priority=2),),
+        source_size=SOURCE_SIZE,
+        output_size=OUTPUT_SIZE,
+        settings=CropSettings(),
+    )
+
+    assert track.observations == ()
+    assert track.short_eligible is False
 
 
 def test_static_fallback_marks_short_ineligible_when_margin_cannot_retain_subject() -> (
