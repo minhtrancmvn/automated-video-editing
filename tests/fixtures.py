@@ -126,3 +126,35 @@ def create_mono_wav(path: Path, *, frame_count: int, sample_rate: int = 16_000) 
         output.setframerate(sample_rate)
         output.writeframes(pcm.tobytes())
     return path
+
+
+def create_tracking_fixture(
+    root: Path,
+    *,
+    occlusion: tuple[int, int] | None = None,
+    frame_count: int = 60,
+) -> Path:
+    """Create deterministic textured subject movement with optional occlusion."""
+    root.mkdir(parents=True, exist_ok=True)
+    proxy = root / "tracking-proxy.avi"
+    fps = 10
+    width, height = 160, 90
+    writer = cv2.VideoWriter(
+        str(proxy), cv2.VideoWriter_fourcc(*"MJPG"), fps, (width, height)
+    )
+    if not writer.isOpened():
+        raise RuntimeError("OpenCV fixture video writer failed")
+    for frame_index in range(frame_count):
+        frame = np.full((height, width, 3), 20, dtype=np.uint8)
+        hidden = occlusion is not None and occlusion[0] <= frame_index < occlusion[1]
+        if not hidden:
+            x = 15 + min(frame_index, 40) * 2
+            y = 30
+            cv2.rectangle(frame, (x, y), (x + 24, y + 24), (235, 235, 235), -1)
+            for dx in (4, 12, 20):
+                for dy in (4, 12, 20):
+                    color = 15 if (dx + dy) % 8 == 0 else 100
+                    cv2.circle(frame, (x + dx, y + dy), 2, (color, color, color), -1)
+        writer.write(frame)
+    writer.release()
+    return proxy

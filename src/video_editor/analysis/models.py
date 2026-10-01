@@ -215,6 +215,105 @@ class LocalSegmentation(AnalysisModel):
     candidate_windows: tuple[IntervalEvidence, ...]
 
 
+class NormalizedSubjectBox(AnalysisModel):
+    """Normalized subject bounds in source coordinates."""
+
+    x_min: FiniteDecimal = Field(ge=0, le=1)
+    y_min: FiniteDecimal = Field(ge=0, le=1)
+    x_max: FiniteDecimal = Field(ge=0, le=1)
+    y_max: FiniteDecimal = Field(ge=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_bounds(self) -> Self:
+        """Reject empty or reversed normalized boxes."""
+        if self.x_max <= self.x_min or self.y_max <= self.y_min:
+            raise ValueError("subject box maximums must exceed minimums")
+        return self
+
+    @property
+    def center_x(self) -> Decimal:
+        """Return exact normalized horizontal center."""
+        return (self.x_min + self.x_max) / 2
+
+    @property
+    def center_y(self) -> Decimal:
+        """Return exact normalized vertical center."""
+        return (self.y_min + self.y_max) / 2
+
+
+class SubjectObservation(AnalysisModel):
+    """Identity-bound subject region from a seed or validated local track."""
+
+    observation_id: NonEmptyString
+    source_id: NonEmptyString
+    source_identity: NonEmptyString
+    source_time: FiniteDecimal = Field(ge=0)
+    box: NormalizedSubjectBox
+    priority: int = Field(ge=0)
+    origin: Literal["gemini_seed", "local_track"]
+    seed_observation_id: NonEmptyString | None = None
+
+
+class CropKeyframe(AnalysisModel):
+    """One deterministic clip-local crop center sample."""
+
+    time: FiniteDecimal = Field(ge=0)
+    center_x: FiniteDecimal = Field(ge=0, le=1)
+    center_y: FiniteDecimal = Field(ge=0, le=1)
+    subject_box_id: NonEmptyString | None = None
+    fallback: Literal["tracked", "hold", "ease_center", "static"]
+
+
+class CropTrack(AnalysisModel):
+    """Identity-bound local observations and validated crop path."""
+
+    track_id: NonEmptyString
+    clip_id: NonEmptyString
+    source_id: NonEmptyString
+    source_identity: NonEmptyString
+    source_width: int = Field(gt=0)
+    source_height: int = Field(gt=0)
+    output_width: int = Field(gt=0)
+    output_height: int = Field(gt=0)
+    crop_width: int = Field(gt=0)
+    crop_height: int = Field(gt=0)
+    observations: tuple[SubjectObservation, ...]
+    keyframes: tuple[CropKeyframe, ...]
+    short_eligible: bool
+
+    @model_validator(mode="after")
+    def validate_path(self) -> Self:
+        """Require matching identity, dimensions, and monotonic keyframes."""
+        if self.crop_width > self.source_width or self.crop_height > self.source_height:
+            raise ValueError("crop dimensions must fit source dimensions")
+        if any(
+            observation.source_id != self.source_id
+            or observation.source_identity != self.source_identity
+            for observation in self.observations
+        ):
+            raise ValueError("crop observations must match track source identity")
+        if any(
+            current.time <= previous.time
+            for previous, current in zip(self.keyframes, self.keyframes[1:])
+        ):
+            raise ValueError("crop keyframe times must be strictly increasing")
+        return self
+
+
+class CropValidation(AnalysisModel):
+    """Measured crop-path safety and local subject retention evidence."""
+
+    sampled_observations: int = Field(ge=0)
+    retained_samples: int = Field(ge=0)
+    retention_ratio: FiniteDecimal = Field(ge=0, le=1)
+    max_velocity: FiniteDecimal = Field(ge=0)
+    max_acceleration: FiniteDecimal = Field(ge=0)
+    monotonic: bool
+    bounded: bool
+    identity_matches: bool
+    eligible: bool
+
+
 class AnalysisResultData(AnalysisModel):
     """Provider-neutral metadata for one normalized analysis result."""
 
