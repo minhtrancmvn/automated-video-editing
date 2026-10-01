@@ -27,6 +27,7 @@ from video_editor.analysis.proxy_chunks import AuthorizedUpload
 from video_editor.analysis.ranking import RankingSettings
 from video_editor.config import AppConfig, GeminiSettings, PathSettings
 from video_editor.errors import ErrorCategory, VideoEditorError
+from video_editor.media.storage import inspect_volume
 from video_editor.persistence.database import JobStore
 from video_editor.workflow import PHASE2_STAGES, WorkflowService
 
@@ -431,6 +432,32 @@ def test_multiple_short_fixtures_create_distinct_bounded_outputs(
         for plan, name in zip(plans, names, strict=True)
     )
     assert all(plan["output"]["audio"] == "source" for plan in plans)
+    short_plans = plans[1:]
+    for first_index, first_plan in enumerate(short_plans):
+        for second_plan in short_plans[first_index + 1 :]:
+            for first_clip in first_plan["clips"]:
+                for second_clip in second_plan["clips"]:
+                    assert first_clip["dedup_group"] != second_clip["dedup_group"]
+                    if first_clip["source_identity"] != second_clip["source_identity"]:
+                        continue
+                    overlap = max(
+                        Decimal(0),
+                        min(
+                            Decimal(first_clip["source_end"]),
+                            Decimal(second_clip["source_end"]),
+                        )
+                        - max(
+                            Decimal(first_clip["source_start"]),
+                            Decimal(second_clip["source_start"]),
+                        ),
+                    )
+                    shorter_interval = min(
+                        Decimal(first_clip["source_end"])
+                        - Decimal(first_clip["source_start"]),
+                        Decimal(second_clip["source_end"])
+                        - Decimal(second_clip["source_start"]),
+                    )
+                    assert overlap / shorter_interval <= Decimal("0.10")
     assert Decimal(
         str(
             sum(
@@ -491,6 +518,81 @@ def test_multiple_short_fixtures_create_distinct_bounded_outputs(
         candidate_id.startswith("analysis-chunk-")
         for candidate_id in phase2.provider.refinement_candidate_ids
     )
+
+
+def test_phase2_missing_output_volume_fails_and_resumes_completed_stages(
+    phase2: Phase2Env,
+) -> None:
+    source_before = _source_digests(phase2.input_dir)
+    job_id = phase2.service._new_job(phase2.input_dir)
+    phase2.service._ensure_inspect(job_id, phase2.input_dir)
+    proxied = phase2.service._ensure_proxy(job_id)
+    segmented = phase2.service._ensure_segment(job_id, proxied)
+    analyzed = phase2.service._ensure_analyze(job_id, segmented)
+    ranked = phase2.service._ensure_rank(job_id, segmented, analyzed)
+    planned = phase2.service._ensure_highlight_plan(job_id, proxied, analyzed, ranked)
+    before_failure = phase2.service.status(job_id)
+    completed_stage_times = {
+        name: before_failure["stages"][name]["completed_at"]
+        for name in ("inspect", "proxy", "segment", "analyze", "rank", "plan")
+    }
+    provider_calls = (
+        phase2.provider.uploads,
+        phase2.provider.broad_calls,
+        phase2.provider.candidate_calls,
+    )
+    configured_reserve = phase2.config.storage_reserve_bytes
+    job = phase2.store.get_job(job_id)
+    missing_mount = Path("/Volumes") / f"phase2-unmounted-{job_id}"
+    recorded = job["config"]["destination_volumes"]["output"]
+    recorded["mount_point"] = str(missing_mount)
+    phase2.store.connection.execute(
+        "UPDATE jobs SET config_json = ? WHERE id = ?",
+        (json.dumps(job["config"]), job_id),
+    )
+    phase2.store.connection.commit()
+
+    with pytest.raises(VideoEditorError) as caught:
+        phase2.service._ensure_render_v2(job_id, planned)
+
+    assert caught.value.category == ErrorCategory.STORAGE
+    assert not missing_mount.exists()
+    failed = phase2.service.status(job_id)
+    assert failed["status"] == "failed"
+    assert failed["stages"]["render"]["status"] == "failed"
+    assert all(
+        failed["stages"][name]["status"] == "completed"
+        for name in completed_stage_times
+    )
+    assert phase2.config.storage_reserve_bytes == configured_reserve
+
+    restored_volume = inspect_volume(phase2.config.paths.output_dir)
+    failed["config"]["destination_volumes"]["output"] = {
+        "device": restored_volume.device,
+        "mount_point": str(restored_volume.mount_point),
+        "filesystem": restored_volume.filesystem,
+    }
+    phase2.store.connection.execute(
+        "UPDATE jobs SET config_json = ? WHERE id = ?",
+        (json.dumps(failed["config"]), job_id),
+    )
+    phase2.store.connection.commit()
+    resumed = phase2.service.resume(job_id)
+    completed = phase2.service.status(job_id)
+
+    assert completed["status"] == "completed"
+    assert all(
+        completed["stages"][name]["completed_at"] == completed_at
+        for name, completed_at in completed_stage_times.items()
+    )
+    assert (
+        phase2.provider.uploads,
+        phase2.provider.broad_calls,
+        phase2.provider.candidate_calls,
+    ) == provider_calls
+    assert len(resumed["outputs"]) == 5
+    assert phase2.config.storage_reserve_bytes == configured_reserve
+    assert _source_digests(phase2.input_dir) == source_before
 
 
 def test_incomplete_broad_coverage_creates_no_plan_or_media(

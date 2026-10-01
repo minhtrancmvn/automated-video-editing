@@ -164,6 +164,92 @@ def _job_id(output: str) -> str:
     return match.group(1)
 
 
+def _normalize_phase2_artifact(value: Any, *, job_id: str, job_output: Path) -> Any:
+    volatile_keys = {
+        "job_id",
+        "started_at",
+        "completed_at",
+        "created_at",
+        "updated_at",
+        "stage_times",
+        "input_fingerprint",
+        "settings_hash",
+    }
+    if isinstance(value, dict):
+        if "duration_seconds" in value:
+            value = {
+                key: item for key, item in value.items() if key != "duration_seconds"
+            }
+        if "digest" in value and "manifest_id" in value:
+            value = {key: item for key, item in value.items() if key != "digest"}
+        if "stage" in value and "metadata" in value:
+            metadata = value["metadata"]
+            if isinstance(metadata, dict) and "digest" in metadata:
+                value = {
+                    **value,
+                    "metadata": {
+                        key: item for key, item in metadata.items() if key != "digest"
+                    },
+                }
+        run_identity_keys = {"manifest_id", "chunk_id"}
+        return {
+            key: (
+                "<RUN_ID>"
+                if key in run_identity_keys and isinstance(item, str)
+                else _normalize_phase2_artifact(
+                    "<JOB_ID>" if key == "job_id" else item,
+                    job_id=job_id,
+                    job_output=job_output,
+                )
+            )
+            for key, item in value.items()
+            if key not in volatile_keys and key != "plan_digest"
+        }
+    if isinstance(value, list):
+        return [
+            _normalize_phase2_artifact(item, job_id=job_id, job_output=job_output)
+            for item in value
+        ]
+    if isinstance(value, str):
+        normalized = value.replace(job_id, "<JOB_ID>").replace(
+            str(job_output), "<JOB_OUTPUT>"
+        )
+        # Analysis chunks, provider candidates, and derived dedup groups receive
+        # run-specific IDs; normalize identifiers while preserving their links.
+        normalized = re.sub(
+            r"analysis-chunk-[0-9a-f]{64}", "analysis-chunk-<RUN>", normalized
+        )
+        normalized = re.sub(r"dedup-[0-9a-f]{16}", "dedup-<RUN>", normalized)
+        normalized = re.sub(r"crop-[0-9a-f]{20}", "crop-<RUN>", normalized)
+        return normalized
+    return value
+
+
+def _phase2_json_differences(first: Any, second: Any, path: str = "$") -> list[str]:
+    if type(first) is not type(second):
+        return [f"{path}: {first!r} != {second!r}"]
+    if isinstance(first, dict):
+        differences = []
+        for key in first.keys() | second.keys():
+            if key not in first or key not in second:
+                differences.append(f"{path}.{key}: field missing")
+            else:
+                differences.extend(
+                    _phase2_json_differences(first[key], second[key], f"{path}.{key}")
+                )
+        return differences
+    if isinstance(first, list):
+        differences = []
+        for index, (left, right) in enumerate(zip(first, second, strict=False)):
+            differences.extend(
+                _phase2_json_differences(left, right, f"{path}[{index}]")
+            )
+        if len(first) != len(second):
+            differences.append(f"{path}: lengths {len(first)} != {len(second)}")
+        return differences
+    return [] if first == second else [f"{path}: {first!r} != {second!r}"]
+
+
 def _source_names(plan_path: Path) -> list[str]:
     return [source.path.name for source in load_plan(plan_path).sources]
 
@@ -593,6 +679,50 @@ def test_phase2_public_cli_creates_full_offline_outputs_and_resumes(
         path.name: hashlib.sha256(path.read_bytes()).hexdigest()
         for path in output_paths
     }
+
+    first_plans = [
+        json.loads(path.read_text())
+        for path in sorted((job_output / "plans").glob("*.json"))
+    ]
+    first_report = json.loads((job_output / "report.json").read_text())
+    with monkeypatch.context() as network_guard:
+        network_guard.setattr(socket, "socket", _assert_no_network)
+        second_run = cli.invoke(app, ["run", str(input_dir), "--config", str(config)])
+    assert second_run.exit_code == 0, second_run.output
+    second_job_id = _job_id(second_run.output)
+    second_job_output = output_dir / second_job_id
+    second_plans = [
+        json.loads(path.read_text())
+        for path in sorted((second_job_output / "plans").glob("*.json"))
+    ]
+    second_report = json.loads((second_job_output / "report.json").read_text())
+    assert len(first_plans) == len(second_plans) == 3
+    normalized_first_plans = [
+        _normalize_phase2_artifact(plan, job_id=job_id, job_output=job_output)
+        for plan in first_plans
+    ]
+    normalized_second_plans = [
+        _normalize_phase2_artifact(
+            plan, job_id=second_job_id, job_output=second_job_output
+        )
+        for plan in second_plans
+    ]
+    assert not _phase2_json_differences(
+        normalized_first_plans,
+        normalized_second_plans,
+    )
+    normalized_first_report = _normalize_phase2_artifact(
+        first_report, job_id=job_id, job_output=job_output
+    )
+    normalized_second_report = _normalize_phase2_artifact(
+        second_report, job_id=second_job_id, job_output=second_job_output
+    )
+    report_differences = _phase2_json_differences(
+        normalized_first_report,
+        normalized_second_report,
+    )
+    assert not report_differences, report_differences
+    assert hash_tree(input_dir) == before
 
 
 def test_run_produces_validated_outputs_without_changing_originals(
