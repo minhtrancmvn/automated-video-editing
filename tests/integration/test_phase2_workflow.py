@@ -42,14 +42,21 @@ class FakeAnalysisProvider:
 
     omit_last_range: bool = False
     auth_failure: bool = False
+    invalid_broad: bool = False
+    timeout_broad: bool = False
+    multiple_shorts: bool = False
+    unknown_billing: bool = False
     uploads: int = 0
     broad_calls: int = 0
     candidate_calls: int = 0
+    upload_attempts: int = 0
+    refinement_candidate_ids: list[str] = field(default_factory=list)
     deleted: list[str] = field(default_factory=list)
     prompt_versions: list[str] = field(default_factory=list)
 
     def upload(self, authorization: AuthorizedUpload) -> UploadedFile:
         self.uploads += 1
+        self.upload_attempts += 1
         authorization.close()
         return UploadedFile(
             name=f"files/{authorization.manifest_id}",
@@ -58,6 +65,13 @@ class FakeAnalysisProvider:
             state="ACTIVE",
             manifest_id=authorization.manifest_id,
         )
+
+    def _fixture_json(self, name: str) -> dict[str, Any]:
+        payload = json.loads(
+            (Path(__file__).parents[1] / "fixtures" / "gemini" / name).read_text()
+        )
+        assert isinstance(payload, dict)
+        return payload
 
     def broad_scan(
         self,
@@ -76,6 +90,12 @@ class FakeAnalysisProvider:
                 "provider rejected credentials",
                 code="provider_auth",
             )
+        if self.timeout_broad:
+            raise VideoEditorError(
+                ErrorCategory.PROVIDER,
+                "provider timed out",
+                code="provider_timeout",
+            )
         if self.omit_last_range and self.broad_calls > 1:
             raise VideoEditorError(
                 ErrorCategory.PROVIDER,
@@ -85,28 +105,69 @@ class FakeAnalysisProvider:
         start = D(str(chunk.proxy_start))
         end = D(str(chunk.proxy_end))
         step = (end - start) / 4
-        candidates = [
-            {
-                "candidate_id": f"{request.chunk_id}-{index}",
-                "start": format(start + step * index, "f"),
-                "end": format(start + step * (index + 1), "f"),
-                "category": _CATEGORIES[index],
-                "reason": "offline fixture moment",
-                "confidence": 0.9,
-            }
-            for index in range(4)
-        ]
+        if self.invalid_broad:
+            return ProviderResult(
+                response=BroadScanResponse.model_validate(
+                    {
+                        "schema_version": "broad-v1",
+                        "chunk_id": f"{request.chunk_id}-unexpected",
+                        "scenes": [],
+                        "speech_presence_ranges": [],
+                        "candidates": [],
+                    }
+                ),
+                usage=_usage(request.reservation_id),
+            )
+        if self.multiple_shorts:
+            fixture = self._fixture_json("multi-short-broad.json")
+            candidates = [
+                {
+                    "candidate_id": f"{request.chunk_id}-{index}",
+                    "start": format(start + step * index, "f"),
+                    "end": format(start + step * (index + 1), "f"),
+                    "category": str(item["category"]),
+                    "reason": str(item["reason"]),
+                    "confidence": float(item["confidence"]),
+                }
+                for index, item in enumerate(fixture["candidates"])
+            ]
+            scenes = [
+                {
+                    **scene,
+                    "scene_id": f"{request.chunk_id}-{scene['scene_id']}",
+                    "start": format(start + step * D(str(scene["start"])), "f"),
+                    "end": format(start + step * D(str(scene["end"])), "f"),
+                }
+                for scene in fixture["scenes"]
+            ]
+        else:
+            candidates = [
+                {
+                    "candidate_id": f"{request.chunk_id}-{index}",
+                    "start": format(start + step * index, "f"),
+                    "end": format(start + step * (index + 1), "f"),
+                    "category": _CATEGORIES[index],
+                    "reason": "offline fixture moment",
+                    "confidence": 0.9,
+                }
+                for index in range(4)
+            ]
+            scenes = []
         return ProviderResult(
             response=BroadScanResponse.model_validate(
                 {
                     "schema_version": "broad-v1",
                     "chunk_id": request.chunk_id,
-                    "scenes": [],
+                    "scenes": scenes,
                     "speech_presence_ranges": [],
                     "candidates": candidates,
                 }
             ),
-            usage=_usage(request.reservation_id),
+            usage=(
+                _unknown_usage(request.reservation_id)
+                if self.unknown_billing
+                else _usage(request.reservation_id)
+            ),
         )
 
     def refine_candidate(
@@ -120,9 +181,16 @@ class FakeAnalysisProvider:
     ) -> ProviderResult[CandidateRefinementResponse]:
         del upload, fps, prompt_version
         self.candidate_calls += 1
+        self.refinement_candidate_ids.append(candidate.candidate_id)
+        fixture = (
+            self._fixture_json("multi-short-refinements.json")
+            if self.multiple_shorts
+            else {}
+        )
         return ProviderResult(
             response=CandidateRefinementResponse.model_validate(
                 {
+                    **fixture,
                     "schema_version": "candidate-v2",
                     "chunk_id": candidate.chunk_id,
                     "candidate_id": candidate.candidate_id,
@@ -161,6 +229,22 @@ class FakeAnalysisProvider:
 
     def delete_upload(self, upload: UploadedFile) -> None:
         self.deleted.append(upload.name)
+
+
+def _unknown_usage(reservation_id: str) -> ProviderUsage:
+    usage = _usage(reservation_id)
+    return usage.model_copy(
+        update={
+            "attempts": (
+                ProviderAttemptUsage(
+                    request_id=f"provider-{reservation_id}",
+                    status="failed_unknown_billing",
+                ),
+            ),
+            "has_unknown_billing": True,
+            "actual_cost_usd": None,
+        }
+    )
 
 
 def _usage(reservation_id: str) -> ProviderUsage:
@@ -313,6 +397,102 @@ def test_phase2_stage_order_and_complete_outputs(phase2: Phase2Env) -> None:
     assert _source_digests(phase2.input_dir) == before
 
 
+def test_multiple_short_fixtures_create_distinct_bounded_outputs(
+    phase2: Phase2Env,
+) -> None:
+    phase2.provider.multiple_shorts = True
+
+    result = phase2.service.run(phase2.input_dir)
+
+    names = [Path(item["output"]).name for item in result["outputs"]]
+    assert names[:3] == ["long.mp4", "short-01.mp4", "short-02.mp4"]
+    assert len(names) == 5
+    assert len(set(names)) == len(names)
+    assert names[1:] == [f"short-{index:02d}.mp4" for index in range(1, len(names))]
+    assert (
+        len(phase2.provider.refinement_candidate_ids) == phase2.provider.candidate_calls
+    )
+    assert len(set(phase2.provider.refinement_candidate_ids)) == len(
+        phase2.provider.refinement_candidate_ids
+    )
+    state = phase2.service.status(result["job_id"])
+    report_path = next(
+        Path(path) for path in result["reports"] if path.endswith(".json")
+    )
+    report = json.loads(report_path.read_text())
+    assert report["analysis"]["coverage"]["complete"] is True
+    assert report["analysis"]["candidate_count"] == phase2.provider.candidate_calls
+    artifacts = _artifacts(state, "plan")
+    plans = [json.loads(Path(item["path"]).read_text()) for item in artifacts]
+    assert all(plan["schema_version"] == 2 for plan in plans)
+    assert all(len(plan["clips"]) >= 2 for plan in plans[1:])
+    assert all(
+        plan["output"]["filename"] == name
+        for plan, name in zip(plans, names, strict=True)
+    )
+    assert all(plan["output"]["audio"] == "source" for plan in plans)
+    assert Decimal(
+        str(
+            sum(
+                Decimal(clip["source_end"]) - Decimal(clip["source_start"])
+                for clip in plans[0]["clips"]
+            )
+        )
+    ) <= Decimal(1800)
+    for plan in plans[1:]:
+        assert Decimal(
+            str(
+                sum(
+                    Decimal(clip["source_end"]) - Decimal(clip["source_start"])
+                    for clip in plan["clips"]
+                )
+            )
+        ) <= Decimal(180)
+        clips = plan["clips"]
+        assert clips == sorted(
+            clips,
+            key=lambda clip: (
+                next(
+                    index
+                    for index, source in enumerate(plan["sources"])
+                    if source["id"] == clip["source_id"]
+                ),
+                Decimal(clip["source_start"]),
+            ),
+        )
+        assert len({clip["dedup_group"] for clip in clips}) == len(clips)
+        for transition in plan["transitions"]:
+            allowed = {
+                "cut": {"continuous_action", "matched_motion", "same_event"},
+                "dissolve": {"same_event", "same_place_time_shift"},
+                "fade": {"chapter_boundary", "story_open_close"},
+                "fade_black": {"chapter_boundary", "time_jump", "location_change"},
+            }
+            assert transition["relation"] in allowed[transition["kind"]]
+    assert all(Path(item["output"]).is_file() for item in result["outputs"])
+    report_outputs = report["output"]["outputs"]
+    assert [item["plan_id"] for item in report_outputs] == [
+        plan["output"]["plan_id"] for plan in plans
+    ]
+    assert [item["path"] for item in report_outputs] == [
+        item["output"] for item in result["outputs"]
+    ]
+    assert all(item["crop_track_ids"] for item in report_outputs[1:])
+    broad_fixture = phase2.provider._fixture_json("multi-short-broad.json")
+    refinement_fixture = phase2.provider._fixture_json("multi-short-refinements.json")
+    assert all(
+        "speech_meaning_summary" not in item for item in broad_fixture["candidates"]
+    )
+    assert refinement_fixture["speech_meaning_summary"] is None
+    assert len(set(phase2.provider.refinement_candidate_ids)) == len(
+        phase2.provider.refinement_candidate_ids
+    )
+    assert all(
+        candidate_id.startswith("analysis-chunk-")
+        for candidate_id in phase2.provider.refinement_candidate_ids
+    )
+
+
 def test_incomplete_broad_coverage_creates_no_plan_or_media(
     phase2: Phase2Env,
 ) -> None:
@@ -324,6 +504,98 @@ def test_incomplete_broad_coverage_creates_no_plan_or_media(
     state = phase2.service.status(caught.value.safe_details["job_id"])
     assert state["stages"]["analyze"]["error"]["code"] == "analysis_incomplete"
     assert state["stages"]["analyze"]["error"]["missing"]
+    assert not _artifacts(state, "plan")
+    assert not _artifacts(state, "render")
+    assert not list(phase2.config.paths.output_dir.rglob("*.mp4"))
+
+
+def test_tampered_proxy_is_rejected_before_provider_upload(
+    phase2: Phase2Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ensure_segment = phase2.service._ensure_segment
+
+    def tamper_after_segmentation(
+        job_id: str, proxied: dict[str, Any]
+    ) -> dict[str, Any]:
+        segmented = ensure_segment(job_id, proxied)
+        manifest = phase2.store.get_job(job_id)["proxy_manifests"][0]
+        proxy_path = Path(manifest["data"]["artifact_path"])
+        proxy_path.write_bytes(proxy_path.read_bytes() + b"tampered")
+        return segmented
+
+    monkeypatch.setattr(phase2.service, "_ensure_segment", tamper_after_segmentation)
+    before = _source_digests(phase2.input_dir)
+
+    with pytest.raises(VideoEditorError):
+        phase2.service.run(phase2.input_dir)
+
+    state = phase2.service.status(
+        phase2.store.connection.execute("SELECT id FROM jobs").fetchone()["id"]
+    )
+    assert phase2.provider.uploads == 0
+    assert phase2.provider.broad_calls == 0
+    assert phase2.provider.candidate_calls == 0
+    assert all(
+        state["stages"][name]["status"] == "completed"
+        for name in ("inspect", "proxy", "segment")
+    )
+    assert not _artifacts(state, "plan")
+    assert not _artifacts(state, "render")
+    assert not list(phase2.config.paths.output_dir.rglob("*.mp4"))
+    assert _source_digests(phase2.input_dir) == before
+
+
+def test_provider_timeout_stops_before_candidate_planning_or_rendering(
+    phase2: Phase2Env,
+) -> None:
+    phase2.provider.timeout_broad = True
+
+    with pytest.raises(VideoEditorError):
+        phase2.service.run(phase2.input_dir)
+
+    state = phase2.service.status(
+        phase2.store.connection.execute("SELECT id FROM jobs").fetchone()["id"]
+    )
+    rows = phase2.store.connection.execute(
+        "SELECT status FROM analysis_requests WHERE job_id = ?",
+        (state["job_id"],),
+    ).fetchall()
+    statuses = [row["status"] for row in rows]
+    assert phase2.provider.broad_calls == 1
+    assert phase2.provider.candidate_calls == 0
+    assert "billing_unknown" in statuses
+    assert phase2.store.budget_state(state["job_id"]).reserved_usd > 0
+    assert all(
+        state["stages"][name]["status"] == "completed"
+        for name in ("inspect", "proxy", "segment")
+    )
+    assert not _artifacts(state, "plan")
+    assert not _artifacts(state, "render")
+    assert not list(phase2.config.paths.output_dir.rglob("*.mp4"))
+
+
+def test_invalid_broad_response_fails_closed_before_candidate_planning(
+    phase2: Phase2Env,
+) -> None:
+    phase2.provider.invalid_broad = True
+
+    with pytest.raises(VideoEditorError) as caught:
+        phase2.service.run(phase2.input_dir)
+
+    state = phase2.service.status(caught.value.safe_details["job_id"])
+    rows = phase2.store.connection.execute(
+        "SELECT status FROM analysis_requests WHERE job_id = ?",
+        (state["job_id"],),
+    ).fetchall()
+    assert phase2.provider.uploads == 1
+    assert phase2.provider.broad_calls == 1
+    assert phase2.provider.candidate_calls == 0
+    assert "billing_unknown" in [row["status"] for row in rows]
+    assert phase2.store.budget_state(state["job_id"]).reserved_usd > 0
+    assert all(
+        state["stages"][name]["status"] == "completed"
+        for name in ("inspect", "proxy", "segment")
+    )
     assert not _artifacts(state, "plan")
     assert not _artifacts(state, "render")
     assert not list(phase2.config.paths.output_dir.rglob("*.mp4"))
@@ -521,7 +793,7 @@ def test_failed_rerender_never_attests_stale_output(
     plan = json.loads(plan_path.read_text())
     plan["output"]["theme_summary"] = "edited theme, same clips and duration"
     plan_path.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n")
-    real_run_render = workflow_module.run_render
+    real_run_render = workflow_module.__dict__["run_render"]
 
     def failing_render(*args: Any, **kwargs: Any) -> None:
         raise VideoEditorError(ErrorCategory.RENDER, "simulated ffmpeg failure")

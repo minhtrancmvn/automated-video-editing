@@ -1,0 +1,15 @@
+{
+  "schema_version": "broad-v1",
+  "chunk_id": "fixture-chunk",
+  "scenes": [
+    {"scene_id": "action-scene", "start": "0", "end": "2", "summary": "visible activity", "actions": ["moving"], "setting": "activity", "scenic_interest": 0.7, "human_interaction": 0.7, "story_milestone": false, "technical_problems": [], "vertical_suitability": 0.9, "confidence": 0.9},
+    {"scene_id": "scenic-scene", "start": "2", "end": "4", "summary": "landscape reveal", "actions": ["revealing"], "setting": "landscape", "scenic_interest": 0.9, "human_interaction": 0.4, "story_milestone": false, "technical_problems": [], "vertical_suitability": 0.9, "confidence": 0.9}
+  ],
+  "speech_presence_ranges": [],
+  "candidates": [
+    {"candidate_id": "action-a", "start": "0", "end": "1", "category": "action", "reason": "visible activity", "confidence": 0.9},
+    {"candidate_id": "scenic-a", "start": "1", "end": "2", "category": "scenic", "reason": "visual reveal", "confidence": 0.9},
+    {"candidate_id": "action-b", "start": "2", "end": "3", "category": "action", "reason": "visible movement", "confidence": 0.9},
+    {"candidate_id": "scenic-b", "start": "3", "end": "4", "category": "scenic", "reason": "visible landscape", "confidence": 0.9}
+  ]
+}

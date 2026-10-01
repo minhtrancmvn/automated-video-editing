@@ -12,13 +12,27 @@ import sqlite3
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 from typer.testing import CliRunner
 
+from video_editor import cli as cli_module
+from video_editor.analysis.models import (
+    AnalysisRequestContext,
+    BroadScanResponse,
+    CandidateRefinementResponse,
+    CandidateWindow,
+    ProviderAttemptUsage,
+    ProviderResult,
+    ProviderUsage,
+    UploadedFile,
+)
+from video_editor.analysis.proxy_chunks import AuthorizedUpload
 from video_editor.cli import app
 from video_editor.config import resolve_config
 from video_editor.errors import ErrorCategory, VideoEditorError
@@ -72,7 +86,9 @@ def ffprobe_size(path: Path) -> tuple[int, int]:
     return int(stream["width"]), int(stream["height"])
 
 
-def _make_media(path: Path, *, tone: bool, frequency: int = 440) -> None:
+def _make_media(
+    path: Path, *, tone: bool, frequency: int = 440, duration: int = 1
+) -> None:
     args = [
         "ffmpeg",
         "-hide_banner",
@@ -82,7 +98,7 @@ def _make_media(path: Path, *, tone: bool, frequency: int = 440) -> None:
         "-f",
         "lavfi",
         "-i",
-        "testsrc2=size=320x240:rate=10:duration=1",
+        f"testsrc2=size=320x240:rate=10:duration={duration}",
     ]
     if tone:
         args.extend(
@@ -90,7 +106,7 @@ def _make_media(path: Path, *, tone: bool, frequency: int = 440) -> None:
                 "-f",
                 "lavfi",
                 "-i",
-                f"sine=frequency={frequency}:sample_rate=16000:duration=1",
+                f"sine=frequency={frequency}:sample_rate=16000:duration={duration}",
             ]
         )
     args.extend(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
@@ -154,6 +170,146 @@ def _source_names(plan_path: Path) -> list[str]:
 
 def _assert_no_network(address: tuple[object, ...]) -> None:
     raise AssertionError(f"unexpected network access: {address}")
+
+
+@dataclass
+class _OfflineProvider:
+    upload_calls: int = 0
+    broad_calls: int = 0
+    candidate_calls: int = 0
+    maximum_request_cost_calls: int = 0
+
+    def upload(self, authorization: AuthorizedUpload) -> UploadedFile:
+        self.upload_calls += 1
+        authorization.close()
+        return UploadedFile(
+            name=f"files/{authorization.manifest_id}",
+            uri="gs://offline/upload",
+            mime_type="video/mp4",
+            state="ACTIVE",
+            manifest_id=authorization.manifest_id,
+        )
+
+    def maximum_request_cost(
+        self, manifest_id: str, chunk: Any, *, prompt_version: str
+    ) -> Decimal:
+        del manifest_id, chunk, prompt_version
+        self.maximum_request_cost_calls += 1
+        return Decimal("0.0001")
+
+    def broad_scan(
+        self,
+        upload: UploadedFile,
+        chunk: object,
+        request: AnalysisRequestContext,
+        *,
+        prompt_version: str,
+    ) -> ProviderResult[BroadScanResponse]:
+        del upload, prompt_version
+        self.broad_calls += 1
+        start = Decimal(str(chunk.proxy_start))  # type: ignore[attr-defined]
+        end = Decimal(str(chunk.proxy_end))  # type: ignore[attr-defined]
+        step = (end - start) / 8
+        categories = ("action", "scenic")
+        candidates = tuple(
+            {
+                "candidate_id": f"{request.chunk_id}-{index}",
+                "start": format(start + step * index, "f"),
+                "end": format(start + step * (index + 1), "f"),
+                "category": categories[index % len(categories)],
+                "reason": "visible offline event",
+                "confidence": 0.9,
+            }
+            for index in range(4)
+        )
+        response = BroadScanResponse.model_validate(
+            {
+                "schema_version": "broad-v1",
+                "chunk_id": request.chunk_id,
+                "scenes": [],
+                "speech_presence_ranges": [],
+                "candidates": candidates,
+            }
+        )
+        return ProviderResult(
+            response=response,
+            usage=_offline_usage(request.reservation_id),
+        )
+
+    def refine_candidate(
+        self,
+        upload: UploadedFile,
+        candidate: CandidateWindow,
+        request: AnalysisRequestContext,
+        fps: int,
+        *,
+        prompt_version: str,
+    ) -> ProviderResult[CandidateRefinementResponse]:
+        del upload, fps, prompt_version
+        self.candidate_calls += 1
+        response = CandidateRefinementResponse.model_validate(
+            {
+                "schema_version": "candidate-v2",
+                "chunk_id": candidate.chunk_id,
+                "candidate_id": candidate.candidate_id,
+                "start": format(candidate.start, "f"),
+                "end": format(candidate.end, "f"),
+                "action_completeness": 0.9,
+                "visual_composition": 0.9,
+                "novelty": 0.9,
+                "semantic_importance": 0.9,
+                "duplicate_similarity": 0.05,
+                "vertical_subject_priority": "center",
+                "crop_intent": "follow visible subject",
+                "adjacent_scene_compatibility": 0.8,
+                "speech_meaning_summary": None,
+                "confidence": 0.9,
+                "subject_boxes": [
+                    {
+                        "time": format(candidate.start, "f"),
+                        "x": float((40 + 40 * candidate.start) / 640) - 0.01,
+                        "y": 0.37,
+                        "w": 0.15,
+                        "h": 0.26,
+                        "priority": 0,
+                    }
+                ],
+            }
+        )
+        return ProviderResult(
+            response=response, usage=_offline_usage(request.reservation_id)
+        )
+
+    def delete_upload(self, upload: UploadedFile) -> None:
+        del upload
+
+
+def _offline_usage(reservation_id: str) -> ProviderUsage:
+    attempt = ProviderAttemptUsage(
+        request_id=f"offline-{reservation_id}",
+        status="succeeded",
+        prompt_tokens=0,
+        media_input_tokens=0,
+        text_input_tokens=0,
+        candidates_tokens=0,
+        thoughts_tokens=0,
+        output_tokens=0,
+        total_tokens=0,
+    )
+    return ProviderUsage(
+        reservation_id=reservation_id,
+        attempts=(attempt,),
+        request_ids=(attempt.request_id,),
+        prompt_tokens=0,
+        media_input_tokens=0,
+        text_input_tokens=0,
+        candidates_tokens=0,
+        thoughts_tokens=0,
+        output_tokens=0,
+        total_tokens=0,
+        has_unknown_billing=False,
+        actual_cost_usd=Decimal(0),
+    )
 
 
 def test_missing_external_volume_fails_without_internal_fallback(
@@ -309,18 +465,148 @@ with JobStore(config.paths.state_dir / "jobs.sqlite3") as store:
     assert {Path(row[0]).name for row in rows} == {"long.mp4", "short-01.mp4"}
 
 
+def test_phase2_public_cli_creates_full_offline_outputs_and_resumes(
+    tmp_path: Path, cli: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    input_dir = tmp_path / "phase2-input"
+    input_dir.mkdir()
+    source = input_dir / "source.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=navy:s=640x360:r=30:d=8",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=s=80x80:r=30:d=8",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000:duration=8",
+            "-filter_complex",
+            "[0:v][1:v]overlay=x='40+t*40':y=140[v]",
+            "-map",
+            "[v]",
+            "-map",
+            "2:a",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-shortest",
+            str(source),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        shell=False,
+    )
+    before = hash_tree(input_dir)
+    config = tmp_path / "phase2-config.toml"
+    output_dir = tmp_path / "phase2-output"
+    config.write_text(
+        "\n".join(
+            [
+                "[paths]",
+                f'input_dir = "{input_dir}"',
+                f'workspace_dir = "{tmp_path / "phase2-workspace"}"',
+                f'cache_dir = "{tmp_path / "phase2-cache"}"',
+                f'output_dir = "{output_dir}"',
+                f'state_dir = "{tmp_path / "phase2-state"}"',
+                "[settings]",
+                "storage_reserve_bytes = 0",
+                "cloud_enabled = true",
+                "render_concurrency = 1",
+                "[gemini]",
+                "enabled = true",
+                'max_cost_per_source_hour_usd = "1.00"',
+                "",
+            ]
+        )
+    )
+    provider = _OfflineProvider()
+    original_service = cli_module._service
+
+    def offline_service(
+        config_path: Path, progress: Callable[[str], None] | None = None
+    ) -> tuple[WorkflowService, JobStore]:
+        service, store = original_service(config_path, progress)
+        service.provider = provider
+        return service, store
+
+    monkeypatch.setattr(cli_module, "_service", offline_service)
+    monkeypatch.setenv("GEMINI_API_KEY", "offline-placeholder-not-a-secret")
+    with monkeypatch.context() as network_guard:
+        network_guard.setattr(socket, "socket", _assert_no_network)
+        result = cli.invoke(app, ["run", str(input_dir), "--config", str(config)])
+
+    assert result.exit_code == 0, result.output
+    job_id = _job_id(result.output)
+    job_output = output_dir / job_id
+    output_paths = sorted(job_output.glob("*.mp4"))
+    assert [path.name for path in output_paths] == [
+        "long.mp4",
+        "short-01.mp4",
+        "short-02.mp4",
+    ]
+    assert ffprobe_size(output_paths[0]) == (1920, 1080)
+    assert all(ffprobe_size(path) == (1080, 1920) for path in output_paths[1:])
+    assert hash_tree(input_dir) == before
+    report = json.loads((job_output / "report.json").read_text())
+    assert report["status"] == "completed"
+    assert report["analysis"]["coverage"]["complete"] is True
+    assert Decimal(report["analysis"]["budget"]["spent_usd"]) <= (
+        Decimal(report["analysis"]["coverage"]["expected_seconds"])
+        / Decimal(3600)
+        * Decimal("1.00")
+    )
+    assert provider.upload_calls > 0
+    assert provider.broad_calls > 0
+    assert provider.candidate_calls > 0
+    hashes = {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in output_paths
+    }
+    call_counts = (
+        provider.upload_calls,
+        provider.broad_calls,
+        provider.candidate_calls,
+    )
+    with monkeypatch.context() as network_guard:
+        network_guard.setattr(socket, "socket", _assert_no_network)
+        resumed = cli.invoke(app, ["resume", job_id, "--config", str(config)])
+    assert resumed.exit_code == 0, resumed.output
+    assert call_counts == (
+        provider.upload_calls,
+        provider.broad_calls,
+        provider.candidate_calls,
+    )
+    assert hashes == {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in output_paths
+    }
+
+
 def test_run_produces_validated_outputs_without_changing_originals(
-    media_batch: MediaBatch, cli: CliRunner, config_file: Path
+    media_batch: MediaBatch,
+    cli: CliRunner,
+    config_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     before = hash_tree(media_batch.input_dir)
-    original_socket = socket.socket
-    socket.socket = _assert_no_network  # type: ignore[assignment]
-    try:
+    with monkeypatch.context() as network_guard:
+        network_guard.setattr(socket, "socket", _assert_no_network)
         result = cli.invoke(
             app, ["run", str(media_batch.input_dir), "--config", str(config_file)]
         )
-    finally:
-        socket.socket = original_socket
 
     assert result.exit_code == 0, result.output
     job_id = _job_id(result.output)

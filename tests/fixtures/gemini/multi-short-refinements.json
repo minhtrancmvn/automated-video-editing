@@ -1,0 +1,20 @@
+{
+  "schema_version": "candidate-v2",
+  "chunk_id": "fixture-chunk",
+  "candidate_id": "candidate-id-is-supplied-per-request",
+  "start": "candidate-start-is-supplied-per-request",
+  "end": "candidate-end-is-supplied-per-request",
+  "action_completeness": 0.9,
+  "visual_composition": 0.9,
+  "novelty": 0.9,
+  "semantic_importance": 0.9,
+  "duplicate_similarity": 0.05,
+  "vertical_subject_priority": "center",
+  "crop_intent": "follow visible subject",
+  "adjacent_scene_compatibility": 0.8,
+  "speech_meaning_summary": null,
+  "confidence": 0.9,
+  "subject_boxes": [
+    {"time": "0.5", "x": 0.4, "y": 0.37, "w": 0.15, "h": 0.26, "priority": 0}
+  ]
+}
