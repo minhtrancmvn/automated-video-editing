@@ -1847,10 +1847,16 @@ class WorkflowService:
             )
             and self._artifact_valid("render", final, metadata)
         )
-        # Persist expected final before render; resume validates each output alone.
-        self.store.save_artifact(job_id, "render", final, metadata)
         if reusable:
+            self.store.save_artifact(job_id, "render", final, metadata)
             return {"output": str(final), **metadata}
+        # Persist the expected final as pending, without attesting the plan digest.
+        # The digest is attested only after a successful publish, so a failed
+        # re-render can never vouch for the stale file still on disk.
+        pending = {
+            key: value for key, value in metadata.items() if key != "plan_digest"
+        }
+        self.store.save_artifact(job_id, "render", final, {**pending, "pending": True})
         command = compile_render(
             plan, "ffmpeg", output_dir=output_root, output_name=plan.output.filename
         )

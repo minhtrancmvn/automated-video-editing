@@ -167,3 +167,21 @@ Final status: DONE. All 9 tests in `test_phase2_workflow.py` pass and Phase 1 st
 - `mypy src`: clean. Ruff check and format: clean. `uv build`: ok. `video-editor --help`: ok. `git diff --check`: clean.
 - Code-intelligence `detect_changes`: low risk, 0 affected processes.
 - No docs, plan, task_plan, CLAUDE.md or AGENTS.md drift.
+
+## Fix Round 2 (render digest attested before publish)
+
+- RED: `test_failed_rerender_never_attests_stale_output` reproduces the reviewer's probe:
+  1. Edit the short's plan.
+  2. Make `run_render` raise, then resume (the resume fails).
+  3. Restore `run_render` and resume again.
+  - The test failed on the final `assert short.stat().st_mtime_ns != short_mtime`: the stale short was reused because the pre-render row already attested the new digest.
+- Fix (`_render_v2` only):
+  - A reused output is saved with full metadata, as before.
+  - Before a render, the expected-final row is saved as `pending: True` with no `plan_digest`.
+  - The digest is attested only by `persist_published` (at publish) and by the final save after validation.
+  - The newer-than-plan mtime rule is unchanged, so a crash after publish but before save still recovers.
+  - Phase 1 `_ensure_render` is untouched.
+- Gates:
+  - `test_phase2_workflow.py`: 12 passed. Full offline: 788 passed, 1 deselected.
+  - `mypy src`: clean. Ruff check and format: clean. `git diff --check`: clean.
+  - Code-intelligence `detect_changes`: low risk, 0 affected processes.

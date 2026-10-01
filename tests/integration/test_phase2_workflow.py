@@ -507,3 +507,31 @@ def test_reports_never_contain_generated_or_upload_paths(phase2: Phase2Env) -> N
             assert value not in text
         assert "proxy_manifests" not in text
         assert "analysis_results" not in text
+
+
+def test_failed_rerender_never_attests_stale_output(
+    phase2: Phase2Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = phase2.service.run(phase2.input_dir)
+    job_id = result["job_id"]
+    outputs = {Path(item["output"]).name: item for item in result["outputs"]}
+    short = Path(outputs["short-01.mp4"]["output"])
+    short_mtime = short.stat().st_mtime_ns
+    plan_path = Path(outputs["short-01.mp4"]["plan"])
+    plan = json.loads(plan_path.read_text())
+    plan["output"]["theme_summary"] = "edited theme, same clips and duration"
+    plan_path.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n")
+    real_run_render = workflow_module.run_render
+
+    def failing_render(*args: Any, **kwargs: Any) -> None:
+        raise VideoEditorError(ErrorCategory.RENDER, "simulated ffmpeg failure")
+
+    monkeypatch.setattr(workflow_module, "run_render", failing_render)
+    with pytest.raises(VideoEditorError):
+        phase2.service.resume(job_id)
+    assert short.stat().st_mtime_ns == short_mtime
+    monkeypatch.setattr(workflow_module, "run_render", real_run_render)
+
+    phase2.service.resume(job_id)
+
+    assert short.stat().st_mtime_ns != short_mtime
