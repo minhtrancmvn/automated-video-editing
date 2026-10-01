@@ -501,9 +501,9 @@ def run_broad_analysis(
             _, chunk = _load_chunk(store, job_id, request.chunk_id)
             _validate_identity(request.cache_identity, manifest, chunk, "broad")
             authorization = upload_validator(request.manifest_id, job_id, store, paths)
-            upload = provider.upload(authorization)
             store.mark_request_dispatched(request.request_id)
             provider_dispatched = True
+            upload = provider.upload(authorization)
             result = provider.broad_scan(
                 upload,
                 _ProviderChunk(
@@ -655,6 +655,21 @@ def run_candidate_refinement(
 
     responses: list[CandidateRefinementResponse] = []
     for request in requests:
+        try:
+            _, registered_chunk = _load_chunk(store, job_id, request.candidate.chunk_id)
+        except VideoEditorError:
+            return AnalysisOutcome(
+                state="analysis_incomplete",
+                coverage=broad_outcome.coverage,
+            )
+        if (
+            request.candidate.start < registered_chunk.proxy_start
+            or request.candidate.end > registered_chunk.proxy_end
+        ):
+            return AnalysisOutcome(
+                state="analysis_incomplete",
+                coverage=broad_outcome.coverage,
+            )
         fps = _candidate_fps(request, segmentations)
         identity = _candidate_identity(request, fps)
         cached = _cached_candidate(store, job_id, identity, request)
@@ -687,9 +702,9 @@ def run_candidate_refinement(
             _, chunk = _load_chunk(store, job_id, request.candidate.chunk_id)
             _validate_identity(identity, manifest, chunk, "candidate")
             authorization = upload_validator(request.manifest_id, job_id, store, paths)
-            upload = provider.upload(authorization)
             store.mark_request_dispatched(request.request_id)
             provider_dispatched = True
+            upload = provider.upload(authorization)
             result = provider.refine_candidate(
                 upload,
                 request.candidate,

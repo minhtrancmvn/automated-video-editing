@@ -8,8 +8,6 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Literal
 
-import pytest
-
 from video_editor.analysis.models import (
     AnalysisBoundaryKind,
     AnalysisChunkData,
@@ -66,8 +64,9 @@ class FakeProvider:
             (self.job_id,),
         ).fetchall()
         assert rows
-        if self.broad_calls == 0 and self.candidate_calls == 0:
-            assert all(row["status"] == "reserved" for row in rows)
+        statuses = [row["status"] for row in rows]
+        assert statuses.count("dispatched") == 1
+        assert "released" not in statuses
         authorization.close()
         return UploadedFile(
             name=f"files/{authorization.manifest_id}",
@@ -489,20 +488,43 @@ def test_broad_preflight_budget_failure_emits_no_upload_or_provider_call(
         )
 
 
-def test_cache_identity_validation_rejects_wrong_processing_mode() -> None:
-    from video_editor.analysis.orchestrator import _validate_identity
+def test_broad_dispatch_rejects_tampered_persisted_request_mode(
+    tmp_path: Path,
+) -> None:
+    with JobStore(tmp_path / "state.db") as store:
+        job_id = store.create_job({}, {})
+        store.initialize_budget(job_id, D(1))
+        _save_chunk(store, job_id, "chunk-1", D(0))
+        request = _broad_request(job_id, "chunk-1", D(0))
+        provider = FakeProvider(store, job_id)
+        store.reserve_request(
+            RequestReservation(
+                request_id=request.request_id,
+                job_id=job_id,
+                cache_key=analysis_cache_key(request.cache_identity),
+                mode="broad",
+                maximum_cost_usd=request.maximum_cost_usd,
+            )
+        )
+        store.connection.execute(
+            "UPDATE analysis_requests SET mode = 'candidate' WHERE request_id = ?",
+            (request.request_id,),
+        )
+        store.connection.commit()
 
-    manifest = _manifest("job-1", "chunk-1", D(0))
-    chunk = _chunk("job-1", D(0))
-    identity = _broad_request("job-1", "chunk-1", D(0)).cache_identity.model_copy(
-        update={"mode": "candidate"}
-    )
+        outcome = run_broad_analysis(
+            store=store,
+            paths=_paths(tmp_path),
+            provider=provider,
+            job_id=job_id,
+            expected_ranges=(SourceRange(source_id="source-1", start=D(0), end=D(1)),),
+            requests=(request,),
+            upload_validator=_authorize,
+        )
 
-    with pytest.raises(
-        VideoEditorError,
-        match="analysis cache identity does not match persisted chunk",
-    ):
-        _validate_identity(identity, manifest, chunk, "broad")
+        assert outcome.state == "analysis_incomplete"
+        assert outcome.coverage.complete is False
+        assert provider.events == []
 
 
 def test_dispatch_rechecks_persisted_reservation_identity(tmp_path: Path) -> None:
@@ -668,6 +690,40 @@ def test_valid_result_with_unknown_billing_is_persisted_and_counts_coverage(
         assert store.budget_state(job_id).reserved_usd == D("0.20")
 
 
+def test_upload_failure_after_provider_contact_preserves_reservation(
+    tmp_path: Path,
+) -> None:
+    class UploadFailureProvider(FakeProvider):
+        def upload(self, authorization: AuthorizedUpload) -> UploadedFile:
+            self.events.append("upload")
+            authorization.close()
+            raise VideoEditorError(
+                ErrorCategory.PROVIDER,
+                "upload failed after provider contact",
+                code="provider_upload_failed",
+            )
+
+    with JobStore(tmp_path / "state.db") as store:
+        job_id = store.create_job({}, {})
+        store.initialize_budget(job_id, D(1))
+        _save_chunk(store, job_id, "chunk-1", D(0))
+        provider = UploadFailureProvider(store, job_id)
+
+        outcome = run_broad_analysis(
+            store=store,
+            paths=_paths(tmp_path),
+            provider=provider,
+            job_id=job_id,
+            expected_ranges=(SourceRange(source_id="source-1", start=D(0), end=D(1)),),
+            requests=(_broad_request(job_id, "chunk-1", D(0)),),
+            upload_validator=_authorize,
+        )
+
+        assert outcome.state == "analysis_incomplete"
+        assert provider.events == ["upload"]
+        assert store.budget_state(job_id).reserved_usd == D("0.20")
+
+
 def test_upload_authorization_failure_releases_confirmed_nonbillable_reservation(
     tmp_path: Path,
 ) -> None:
@@ -734,12 +790,56 @@ def test_incomplete_coverage_blocks_candidate_refinement(tmp_path: Path) -> None
         assert provider.candidate_calls == 0
 
 
+def test_candidate_outside_registered_chunk_is_rejected_before_reservation_or_upload(
+    tmp_path: Path,
+) -> None:
+    with JobStore(tmp_path / "state.db") as store:
+        job_id = store.create_job({}, {})
+        store.initialize_budget(job_id, D(1))
+        _save_chunk(store, job_id, "chunk-1", D(0))
+        provider = FakeProvider(store, job_id)
+        complete = coverage_report(
+            [SourceRange(source_id="source-1", start=D(0), end=D(1))],
+            [SourceRange(source_id="source-1", start=D(0), end=D(1))],
+        )
+        request = _candidate_request(1, 0.1)
+        request = CandidateAnalysisRequest(
+            manifest_id=request.manifest_id,
+            candidate=request.candidate.model_copy(
+                update={"start": D("0.5"), "end": D("1.5")}
+            ),
+            cache_identity=request.cache_identity,
+            maximum_cost_usd=request.maximum_cost_usd,
+            request_id=request.request_id,
+        )
+
+        outcome = run_candidate_refinement(
+            store=store,
+            paths=_paths(tmp_path),
+            provider=provider,
+            job_id=job_id,
+            broad_outcome=AnalysisOutcome(state="complete", coverage=complete),
+            requests=(request,),
+            segmentations=(),
+            upload_validator=_authorize,
+        )
+
+        count = store.connection.execute(
+            "SELECT COUNT(*) AS count FROM analysis_requests WHERE request_id = ?",
+            (request.request_id,),
+        ).fetchone()
+        assert outcome.state == "analysis_incomplete"
+        assert provider.events == []
+        assert count["count"] == 0
+
+
 def test_candidate_budget_exhaustion_emits_no_candidate_provider_call(
     tmp_path: Path,
 ) -> None:
     with JobStore(tmp_path / "state.db") as store:
         job_id = store.create_job({}, {})
         store.initialize_budget(job_id, D("0.10"))
+        _save_chunk(store, job_id, "chunk-1", D(0))
         provider = FakeProvider(store, job_id)
         complete = coverage_report(
             [SourceRange(source_id="source-1", start=D(0), end=D(1))],
