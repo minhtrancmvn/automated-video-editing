@@ -347,7 +347,17 @@ def test_scene_identity_makes_event_and_location_transitions_reachable() -> None
 
 def test_scene_identity_activates_ranking_event_and_location_quotas() -> None:
     specs = [
-        (f"c{index}", str(index), str(index + 1), "s1", "beach") for index in range(4)
+        (f"dominant-{index}", str(index), str(index + 1), "s1", "beach")
+        for index in range(4)
+    ] + [
+        (
+            f"alternative-{index}",
+            str(10 + index),
+            str(11 + index),
+            f"s{index + 2}",
+            "pier",
+        )
+        for index in range(3)
     ]
     ranked = _scene_ranked(
         specs,
@@ -359,7 +369,13 @@ def test_scene_identity_activates_ranking_event_and_location_quotas() -> None:
             max_selected=4,
         ),
     )
-    assert any("event_quota" in item.reason_codes for item in ranked)
+    by_id = {item.candidate_id: item for item in ranked}
+    assert sum(item.selected for item in ranked) == 4
+    assert all(by_id[f"alternative-{index}"].selected for index in range(3))
+    assert by_id["dominant-0"].selected
+    assert by_id["dominant-1"].reason_codes == ("event_quota",)
+    assert by_id["dominant-1"].rejections[0].winner_candidate_id == "dominant-0"
+
     ranked = _scene_ranked(
         specs,
         RankingSettings(
@@ -370,4 +386,9 @@ def test_scene_identity_activates_ranking_event_and_location_quotas() -> None:
             max_selected=4,
         ),
     )
-    assert any("location_quota" in item.reason_codes for item in ranked)
+    by_id = {item.candidate_id: item for item in ranked}
+    assert sum(item.selected for item in ranked) == 4
+    assert all(by_id[f"alternative-{index}"].selected for index in range(3))
+    assert by_id["dominant-0"].selected
+    assert by_id["dominant-1"].reason_codes == ("location_quota",)
+    assert by_id["dominant-1"].rejections[0].winner_candidate_id == "dominant-0"
