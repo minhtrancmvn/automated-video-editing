@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from video_editor.config import load_gemini_api_key, resolve_config
+from video_editor.config import HighlightSettings, load_gemini_api_key, resolve_config
 from video_editor.errors import ErrorCategory, VideoEditorError
 
 
@@ -170,3 +170,15 @@ def test_phase2_accepts_short_count_boundary(tmp_path: Path, count: int) -> None
         write_config(tmp_path, highlights=f"max_short_count={count}\n")
     )
     assert config.highlights.max_short_count == count
+
+
+@pytest.mark.parametrize("ratio", [Decimal(0), Decimal("0.20")])
+def test_highlight_settings_rejects_non_policy_overlap_ratio(ratio: Decimal) -> None:
+    with pytest.raises(VideoEditorError, match="cross_short_overlap_ratio"):
+        HighlightSettings(cross_short_overlap_ratio=ratio)
+
+
+def test_highlight_settings_accepts_fixed_overlap_ratio() -> None:
+    settings = HighlightSettings(cross_short_overlap_ratio=Decimal("0.10"))
+
+    assert settings.cross_short_overlap_ratio == Decimal("0.10")

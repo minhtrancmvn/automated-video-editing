@@ -36,6 +36,7 @@ _MIN_COMPLETENESS = Decimal("0.60")
 _MIN_SHORT_QUALITY = Decimal("0.60")
 _MIN_VERTICAL = Decimal("0.60")
 _MIN_SHORT_MOMENTS = 2
+_CORE_CATEGORIES = ("action", "scenic", "human", "story")
 
 TransitionKind = Literal["cut", "dissolve", "fade", "fade_black"]
 TransitionRelation = Literal[
@@ -403,6 +404,21 @@ def _theme(candidate: RankedCandidate) -> str:
     return f"category:{candidate.category}"
 
 
+def _short_eligible(
+    candidate: RankedCandidate, tracks: Mapping[str, CropTrack]
+) -> bool:
+    track = tracks.get(candidate.candidate_id)
+    return (
+        candidate.selected
+        and candidate.eligible_short
+        and candidate.score.total >= _MIN_SHORT_QUALITY
+        and candidate.completeness >= _MIN_COMPLETENESS
+        and candidate.score.raw["vertical"] >= _MIN_VERTICAL
+        and track is not None
+        and track.short_eligible
+    )
+
+
 def _short_clusters(
     candidates: Sequence[RankedCandidate],
     positions: Mapping[str, tuple[int, int]],
@@ -411,16 +427,7 @@ def _short_clusters(
 ) -> tuple[_Cluster, ...]:
     grouped: dict[str, list[RankedCandidate]] = {}
     for candidate in candidates:
-        track = tracks.get(candidate.candidate_id)
-        if (
-            candidate.selected
-            and candidate.eligible_short
-            and candidate.score.total >= _MIN_SHORT_QUALITY
-            and candidate.completeness >= _MIN_COMPLETENESS
-            and candidate.score.raw["vertical"] >= _MIN_VERTICAL
-            and track is not None
-            and track.short_eligible
-        ):
+        if _short_eligible(candidate, tracks):
             grouped.setdefault(_theme(candidate), []).append(candidate)
 
     clusters: list[_Cluster] = []
@@ -463,7 +470,30 @@ def _long_candidates(
         and candidate.score.total >= _MIN_QUALITY
         and candidate.completeness >= _MIN_COMPLETENESS
     ]
-    selected = _bounded_quality_selection(eligible, cap)
+    selected: list[RankedCandidate] = []
+    selected_ids: set[str] = set()
+    duration = Decimal(0)
+    for category in _CORE_CATEGORIES:
+        representatives = sorted(
+            (candidate for candidate in eligible if candidate.category == category),
+            key=_quality_key,
+            reverse=True,
+        )
+        for candidate in representatives:
+            candidate_duration = _duration(candidate)
+            if duration + candidate_duration <= cap:
+                selected.append(candidate)
+                selected_ids.add(candidate.candidate_id)
+                duration += candidate_duration
+                break
+    for candidate in sorted(eligible, key=_quality_key, reverse=True):
+        if candidate.candidate_id in selected_ids:
+            continue
+        candidate_duration = _duration(candidate)
+        if duration + candidate_duration <= cap:
+            selected.append(candidate)
+            selected_ids.add(candidate.candidate_id)
+            duration += candidate_duration
     return tuple(sorted(selected, key=lambda item: _chronology_key(item, positions)))
 
 
@@ -524,34 +554,58 @@ def create_highlight_plans(
                 and candidate.source_start == anchor.source_start
                 and candidate.source_end == anchor.source_end
                 and candidate.dedup_group_id == anchor.dedup_group
-                and candidate.candidate_id in track_map
-                and track_map[candidate.candidate_id].short_eligible
+                and _short_eligible(candidate, track_map)
             ),
             None,
         )
         if anchor_candidate is not None:
-            clusters = [
-                _Cluster(
-                    theme=cluster.theme,
-                    candidates=tuple(
+            anchored_clusters: list[_Cluster] = []
+            anchored_count = 0
+            for cluster in clusters:
+                cluster_candidates = cluster.candidates
+                shares_context = any(
+                    (
+                        anchor_candidate.event_id is not None
+                        and anchor_candidate.event_id == candidate.event_id
+                    )
+                    or (
+                        anchor_candidate.location_id is not None
+                        and anchor_candidate.location_id == candidate.location_id
+                    )
+                    or anchor_candidate.category == candidate.category
+                    for candidate in cluster.candidates
+                )
+                candidate_ids = {
+                    candidate.candidate_id for candidate in cluster.candidates
+                }
+                can_add_anchor = (
+                    anchored_count < 2
+                    and anchor_candidate.candidate_id not in candidate_ids
+                    and shares_context
+                    and sum(
+                        (_duration(candidate) for candidate in cluster.candidates),
+                        Decimal(0),
+                    )
+                    + _duration(anchor_candidate)
+                    <= Decimal(settings.short_max_seconds)
+                )
+                if can_add_anchor:
+                    cluster_candidates = tuple(
                         sorted(
-                            {
-                                anchor_candidate.candidate_id: anchor_candidate,
-                                **{
-                                    item.candidate_id: item
-                                    for item in cluster.candidates
-                                },
-                            }.values(),
+                            (*cluster.candidates, anchor_candidate),
                             key=lambda item: _chronology_key(item, positions),
                         )
                     )
-                    if index < 2
-                    else cluster.candidates,
-                    quality=cluster.quality,
-                    first_chronology_key=cluster.first_chronology_key,
+                    anchored_count += 1
+                anchored_clusters.append(
+                    _Cluster(
+                        theme=cluster.theme,
+                        candidates=cluster_candidates,
+                        quality=cluster.quality,
+                        first_chronology_key=cluster.first_chronology_key,
+                    )
                 )
-                for index, cluster in enumerate(clusters)
-            ]
+            clusters = anchored_clusters
 
     accepted: list[tuple[_Cluster, EditPlanV2]] = []
     for cluster in clusters:

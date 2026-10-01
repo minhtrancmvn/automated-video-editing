@@ -50,6 +50,14 @@ class HighlightSettings:
     short_max_seconds: int = 180
     cross_short_overlap_ratio: Decimal = Decimal("0.10")
 
+    def __post_init__(self) -> None:
+        """Enforce fixed cross-short overlap product policy."""
+        if self.cross_short_overlap_ratio != Decimal("0.10"):
+            raise VideoEditorError(
+                ErrorCategory.CONFIGURATION,
+                "highlights.cross_short_overlap_ratio must be 0.10",
+            )
+
 
 @dataclass(frozen=True)
 class CropSettings:

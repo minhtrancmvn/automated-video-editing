@@ -6,6 +6,8 @@ import random
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from video_editor.analysis.models import CropKeyframe, CropTrack
 from video_editor.analysis.ranking import (
     Dimension,
@@ -225,6 +227,35 @@ def test_long_plan_balances_categories_and_keeps_complete_event_boundaries() -> 
     assert "incomplete" not in by_id
 
 
+def test_long_plan_reserves_available_core_categories_under_duration_pressure() -> None:
+    candidates = [
+        *[
+            _candidate(
+                f"action-{index}",
+                "s1",
+                str(index * 450),
+                str((index + 1) * 450),
+                category="action",
+                total=str(D("1.00") - D(index) / 100),
+            )
+            for index in range(4)
+        ],
+        _candidate("scenic", "s2", "0", "450", category="scenic", total="0.80"),
+        _candidate("human", "s3", "0", "450", category="human", total="0.79"),
+        _candidate("story", "s4", "0", "450", category="story", total="0.78"),
+    ]
+
+    plans = _plan(candidates, ("s1", "s2", "s3", "s4"))
+
+    assert plans.long_evidence.category_distribution == (
+        ("action", 1),
+        ("human", 1),
+        ("scenic", 1),
+        ("story", 1),
+    )
+    assert timeline_duration(plans.long) == D("1800")
+
+
 def test_short_count_is_zero_when_no_coherent_quality_cluster_exists() -> None:
     candidates = [
         _candidate("one", "s1", "0", "10", event_id="solo"),
@@ -340,6 +371,146 @@ def test_recorded_anchor_may_appear_in_exactly_two_shorts_with_rationale() -> No
         == 2
     )
     assert plans.validation.anchor_rationale == anchor.rationale
+
+
+def test_recorded_anchor_is_skipped_when_coherent_cluster_is_full() -> None:
+    candidates = [
+        _candidate("anchor", "s1", "0", "10", dedup_group="anchor"),
+        *[
+            _candidate(
+                f"support-{event}-{index}",
+                source,
+                str(index * 90),
+                str((index + 1) * 90),
+                event_id=event,
+            )
+            for event, source in (("a", "s1"), ("b", "s2"))
+            for index in range(2)
+        ],
+    ]
+    anchor = AnchorMoment(
+        source_identity="sha256:s1",
+        source_start=D("0"),
+        source_end=D("10"),
+        dedup_group="anchor",
+        rationale="shared opening establishes the route",
+    )
+
+    plans = _plan(candidates, ("s1", "s2"), anchor=anchor)
+
+    assert [timeline_duration(plan) for plan in plans.shorts] == [D("180")] * 2
+    assert all(clip.clip_id != "anchor" for plan in plans.shorts for clip in plan.clips)
+
+
+@pytest.mark.parametrize(
+    (
+        "selected",
+        "eligible_short",
+        "total",
+        "completeness",
+        "vertical",
+        "crop_eligible",
+    ),
+    [
+        (False, True, "0.80", "0.90", "0.90", True),
+        (True, False, "0.80", "0.90", "0.90", True),
+        (True, True, "0.59", "0.90", "0.90", True),
+        (True, True, "0.80", "0.59", "0.90", True),
+        (True, True, "0.80", "0.90", "0.59", True),
+        (True, True, "0.80", "0.90", "0.90", False),
+    ],
+)
+def test_recorded_anchor_must_pass_normal_short_eligibility(
+    selected: bool,
+    eligible_short: bool,
+    total: str,
+    completeness: str,
+    vertical: str,
+    crop_eligible: bool,
+) -> None:
+    anchor_candidate = _candidate(
+        "anchor",
+        "s1",
+        "0",
+        "10",
+        dedup_group="anchor",
+        selected=selected,
+        eligible_short=eligible_short,
+        total=total,
+        completeness=completeness,
+        vertical=vertical,
+    )
+    candidates = [
+        anchor_candidate,
+        *[
+            _candidate(
+                f"support-{event}-{index}",
+                source,
+                str(20 + index * 20),
+                str(30 + index * 20),
+                event_id=event,
+            )
+            for event, source in (("a", "s1"), ("b", "s2"))
+            for index in range(2)
+        ],
+    ]
+    anchor = AnchorMoment(
+        source_identity="sha256:s1",
+        source_start=D("0"),
+        source_end=D("10"),
+        dedup_group="anchor",
+        rationale="shared opening establishes the route",
+    )
+    tracks = tuple(
+        _track(candidate, eligible=crop_eligible)
+        if candidate.candidate_id == "anchor"
+        else _track(candidate)
+        for candidate in candidates
+    )
+
+    plans = _plan(candidates, ("s1", "s2"), anchor=anchor, tracks=tracks)
+
+    assert all(clip.clip_id != "anchor" for plan in plans.shorts for clip in plan.clips)
+
+
+def test_recorded_anchor_must_share_semantic_context_with_cluster() -> None:
+    candidates = [
+        _candidate(
+            "anchor",
+            "s1",
+            "0",
+            "10",
+            category="scenic",
+            event_id="unrelated",
+            location_id="summit",
+            dedup_group="anchor",
+        ),
+        *[
+            _candidate(
+                f"support-{event}-{index}",
+                source,
+                str(20 + index * 20),
+                str(30 + index * 20),
+                event_id=event,
+            )
+            for event, source in (("a", "s1"), ("b", "s2"))
+            for index in range(2)
+        ],
+    ]
+    anchor = AnchorMoment(
+        source_identity="sha256:s1",
+        source_start=D("0"),
+        source_end=D("10"),
+        dedup_group="anchor",
+        rationale="shared opening establishes the route",
+    )
+
+    plans = _plan(candidates, ("s1", "s2"), anchor=anchor)
+
+    short_ids = tuple(
+        tuple(clip.clip_id for clip in plan.clips) for plan in plans.shorts
+    )
+    assert all("anchor" not in clip_ids for clip_ids in short_ids), short_ids
 
 
 def test_vertical_ineligibility_prevents_short_but_not_long_selection() -> None:
