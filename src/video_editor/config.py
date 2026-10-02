@@ -12,6 +12,11 @@ from typing import Any
 from video_editor.analysis.pricing import GEMINI_MODEL
 from video_editor.errors import ErrorCategory, VideoEditorError
 
+# Worst-case reservation ceiling per source hour. This is a runtime spending
+# limit; the release evaluation separately requires actual spend of at most
+# USD 1.00 per source hour.
+MAX_COST_PER_SOURCE_HOUR_USD = Decimal("3.00")
+
 
 @dataclass(frozen=True)
 class PathSettings:
@@ -33,7 +38,7 @@ class GeminiSettings:
     broad_fps: Decimal = Decimal("0.5")
     candidate_min_fps: int = 2
     candidate_max_fps: int = 5
-    max_cost_per_source_hour_usd: Decimal = Decimal("1.00")
+    max_cost_per_source_hour_usd: Decimal = MAX_COST_PER_SOURCE_HOUR_USD
     chunk_target_seconds: int = 720
     chunk_min_seconds: int = 600
     chunk_max_seconds: int = 900
@@ -190,10 +195,11 @@ def _gemini_settings(raw: dict[str, Any]) -> GeminiSettings:
             ErrorCategory.CONFIGURATION,
             "gemini.candidate_min_fps and gemini.candidate_max_fps must be between 2 and 5",
         )
-    if result.max_cost_per_source_hour_usd > Decimal("1.00"):
+    if result.max_cost_per_source_hour_usd > MAX_COST_PER_SOURCE_HOUR_USD:
         raise VideoEditorError(
             ErrorCategory.CONFIGURATION,
-            "gemini.max_cost_per_source_hour_usd must not exceed 1.00",
+            "gemini.max_cost_per_source_hour_usd must not exceed "
+            f"{MAX_COST_PER_SOURCE_HOUR_USD}",
         )
     return result
 

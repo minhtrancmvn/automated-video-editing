@@ -68,7 +68,7 @@ def test_phase2_config_keeps_api_key_out_of_app_config(
         write_config(tmp_path, cloud_enabled=True, gemini_enabled=True)
     )
     assert config.gemini.model == "gemini-3.8-flash"
-    assert config.gemini.max_cost_per_source_hour_usd == Decimal("1.00")
+    assert config.gemini.max_cost_per_source_hour_usd == Decimal("3.00")
     assert "secret-value" not in repr(config)
     assert load_gemini_api_key(os.environ) == "secret-value"
 
@@ -93,6 +93,20 @@ def test_cloud_mode_requires_enabled_gemini(tmp_path: Path) -> None:
         resolve_config(write_config(tmp_path, cloud_enabled=True))
 
 
+@pytest.mark.parametrize("cap", ["0.50", "1.00", "2.50", "3.00"])
+def test_cost_cap_accepts_values_up_to_three_dollars(tmp_path: Path, cap: str) -> None:
+    config = resolve_config(
+        write_config(
+            tmp_path,
+            cloud_enabled=True,
+            gemini_enabled=True,
+            gemini=f'max_cost_per_source_hour_usd="{cap}"\n',
+        )
+    )
+
+    assert config.gemini.max_cost_per_source_hour_usd == Decimal(cap)
+
+
 @pytest.mark.parametrize(
     ("table", "setting", "value"),
     [
@@ -100,7 +114,7 @@ def test_cloud_mode_requires_enabled_gemini(tmp_path: Path) -> None:
         ("gemini", "broad_fps", '"1"'),
         ("gemini", "candidate_min_fps", "1"),
         ("gemini", "candidate_max_fps", "6"),
-        ("gemini", "max_cost_per_source_hour_usd", '"1.01"'),
+        ("gemini", "max_cost_per_source_hour_usd", '"3.01"'),
         ("highlights", "max_short_count", "6"),
         ("crop", "max_velocity_widths_per_second", '"0.26"'),
         ("crop", "max_acceleration_widths_per_second_squared", '"0.51"'),

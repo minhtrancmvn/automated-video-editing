@@ -23,7 +23,7 @@ model = "gemini-3.8-flash"
 broad_fps = "0.5"
 candidate_min_fps = 2
 candidate_max_fps = 5
-max_cost_per_source_hour_usd = "1.00"
+max_cost_per_source_hour_usd = "3.00"
 
 [highlights]
 max_short_count = 5

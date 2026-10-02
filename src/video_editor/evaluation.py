@@ -250,6 +250,8 @@ def evaluate_predictions(
         <= (Decimal(1800) if output.kind == "long" else Decimal(180))
         for output in predictions.outputs
     ) and bool(predictions.outputs)
+    # Release criterion is ACTUAL spend, kept at USD 1.00 per source hour; the
+    # runtime reservation ceiling in config is higher by design.
     budget_ok = predictions.spent_usd <= predictions.source_hours * Decimal("1.00")
     failures = []
     if not duration_ok:
