@@ -45,7 +45,7 @@ Input, workspace, cache, output, and state paths are independent. Keep large pro
 
 Missing or changed external volumes fail loudly. No internal fallback directory is created. Write-heavy stages check recorded volume identity and free space. Originals are read-only inputs from workflow perspective and are never edited or deleted. Cleanup, when performed manually, must stay inside configured cache/workspace descendants; never clean input roots.
 
-Phase 1 has no runtime environment variables. `.env.example` records this boundary; TOML is source of configuration. No cloud or network calls occur. `cloud_enabled = true` is rejected.
+With `cloud_enabled = false`, Phase 1 stays local-only and uses no runtime environment variables. With `cloud_enabled = true`, Phase 2 is selected, but production Gemini pricing is intentionally unset: analysis fails closed before upload. Do not treat the cloud setting as permission to run paid analysis. Exact custom-FPS video tokenization and timestamp/metadata charges still need provider verification before pricing can be pinned. `GEMINI_API_KEY` is runtime-only; never put it in TOML, SQLite, logs, reports, or shell history. `.env.example` is a variable-name reference, not a request to save credentials.
 
 ## CLI
 
@@ -101,6 +101,22 @@ video-editor resume JOB_ID --config config.toml
 
 Supported recursive extensions: `.3gp`, `.avi`, `.m2ts`, `.m4v`, `.mkv`, `.mov`, `.mp4`, `.mts`, `.webm`. Unsupported or unreadable candidates are warned or skipped when other valid media remains; inspect report records skipped inputs. GoPro `GOPR####` and `G[A-Z]CCFFFF` names receive conservative chapter/session chronology evidence. Filename ordering is deterministic, not semantic understanding.
 
+## Phase 2 automatic highlights — offline evaluation only
+
+Phase 2 adds nine resumable stages: `inspect → proxy → segment → analyze → rank → plan → render → validate → report`. Analysis uses generated, registered H.264 proxy chunks with compressed audio. Each upload is checked against its persisted manifest, source fingerprint, mapping, generated root, and file digest; original media is never uploaded. Broad Gemini scan is fixed at 0.5 FPS, detailed candidate sampling uses 2, 3, or 5 FPS, and the exact model is `gemini-2.5-flash`. Broad coverage must reach 100% before refinement, planning, or rendering.
+
+The intended long output is chronological 16:9 `long.mp4` capped at 1,800 seconds. Zero to five independent 9:16 shorts receive `short-01.mp4`, `short-02.mp4`, and later names only when strong distinct material exists; each is capped at 180 seconds. Cross-short overlap cannot exceed 10% relative to the shorter source interval, and semantic dedup groups cannot repeat. Audio comes only from source speech/ambience, without music or synthetic media. Tracked vertical crops use local subject-retention evidence, bounded movement, and safe margins. Semantic transitions allow cuts for continuous action/matched motion/same event, dissolves for same event/place-time shift, fades for chapter/story boundaries, and fade-to-black for chapter/time/location changes. Resume reuses matching validated analysis and renders; stale plans invalidate downstream artifacts. Offline fake-provider tests verify this wiring, not edited-story quality.
+
+Cost reservation targets at most USD 1.00 per source hour, but **production pricing is not pinned**. The estimator handles documented frame/audio token rates, output cap, and retries, yet exact custom-FPS and metadata token accounting remains unverified. Cloud runs therefore fail closed rather than risk an underestimated charge. A live Gemini contract test is separately opted in, excluded from default tests, and requires explicit approval plus a pre-reserved maximum of at most USD 0.01. No live test or real-footage Phase 2 release evaluation has been run here.
+
+Offline evaluation plumbing can be inspected without a provider call:
+
+```bash
+uv run python -m video_editor.evaluation --labels tests/evaluation/synthetic-labels.json --thresholds tests/evaluation/thresholds-v1.json --expect-blocked-release
+```
+
+Synthetic rows demonstrate formulas only and are marked `release_eligible=false`; reported metrics are tagged `unverified_input`. This harness **cannot pass a release gate**: supplied prediction JSON is not independently linked to rendered outputs, billing ledger, source/upload proof, human study, or committed calibration thresholds, and holdout-only scoring is not implemented. A later release-capable evaluator must verify those artifacts, score only holdout batches, require at least 100 real labeled candidate intervals across three authorized batches with isolated train/calibration/holdout, and enforce hard safety/quality thresholds frozen before holdout. No Phase 2 quality or release-readiness claim is supported until that work and the pre-live pricing/tokenization gate are complete. See [architecture](docs/architecture.md) for evaluation contracts and remaining limitations.
+
 ## Privacy, cost, and limits
 
 Media stays on configured local volumes. Phase 1 makes zero cloud calls and reports cloud usage as `0`. No automatic intelligence claim is valid: selection is deterministic sample selection, not highlight ranking or story editing. The benchmark procedure lives in [`docs/benchmark.md`](docs/benchmark.md); the scoped real-camera result and its limitations live in [`docs/benchmark-records/2026-09-28/benchmark-record.md`](docs/benchmark-records/2026-09-28/benchmark-record.md).
@@ -111,7 +127,7 @@ Stable CLI exit categories map to codes: configuration 10, storage 11, inspectio
 
 ## Troubleshooting
 
-- `configuration`: verify TOML syntax, all five `[paths]` values, non-negative reserve, positive concurrency, and `cloud_enabled = false`.
+- `configuration`: verify TOML syntax, all five `[paths]` values, non-negative reserve, positive concurrency, and compatible `cloud_enabled`/`[gemini]` settings. Production cloud pricing is deliberately unavailable; a pricing/budget failure is expected until provider accounting is verified and pinned.
 - Missing volume or `volume changed`: mount SSD at exact configured path. Do not create a same-named internal directory as workaround.
 - `ffprobe failed` or skipped input: inspect codec/container with `ffprobe`; keep unsupported media out of acceptance batch and retain warning in report.
 - Insufficient space: free space on configured workspace/cache/output volume or reduce batch size; reserve is deliberate.

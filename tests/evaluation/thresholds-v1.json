@@ -1,0 +1,18 @@
+{
+  "schema_version": "thresholds-v1",
+  "model": "gemini-2.5-flash",
+  "prompt_version": "broad-v1+candidate-v2",
+  "config_version": "phase2-v1",
+  "dataset_version": "synthetic-v1",
+  "must_include_recall_min": "0.80",
+  "weak_rejection_min": "0.75",
+  "duplicate_rate_max": "0.10",
+  "crop_retention_min": "0.95",
+  "abrupt_cut_rate_max": "0.10",
+  "short_diversity_min": "0.80",
+  "human_preference_min": "0.50",
+  "calibration_evidence_digest": "synthetic-not-release-evidence",
+  "frozen_at": null,
+  "frozen_commit": null,
+  "release_eligible": false
+}

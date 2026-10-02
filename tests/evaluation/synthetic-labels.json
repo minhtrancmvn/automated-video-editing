@@ -1,0 +1,43 @@
+{
+  "schema_version": "evaluation-v1",
+  "dataset_version": "synthetic-v1",
+  "model": "gemini-2.5-flash",
+  "prompt_version": "broad-v1+candidate-v2",
+  "config_version": "phase2-v1",
+  "release_eligible": false,
+  "holdout_started_at": "2026-09-28T00:00:00Z",
+  "rows": [
+    {"interval_id":"a","batch_id":"synthetic-batch-1","source_id":"source-1","start":"0","end":"1","partition":"train","must_include":true,"acceptable":true,"weak":false,"duplicate":false,"duplicate_of":null,"chapter":"chapter-1","order":0,"subject_boxes":[{"x":"0.1","y":"0.1","w":"0.2","h":"0.2"}],"acceptable_transitions":["cut"]},
+    {"interval_id":"b","batch_id":"synthetic-batch-1","source_id":"source-1","start":"1","end":"2","partition":"train","must_include":true,"acceptable":true,"weak":false,"duplicate":false,"duplicate_of":null,"chapter":"chapter-1","order":1,"subject_boxes":[],"acceptable_transitions":["cut"]},
+    {"interval_id":"c","batch_id":"synthetic-batch-1","source_id":"source-1","start":"2","end":"3","partition":"train","must_include":true,"acceptable":true,"weak":false,"duplicate":false,"duplicate_of":null,"chapter":"chapter-1","order":2,"subject_boxes":[],"acceptable_transitions":["fade"]},
+    {"interval_id":"d","batch_id":"synthetic-batch-1","source_id":"source-1","start":"3","end":"4","partition":"train","must_include":false,"acceptable":true,"weak":false,"duplicate":true,"duplicate_of":"a","chapter":"chapter-2","order":3,"subject_boxes":[],"acceptable_transitions":["fade_black"]},
+    {"interval_id":"w1","batch_id":"synthetic-batch-2","source_id":"source-2","start":"0","end":"1","partition":"calibration","must_include":false,"acceptable":false,"weak":true,"duplicate":false,"duplicate_of":null,"chapter":"chapter-3","order":4,"subject_boxes":[],"acceptable_transitions":[]},
+    {"interval_id":"w2","batch_id":"synthetic-batch-2","source_id":"source-2","start":"1","end":"2","partition":"calibration","must_include":false,"acceptable":false,"weak":true,"duplicate":false,"duplicate_of":null,"chapter":"chapter-3","order":5,"subject_boxes":[],"acceptable_transitions":[]},
+    {"interval_id":"w3","batch_id":"synthetic-batch-2","source_id":"source-2","start":"2","end":"3","partition":"calibration","must_include":false,"acceptable":false,"weak":true,"duplicate":false,"duplicate_of":null,"chapter":"chapter-3","order":6,"subject_boxes":[],"acceptable_transitions":[]},
+    {"interval_id":"w4","batch_id":"synthetic-batch-2","source_id":"source-2","start":"3","end":"4","partition":"calibration","must_include":false,"acceptable":false,"weak":true,"duplicate":false,"duplicate_of":null,"chapter":"chapter-3","order":7,"subject_boxes":[],"acceptable_transitions":[]}
+  ],
+  "predictions": {
+    "selected_ids": ["a", "b", "d", "w4"],
+    "duplicate_pairs": [["a", "d"]],
+    "ordered_ids": ["a", "b", "d", "w4"],
+    "crop_samples": [{"interval_id":"a","retained":19,"sampled":20}],
+    "boundaries": [
+      {"from_id":"a","to_id":"b","kind":"cut","relation":"same_event","unrelated":false},
+      {"from_id":"b","to_id":"d","kind":"cut","relation":"location_change","unrelated":true},
+      {"from_id":"d","to_id":"w4","kind":"fade","relation":"chapter_boundary","unrelated":false},
+      {"from_id":"w4","to_id":"a","kind":"dissolve","relation":"same_event","unrelated":false},
+      {"from_id":"a","to_id":"d","kind":"fade_black","relation":"time_jump","unrelated":false}
+    ],
+    "outputs": [
+      {"kind":"long","duration_seconds":"8","selected_ids":["a","b","d","w4"]},
+      {"kind":"short","duration_seconds":"3","selected_ids":["a","b"]},
+      {"kind":"short","duration_seconds":"3","selected_ids":["d","w4"]}
+    ],
+    "human_preference_wins":1,
+    "human_preference_trials":2,
+    "source_hours":"0.01",
+    "spent_usd":"0.001",
+    "source_safe":true,
+    "schema_valid":true
+  }
+}

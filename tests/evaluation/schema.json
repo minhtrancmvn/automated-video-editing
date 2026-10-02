@@ -1,0 +1,511 @@
+{
+  "$defs": {
+    "BoundaryPrediction": {
+      "additionalProperties": false,
+      "properties": {
+        "from_id": {
+          "minLength": 1,
+          "title": "From Id",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "cut",
+            "dissolve",
+            "fade",
+            "fade_black"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "relation": {
+          "minLength": 1,
+          "title": "Relation",
+          "type": "string"
+        },
+        "to_id": {
+          "minLength": 1,
+          "title": "To Id",
+          "type": "string"
+        },
+        "unrelated": {
+          "title": "Unrelated",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "from_id",
+        "to_id",
+        "kind",
+        "relation",
+        "unrelated"
+      ],
+      "title": "BoundaryPrediction",
+      "type": "object"
+    },
+    "CropSample": {
+      "additionalProperties": false,
+      "properties": {
+        "interval_id": {
+          "minLength": 1,
+          "title": "Interval Id",
+          "type": "string"
+        },
+        "retained": {
+          "minimum": 0,
+          "title": "Retained",
+          "type": "integer"
+        },
+        "sampled": {
+          "exclusiveMinimum": 0,
+          "title": "Sampled",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "interval_id",
+        "retained",
+        "sampled"
+      ],
+      "title": "CropSample",
+      "type": "object"
+    },
+    "EvaluationLabel": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptable": {
+          "title": "Acceptable",
+          "type": "boolean"
+        },
+        "acceptable_transitions": {
+          "items": {
+            "enum": [
+              "cut",
+              "dissolve",
+              "fade",
+              "fade_black"
+            ],
+            "type": "string"
+          },
+          "title": "Acceptable Transitions",
+          "type": "array"
+        },
+        "batch_id": {
+          "minLength": 1,
+          "title": "Batch Id",
+          "type": "string"
+        },
+        "chapter": {
+          "minLength": 1,
+          "title": "Chapter",
+          "type": "string"
+        },
+        "duplicate": {
+          "title": "Duplicate",
+          "type": "boolean"
+        },
+        "duplicate_of": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Duplicate Of"
+        },
+        "end": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "title": "End"
+        },
+        "interval_id": {
+          "minLength": 1,
+          "title": "Interval Id",
+          "type": "string"
+        },
+        "must_include": {
+          "title": "Must Include",
+          "type": "boolean"
+        },
+        "order": {
+          "minimum": 0,
+          "title": "Order",
+          "type": "integer"
+        },
+        "partition": {
+          "enum": [
+            "train",
+            "calibration",
+            "holdout"
+          ],
+          "title": "Partition",
+          "type": "string"
+        },
+        "source_id": {
+          "minLength": 1,
+          "title": "Source Id",
+          "type": "string"
+        },
+        "start": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "title": "Start"
+        },
+        "subject_boxes": {
+          "items": {
+            "$ref": "#/$defs/SubjectBox"
+          },
+          "title": "Subject Boxes",
+          "type": "array"
+        },
+        "weak": {
+          "title": "Weak",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "interval_id",
+        "batch_id",
+        "source_id",
+        "start",
+        "end",
+        "partition",
+        "must_include",
+        "acceptable",
+        "weak",
+        "duplicate",
+        "duplicate_of",
+        "chapter",
+        "order",
+        "subject_boxes",
+        "acceptable_transitions"
+      ],
+      "title": "EvaluationLabel",
+      "type": "object"
+    },
+    "EvaluationPredictions": {
+      "additionalProperties": false,
+      "properties": {
+        "boundaries": {
+          "items": {
+            "$ref": "#/$defs/BoundaryPrediction"
+          },
+          "title": "Boundaries",
+          "type": "array"
+        },
+        "crop_samples": {
+          "items": {
+            "$ref": "#/$defs/CropSample"
+          },
+          "title": "Crop Samples",
+          "type": "array"
+        },
+        "duplicate_pairs": {
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "minLength": 1,
+                "type": "string"
+              }
+            ],
+            "type": "array"
+          },
+          "title": "Duplicate Pairs",
+          "type": "array"
+        },
+        "human_preference_trials": {
+          "minimum": 0,
+          "title": "Human Preference Trials",
+          "type": "integer"
+        },
+        "human_preference_wins": {
+          "minimum": 0,
+          "title": "Human Preference Wins",
+          "type": "integer"
+        },
+        "ordered_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Ordered Ids",
+          "type": "array"
+        },
+        "outputs": {
+          "items": {
+            "$ref": "#/$defs/OutputPrediction"
+          },
+          "title": "Outputs",
+          "type": "array"
+        },
+        "schema_valid": {
+          "title": "Schema Valid",
+          "type": "boolean"
+        },
+        "selected_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Selected Ids",
+          "type": "array"
+        },
+        "source_hours": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "title": "Source Hours"
+        },
+        "source_safe": {
+          "title": "Source Safe",
+          "type": "boolean"
+        },
+        "spent_usd": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "title": "Spent Usd"
+        }
+      },
+      "required": [
+        "selected_ids",
+        "duplicate_pairs",
+        "ordered_ids",
+        "crop_samples",
+        "boundaries",
+        "outputs",
+        "human_preference_wins",
+        "human_preference_trials",
+        "source_hours",
+        "spent_usd",
+        "source_safe",
+        "schema_valid"
+      ],
+      "title": "EvaluationPredictions",
+      "type": "object"
+    },
+    "OutputPrediction": {
+      "additionalProperties": false,
+      "properties": {
+        "duration_seconds": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "title": "Duration Seconds"
+        },
+        "kind": {
+          "enum": [
+            "long",
+            "short"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "selected_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Selected Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "duration_seconds",
+        "selected_ids"
+      ],
+      "title": "OutputPrediction",
+      "type": "object"
+    },
+    "SubjectBox": {
+      "additionalProperties": false,
+      "properties": {
+        "h": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "maximum": 1.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "title": "H"
+        },
+        "w": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "maximum": 1.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "title": "W"
+        },
+        "x": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "title": "X"
+        },
+        "y": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "title": "Y"
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "w",
+        "h"
+      ],
+      "title": "SubjectBox",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "config_version": {
+      "minLength": 1,
+      "title": "Config Version",
+      "type": "string"
+    },
+    "dataset_version": {
+      "minLength": 1,
+      "title": "Dataset Version",
+      "type": "string"
+    },
+    "holdout_started_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Holdout Started At"
+    },
+    "model": {
+      "minLength": 1,
+      "title": "Model",
+      "type": "string"
+    },
+    "predictions": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EvaluationPredictions"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "prompt_version": {
+      "minLength": 1,
+      "title": "Prompt Version",
+      "type": "string"
+    },
+    "release_eligible": {
+      "title": "Release Eligible",
+      "type": "boolean"
+    },
+    "rows": {
+      "items": {
+        "$ref": "#/$defs/EvaluationLabel"
+      },
+      "title": "Rows",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "evaluation-v1",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "dataset_version",
+    "model",
+    "prompt_version",
+    "config_version",
+    "release_eligible",
+    "holdout_started_at",
+    "rows"
+  ],
+  "title": "EvaluationDataset",
+  "type": "object"
+}
