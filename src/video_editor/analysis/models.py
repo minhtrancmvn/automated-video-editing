@@ -41,7 +41,16 @@ FiniteDecimal = Annotated[Decimal, Field(allow_inf_nan=False)]
 ProviderDecimal = Annotated[
     Decimal,
     BeforeValidator(_strict_json_decimal),
-    WithJsonSchema({"type": "string"}),
+    WithJsonSchema(
+        {
+            "type": "string",
+            "description": (
+                "Timestamp as plain decimal seconds in the supplied interval, "
+                'for example "12.5": digits and one optional point, no units, '
+                "no colons."
+            ),
+        }
+    ),
 ]
 StrictScore = Annotated[StrictFloat, Field(ge=0, le=1, allow_inf_nan=False)]
 NonEmptyString = Annotated[str, StringConstraints(min_length=1)]

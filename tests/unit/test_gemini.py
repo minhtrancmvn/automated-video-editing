@@ -688,6 +688,54 @@ def test_outgoing_candidate_request_has_no_unsupported_additional_properties(
     assert "additionalProperties" not in wire_keys
 
 
+def _timestamp_descriptions(schema: object) -> list[str | None]:
+    found: list[str | None] = []
+    if isinstance(schema, dict):
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            for name in ("start", "end", "time"):
+                if isinstance(properties.get(name), dict):
+                    found.append(properties[name].get("description"))
+        for child in schema.values():
+            found += _timestamp_descriptions(child)
+    elif isinstance(schema, list):
+        for child in schema:
+            found += _timestamp_descriptions(child)
+    return found
+
+
+@pytest.mark.parametrize("model_name", ["broad", "candidate"])
+def test_outgoing_schema_tells_model_how_to_write_timestamps(
+    adapter: Any,
+    fake_client: FakeClient,
+    broad_chunk: object,
+    broad_request: AnalysisRequestContext,
+    candidate: object,
+    candidate_request: AnalysisRequestContext,
+    model_name: str,
+) -> None:
+    upload = upload_active(adapter)
+    if model_name == "broad":
+        fake_client.models.responses.append(queued_response("broad-response.json"))
+        adapter.broad_scan(
+            upload, broad_chunk, broad_request, prompt_version="broad-v1"
+        )
+    else:
+        fake_client.models.responses.append(queued_response("refinement-response.json"))
+        adapter.refine_candidate(
+            upload, candidate, candidate_request, fps=3, prompt_version="candidate-v2"
+        )
+
+    schema = fake_client.models.requests[0]["config"].response_schema
+    descriptions = _timestamp_descriptions(schema.model_dump(exclude_none=True))
+
+    assert descriptions
+    assert all(
+        isinstance(text, str) and "decimal seconds" in text and "no units" in text
+        for text in descriptions
+    )
+
+
 def _outgoing_wire_keys(request: dict[str, object]) -> set[str]:
     client = genai.Client(api_key=SECRET)
     try:
