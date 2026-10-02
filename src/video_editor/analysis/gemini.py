@@ -105,12 +105,17 @@ class GeminiAdapter:
         seconds = int(duration.to_integral_value(rounding=ROUND_CEILING))
         frames = int((fps * duration).to_integral_value(rounding=ROUND_CEILING))
         media_tokens = frames * _VIDEO_TOKENS_PER_FRAME + seconds * (
-            _AUDIO_TOKENS_PER_SECOND + _METADATA_TOKENS_PER_SECOND
+            _METADATA_TOKENS_PER_SECOND
         )
+        audio_tokens = seconds * _AUDIO_TOKENS_PER_SECOND
         schema_bytes = len(json.dumps(response_model.model_json_schema()).encode())
         text_tokens = _PROMPT_OVERHEAD_TOKENS + schema_bytes
         per_attempt = maximum_request_cost(
-            pricing, media_tokens, text_tokens, _OUTPUT_TOKEN_MAXIMUM
+            pricing,
+            media_tokens,
+            text_tokens,
+            _OUTPUT_TOKEN_MAXIMUM,
+            audio_tokens=audio_tokens,
         )
         maximum = per_attempt * attempts
         return (maximum * _MICRO_USD).to_integral_value(
@@ -498,14 +503,41 @@ class GeminiAdapter:
                 request_id=request_id,
                 status="failed_unknown_billing",
             )
-        details = getattr(metadata, "prompt_tokens_details", None) or ()
+        details = getattr(metadata, "prompt_tokens_details", None)
+        prompt_tokens = int(getattr(metadata, "prompt_token_count", 0) or 0)
+        if details is None and prompt_tokens:
+            return ProviderAttemptUsage(
+                request_id=request_id,
+                status="failed_unknown_billing",
+            )
         media_input_tokens = 0
-        for detail in details:
+        audio_input_tokens = 0
+        text_input_tokens = 0
+        for detail in details or ():
             modality = getattr(detail, "modality", None)
             modality_value = str(getattr(modality, "value", modality)).upper()
-            if modality_value in {"VIDEO", "AUDIO", "IMAGE"}:
-                media_input_tokens += int(getattr(detail, "token_count", 0) or 0)
-        prompt_tokens = int(getattr(metadata, "prompt_token_count", 0) or 0)
+            count = getattr(detail, "token_count", None)
+            if not isinstance(count, int) or count < 0:
+                return ProviderAttemptUsage(
+                    request_id=request_id,
+                    status="failed_unknown_billing",
+                )
+            if modality_value in {"VIDEO", "IMAGE"}:
+                media_input_tokens += count
+            elif modality_value == "AUDIO":
+                audio_input_tokens += count
+            elif modality_value == "TEXT":
+                text_input_tokens += count
+            else:
+                return ProviderAttemptUsage(
+                    request_id=request_id,
+                    status="failed_unknown_billing",
+                )
+        if media_input_tokens + audio_input_tokens + text_input_tokens != prompt_tokens:
+            return ProviderAttemptUsage(
+                request_id=request_id,
+                status="failed_unknown_billing",
+            )
         candidates_tokens = int(getattr(metadata, "candidates_token_count", 0) or 0)
         thoughts_tokens = int(getattr(metadata, "thoughts_token_count", 0) or 0)
         return ProviderAttemptUsage(
@@ -513,7 +545,8 @@ class GeminiAdapter:
             status="succeeded",
             prompt_tokens=prompt_tokens,
             media_input_tokens=media_input_tokens,
-            text_input_tokens=max(0, prompt_tokens - media_input_tokens),
+            audio_input_tokens=audio_input_tokens,
+            text_input_tokens=text_input_tokens,
             candidates_tokens=candidates_tokens,
             thoughts_tokens=thoughts_tokens,
             output_tokens=candidates_tokens + thoughts_tokens,
@@ -541,24 +574,29 @@ class GeminiAdapter:
         self, reservation_id: str, attempts: list[ProviderAttemptUsage]
     ) -> ProviderUsage:
         actual_cost: Decimal | None = None
-        if self._pricing is not None:
+        if self._pricing is not None and all(
+            attempt.status == "succeeded" for attempt in attempts
+        ):
             actual_cost = Decimal(0)
             for attempt in attempts:
                 media_tokens = attempt.media_input_tokens
+                audio_tokens = attempt.audio_input_tokens
                 text_tokens = attempt.text_input_tokens
                 output_tokens = attempt.output_tokens
                 if (
-                    attempt.status != "succeeded"
-                    or media_tokens is None
+                    media_tokens is None
+                    or audio_tokens is None
                     or text_tokens is None
                     or output_tokens is None
                 ):
-                    continue
+                    actual_cost = None
+                    break
                 actual_cost += maximum_request_cost(
                     self._pricing,
                     media_tokens,
                     text_tokens,
                     output_tokens,
+                    audio_tokens=audio_tokens,
                 )
         settled_cost = (
             None
@@ -573,6 +611,9 @@ class GeminiAdapter:
             prompt_tokens=sum(attempt.prompt_tokens or 0 for attempt in attempts),
             media_input_tokens=sum(
                 attempt.media_input_tokens or 0 for attempt in attempts
+            ),
+            audio_input_tokens=sum(
+                attempt.audio_input_tokens or 0 for attempt in attempts
             ),
             text_input_tokens=sum(
                 attempt.text_input_tokens or 0 for attempt in attempts

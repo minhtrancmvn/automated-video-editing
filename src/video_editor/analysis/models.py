@@ -472,6 +472,7 @@ class ProviderAttemptUsage(AnalysisModel):
     status: Literal["succeeded", "failed_unknown_billing"]
     prompt_tokens: int | None = Field(default=None, ge=0)
     media_input_tokens: int | None = Field(default=None, ge=0)
+    audio_input_tokens: int | None = Field(default=None, ge=0)
     text_input_tokens: int | None = Field(default=None, ge=0)
     candidates_tokens: int | None = Field(default=None, ge=0)
     thoughts_tokens: int | None = Field(default=None, ge=0)
@@ -487,6 +488,7 @@ class ProviderUsage(AnalysisModel):
     request_ids: tuple[NonEmptyString, ...]
     prompt_tokens: int = Field(ge=0)
     media_input_tokens: int = Field(ge=0)
+    audio_input_tokens: int = Field(default=0, ge=0)
     text_input_tokens: int = Field(ge=0)
     candidates_tokens: int = Field(ge=0)
     thoughts_tokens: int = Field(ge=0)

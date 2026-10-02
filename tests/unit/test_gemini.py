@@ -259,6 +259,7 @@ def _test_pricing() -> ModelPricing:
     return ModelPricing(
         model="gemini-2.5-flash",
         media_input_usd_per_million_tokens=Decimal("0.30"),
+        audio_input_usd_per_million_tokens=Decimal("1.00"),
         text_input_usd_per_million_tokens=Decimal("0.10"),
         output_usd_per_million_tokens=Decimal("2.50"),
         source_url="https://example.invalid/pinned-task-2-pricing",
@@ -1008,7 +1009,7 @@ def test_total_generation_attempt_cap_includes_transient_retry_and_repair(
     assert result.usage.output_tokens == 40
     assert result.usage.total_tokens == 62
     assert result.usage.has_unknown_billing
-    assert result.usage.actual_cost_usd == Decimal("0.000105")
+    assert result.usage.actual_cost_usd is None
 
 
 def test_malformed_structured_response_receives_one_schema_repair_only(
@@ -1071,6 +1072,7 @@ def test_terminal_provider_error_records_unknown_billing_attempt(
             "status": "failed_unknown_billing",
             "prompt_tokens": None,
             "media_input_tokens": None,
+            "audio_input_tokens": None,
             "text_input_tokens": None,
             "candidates_tokens": None,
             "thoughts_tokens": None,
@@ -1079,7 +1081,69 @@ def test_terminal_provider_error_records_unknown_billing_attempt(
         }
     ]
     assert usage["has_unknown_billing"] is True
-    assert usage["actual_cost_usd"] == "0"
+    assert usage["actual_cost_usd"] is None
+
+
+def test_broad_estimate_prices_audio_at_separate_rate(broad_chunk: object) -> None:
+    assert GeminiAdapter is not None
+    pricing = ModelPricing(
+        model="gemini-2.5-flash",
+        media_input_usd_per_million_tokens=Decimal("0.30"),
+        audio_input_usd_per_million_tokens=Decimal("1.00"),
+        text_input_usd_per_million_tokens=Decimal("0.30"),
+        output_usd_per_million_tokens=Decimal(0),
+        source_url="https://example.invalid/separate-audio-test",
+        effective_date=date(2026, 10, 2),
+    )
+    with AuthorizedUpload("manifest-1", io.BytesIO(b"proxy")) as authorization:
+        bound = GeminiAdapter.estimate_broad_request_maximum(
+            authorization, broad_chunk, pricing
+        )
+    video = 3 * 258 + 6 * 64
+    audio = 6 * 32
+    minimum = (
+        Decimal(3)
+        * (Decimal(video) * Decimal("0.30") + Decimal(audio) * Decimal("1.00"))
+        / Decimal(1_000_000)
+    )
+    assert bound >= minimum
+
+
+def test_audio_usage_is_billed_at_audio_rate(
+    adapter: Any,
+    fake_client: FakeClient,
+    broad_chunk: object,
+    broad_request: AnalysisRequestContext,
+) -> None:
+    assert GeminiAdapter is not None
+    pricing = ModelPricing(
+        model="gemini-2.5-flash",
+        media_input_usd_per_million_tokens=Decimal("0.30"),
+        audio_input_usd_per_million_tokens=Decimal("1.00"),
+        text_input_usd_per_million_tokens=Decimal("0.30"),
+        output_usd_per_million_tokens=Decimal(0),
+        source_url="https://example.invalid/separate-audio-test",
+        effective_date=date(2026, 10, 2),
+    )
+    adapter = GeminiAdapter(fake_client, pricing=pricing, sleeper=lambda _: None)
+    upload = upload_active(adapter)
+    response = ParsedResponse(parsed=fixture_payload("broad-response.json"))
+    response.usage_metadata = types.GenerateContentResponseUsageMetadata(
+        prompt_token_count=42,
+        candidates_token_count=0,
+        thoughts_token_count=0,
+        total_token_count=42,
+        prompt_tokens_details=[
+            types.ModalityTokenCount(modality="VIDEO", token_count=10),
+            types.ModalityTokenCount(modality="AUDIO", token_count=30),
+            types.ModalityTokenCount(modality="TEXT", token_count=2),
+        ],
+    )
+    fake_client.models.responses.append(response)
+    result = adapter.broad_scan(
+        upload, broad_chunk, broad_request, prompt_version="broad-v1"
+    )
+    assert result.usage.actual_cost_usd == Decimal("0.000034")
 
 
 def test_broad_estimate_covers_video_audio_output_and_all_attempts(
@@ -1201,6 +1265,7 @@ def test_estimate_includes_response_schema_allowance(broad_chunk: object) -> Non
     pricing = ModelPricing(
         model="gemini-2.5-flash",
         media_input_usd_per_million_tokens=Decimal(0),
+        audio_input_usd_per_million_tokens=Decimal(0),
         text_input_usd_per_million_tokens=Decimal(1),
         output_usd_per_million_tokens=Decimal(0),
         source_url="https://example.invalid/fixture",
@@ -1225,6 +1290,7 @@ def test_live_contract_preflight_rejects_before_upload(
     expensive = ModelPricing(
         model="gemini-2.5-flash",
         media_input_usd_per_million_tokens=Decimal(10000),
+        audio_input_usd_per_million_tokens=Decimal(10000),
         text_input_usd_per_million_tokens=Decimal(10000),
         output_usd_per_million_tokens=Decimal(10000),
         source_url="https://example.invalid/expensive-test-pricing",
@@ -1298,7 +1364,32 @@ def test_successful_response_without_usage_metadata_is_unknown_billing(
     assert result.usage.attempts[0].status == "failed_unknown_billing"
     assert result.usage.attempts[0].prompt_tokens is None
     assert result.usage.has_unknown_billing
-    assert result.usage.actual_cost_usd == Decimal(0)
+    assert result.usage.actual_cost_usd is None
+
+
+def test_unknown_modality_keeps_billing_unknown(
+    adapter: Any,
+    fake_client: FakeClient,
+    broad_chunk: object,
+    broad_request: AnalysisRequestContext,
+) -> None:
+    upload = upload_active(adapter)
+    response = ParsedResponse(parsed=fixture_payload("broad-response.json"))
+    response.usage_metadata = types.GenerateContentResponseUsageMetadata(
+        prompt_token_count=10,
+        candidates_token_count=0,
+        thoughts_token_count=0,
+        total_token_count=10,
+        prompt_tokens_details=[
+            types.ModalityTokenCount(modality="MODALITY_UNSPECIFIED", token_count=10)
+        ],
+    )
+    fake_client.models.responses.append(response)
+    result = adapter.broad_scan(
+        upload, broad_chunk, broad_request, prompt_version="broad-v1"
+    )
+    assert result.usage.has_unknown_billing
+    assert result.usage.actual_cost_usd is None
 
 
 def test_explicit_complete_zero_usage_remains_known_zero_cost(
@@ -1353,6 +1444,7 @@ def test_usage_payload_preserves_request_id_and_redacts_key_from_repr_and_errors
                 "status": "succeeded",
                 "prompt_tokens": 11,
                 "media_input_tokens": 7,
+                "audio_input_tokens": 0,
                 "text_input_tokens": 4,
                 "candidates_tokens": 17,
                 "thoughts_tokens": 3,
@@ -1363,6 +1455,7 @@ def test_usage_payload_preserves_request_id_and_redacts_key_from_repr_and_errors
         "request_ids": ["request-123"],
         "prompt_tokens": 11,
         "media_input_tokens": 7,
+        "audio_input_tokens": 0,
         "text_input_tokens": 4,
         "candidates_tokens": 17,
         "thoughts_tokens": 3,
@@ -1463,7 +1556,9 @@ def test_live_broad_scan_reserves_settles_and_deletes_registered_proxy(
                 prompt_version="broad-v1",
             )
             actual_cost = result.usage.actual_cost_usd
-            assert actual_cost is not None
+            if result.usage.has_unknown_billing or actual_cost is None:
+                store.mark_request_billing_unknown(reservation_id)
+                pytest.fail("provider billing unknown; reservation retained")
             assert actual_cost <= maximum
             store.settle_request(reservation_id, actual_cost)
             assert store.budget_state(job_id).spent_usd == actual_cost

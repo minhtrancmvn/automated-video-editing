@@ -134,6 +134,22 @@ def _analysis_result_data() -> AnalysisResultData:
     )
 
 
+def test_audio_tokens_use_separate_paid_rate() -> None:
+    pricing = ModelPricing(
+        model=GEMINI_25_FLASH,
+        media_input_usd_per_million_tokens=Decimal("0.30"),
+        audio_input_usd_per_million_tokens=Decimal("1.00"),
+        text_input_usd_per_million_tokens=Decimal("0.30"),
+        output_usd_per_million_tokens=Decimal("2.50"),
+        source_url="https://example.invalid/separate-audio-test",
+        effective_date=date(2026, 10, 2),
+    )
+
+    cost = maximum_request_cost(pricing, 1_000_000, 0, 0, audio_tokens=1_000_000)
+
+    assert cost == Decimal("1.30")
+
+
 def test_maximum_request_cost_uses_exact_decimal_arithmetic(
     flash_pricing: ModelPricing,
 ) -> None:

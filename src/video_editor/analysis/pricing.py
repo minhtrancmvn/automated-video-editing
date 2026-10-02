@@ -23,6 +23,7 @@ class ModelPricing:
     output_usd_per_million_tokens: Decimal
     source_url: str
     effective_date: date
+    audio_input_usd_per_million_tokens: Decimal | None = None
 
     def __post_init__(self) -> None:
         """Reject incomplete or unsafe provider pricing entries."""
@@ -34,8 +35,9 @@ class ModelPricing:
             self.media_input_usd_per_million_tokens,
             self.text_input_usd_per_million_tokens,
             self.output_usd_per_million_tokens,
+            self.audio_input_usd_per_million_tokens,
         ):
-            if not price.is_finite() or price < 0:
+            if price is not None and (not price.is_finite() or price < 0):
                 raise ValueError("prices must be finite and non-negative")
 
 
@@ -66,16 +68,26 @@ def maximum_request_cost(
     media_tokens: int,
     prompt_tokens: int,
     output_tokens: int,
+    *,
+    audio_tokens: int = 0,
 ) -> Decimal:
-    """Calculate exact maximum request cost from non-negative token maxima."""
-    tokens = (media_tokens, prompt_tokens, output_tokens)
+    """Calculate exact request cost with audio billed separately from video."""
+    tokens = (media_tokens, prompt_tokens, output_tokens, audio_tokens)
     if any(
         isinstance(token, bool) or not isinstance(token, int) or token < 0
         for token in tokens
     ):
         raise ValueError("token maxima must be non-negative integers")
+    if audio_tokens and pricing.audio_input_usd_per_million_tokens is None:
+        raise VideoEditorError(
+            ErrorCategory.BUDGET,
+            "audio input pricing is unavailable",
+            code="pricing_unknown",
+        )
     return (
         Decimal(media_tokens) * pricing.media_input_usd_per_million_tokens
+        + Decimal(audio_tokens)
+        * (pricing.audio_input_usd_per_million_tokens or Decimal(0))
         + Decimal(prompt_tokens) * pricing.text_input_usd_per_million_tokens
         + Decimal(output_tokens) * pricing.output_usd_per_million_tokens
     ) / MILLION_TOKENS
