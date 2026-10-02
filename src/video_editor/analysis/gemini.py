@@ -7,7 +7,7 @@ import os
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
-from decimal import ROUND_CEILING, Decimal
+from decimal import ROUND_CEILING, ROUND_HALF_EVEN, Decimal
 from io import IOBase
 from typing import Any, TypeVar
 
@@ -45,6 +45,7 @@ _AUDIO_TOKENS_PER_SECOND = 32
 _METADATA_TOKENS_PER_SECOND = 64
 _PROMPT_OVERHEAD_TOKENS = 1024
 _MICRO_USD = Decimal(1_000_000)
+_NANOSECOND = Decimal("0.000000001")
 _ResponseT = TypeVar("_ResponseT", BroadScanResponse, CandidateRefinementResponse)
 _ValueT = TypeVar("_ValueT")
 
@@ -816,7 +817,12 @@ class GeminiAdapter:
 
     @staticmethod
     def _duration(value: Decimal) -> str:
-        return f"{format(value, 'f')}s"
+        # Google's Duration type allows at most nanosecond precision, and exact
+        # Decimal(float) values carry far more digits.
+        text = format(value.quantize(_NANOSECOND, rounding=ROUND_HALF_EVEN), "f")
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+        return f"{text}s"
 
     @staticmethod
     def _state_value(state: object) -> str:

@@ -688,6 +688,30 @@ def test_outgoing_candidate_request_has_no_unsupported_additional_properties(
     assert "additionalProperties" not in wire_keys
 
 
+def test_video_offsets_never_exceed_nanosecond_precision(
+    adapter: Any,
+    fake_client: FakeClient,
+    broad_request: AnalysisRequestContext,
+) -> None:
+    # Live failure: Google's Duration rejects more than nine fractional digits.
+    # This long value is what Decimal(float) produced for a real 60 s proxy.
+    long_end = Decimal("60.02663400000000137879396788775920867919921875")
+    chunk = SimpleNamespace(
+        chunk_id="chunk-1", proxy_start=Decimal(0), proxy_end=long_end
+    )
+    upload = upload_active(adapter)
+    fake_client.models.responses.append(queued_response("broad-response.json"))
+
+    adapter.broad_scan(upload, chunk, broad_request, prompt_version="broad-v1")
+
+    metadata = request_video_part(fake_client.models.requests[0]).video_metadata
+    assert metadata.start_offset == "0s"
+    assert metadata.end_offset == "60.026634s"
+    for offset in (metadata.start_offset, metadata.end_offset):
+        fraction = offset.removesuffix("s").partition(".")[2]
+        assert len(fraction) <= 9
+
+
 def _timestamp_descriptions(schema: object) -> list[str | None]:
     found: list[str | None] = []
     if isinstance(schema, dict):
