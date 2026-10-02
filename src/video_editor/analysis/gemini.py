@@ -28,11 +28,15 @@ from video_editor.analysis.models import (
     RetryPolicy,
     UploadedFile,
 )
-from video_editor.analysis.pricing import ModelPricing, maximum_request_cost
+from video_editor.analysis.pricing import (
+    GEMINI_MODEL,
+    ModelPricing,
+    maximum_request_cost,
+)
 from video_editor.analysis.proxy_chunks import AuthorizedUpload
 from video_editor.errors import ErrorCategory, VideoEditorError
 
-MODEL_ID = "gemini-2.5-flash"
+MODEL_ID = GEMINI_MODEL
 _BROAD_FPS = 0.5
 _RESPONSE_MIME_TYPE = "application/json"
 _OUTPUT_TOKEN_MAXIMUM = 8192

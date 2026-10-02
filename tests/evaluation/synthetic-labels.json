@@ -1,7 +1,7 @@
 {
   "schema_version": "evaluation-v1",
   "dataset_version": "synthetic-v1",
-  "model": "gemini-2.5-flash",
+  "model": "gemini-3.8-flash",
   "prompt_version": "broad-v1+candidate-v2",
   "config_version": "phase2-v1",
   "release_eligible": false,

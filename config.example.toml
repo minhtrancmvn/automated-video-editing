@@ -19,7 +19,7 @@ render_concurrency = 1
 [gemini]
 # Credential stays runtime-only in GEMINI_API_KEY; never put it in this file.
 enabled = false
-model = "gemini-2.5-flash"
+model = "gemini-3.8-flash"
 broad_fps = "0.5"
 candidate_min_fps = 2
 candidate_max_fps = 5

@@ -257,7 +257,7 @@ def queued_response(name: str) -> ParsedResponse:
 
 def _test_pricing() -> ModelPricing:
     return ModelPricing(
-        model="gemini-2.5-flash",
+        model="gemini-3.8-flash",
         media_input_usd_per_million_tokens=Decimal("0.30"),
         audio_input_usd_per_million_tokens=Decimal("1.00"),
         text_input_usd_per_million_tokens=Decimal("0.10"),
@@ -578,7 +578,7 @@ def test_broad_request_uses_exact_model_static_metadata_and_strict_schema(
     request = fake_client.models.requests[0]
     part = request_video_part(request)
     config = request["config"]
-    assert request["model"] == "gemini-2.5-flash"
+    assert request["model"] == "gemini-3.8-flash"
     assert part.video_metadata.fps == 0.5
     assert part.video_metadata.start_offset == "0s"
     assert part.video_metadata.end_offset == "6s"
@@ -751,7 +751,7 @@ def test_candidate_request_uses_bounded_fps_and_duration_string_offsets(
     assert CandidateRefinementResponse is not None
     request = fake_client.models.requests[0]
     part = request_video_part(request)
-    assert request["model"] == "gemini-2.5-flash"
+    assert request["model"] == "gemini-3.8-flash"
     assert part.video_metadata.fps == float(fps)
     assert part.video_metadata.start_offset == "1s"
     assert part.video_metadata.end_offset == "3.5s"
@@ -1154,7 +1154,7 @@ def test_terminal_provider_error_records_unknown_billing_attempt(
 def test_broad_estimate_prices_audio_at_separate_rate(broad_chunk: object) -> None:
     assert GeminiAdapter is not None
     pricing = ModelPricing(
-        model="gemini-2.5-flash",
+        model="gemini-3.8-flash",
         media_input_usd_per_million_tokens=Decimal("0.30"),
         audio_input_usd_per_million_tokens=Decimal("1.00"),
         text_input_usd_per_million_tokens=Decimal("0.30"),
@@ -1184,7 +1184,7 @@ def test_audio_usage_is_billed_at_audio_rate(
 ) -> None:
     assert GeminiAdapter is not None
     pricing = ModelPricing(
-        model="gemini-2.5-flash",
+        model="gemini-3.8-flash",
         media_input_usd_per_million_tokens=Decimal("0.30"),
         audio_input_usd_per_million_tokens=Decimal("1.00"),
         text_input_usd_per_million_tokens=Decimal("0.30"),
@@ -1330,7 +1330,7 @@ def test_oversized_prompt_identity_never_dispatches_generation(
 def test_estimate_includes_response_schema_allowance(broad_chunk: object) -> None:
     assert GeminiAdapter is not None
     pricing = ModelPricing(
-        model="gemini-2.5-flash",
+        model="gemini-3.8-flash",
         media_input_usd_per_million_tokens=Decimal(0),
         audio_input_usd_per_million_tokens=Decimal(0),
         text_input_usd_per_million_tokens=Decimal(1),
@@ -1355,7 +1355,7 @@ def test_live_contract_preflight_rejects_before_upload(
     assert GeminiAdapter is not None
     authorization = AuthorizedUpload("manifest-1", io.BytesIO(b"proxy"))
     expensive = ModelPricing(
-        model="gemini-2.5-flash",
+        model="gemini-3.8-flash",
         media_input_usd_per_million_tokens=Decimal(10000),
         audio_input_usd_per_million_tokens=Decimal(10000),
         text_input_usd_per_million_tokens=Decimal(10000),

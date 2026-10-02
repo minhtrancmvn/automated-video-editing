@@ -9,7 +9,7 @@ from decimal import Decimal
 
 from video_editor.errors import ErrorCategory, VideoEditorError
 
-GEMINI_25_FLASH = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-3.8-flash"
 MILLION_TOKENS = Decimal(1_000_000)
 
 
@@ -44,7 +44,7 @@ class ModelPricing:
 # No price values are encoded until an official price is independently verified and pinned.
 # Keep the required production model key so missing/ambiguous pricing fails closed.
 PRODUCTION_PRICING: Mapping[str, tuple[ModelPricing, ...]] = {
-    GEMINI_25_FLASH: (),
+    GEMINI_MODEL: (),
 }
 
 

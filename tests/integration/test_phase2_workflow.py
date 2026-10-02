@@ -752,7 +752,7 @@ def test_report_is_safe_and_records_authoritative_final_status(
     assert report["status"] == "completed"
     assert report["snapshot_status"] == "final"
     assert report["analysis"]["provider"] == "gemini"
-    assert report["analysis"]["model"] == "gemini-2.5-flash"
+    assert report["analysis"]["model"] == "gemini-3.8-flash"
     assert report["analysis"]["coverage"]["complete"] is True
     assert report["analysis"]["manifests"]
     assert all("source_path" not in item for item in report["analysis"]["manifests"])

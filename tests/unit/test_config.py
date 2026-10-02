@@ -67,7 +67,7 @@ def test_phase2_config_keeps_api_key_out_of_app_config(
     config = resolve_config(
         write_config(tmp_path, cloud_enabled=True, gemini_enabled=True)
     )
-    assert config.gemini.model == "gemini-2.5-flash"
+    assert config.gemini.model == "gemini-3.8-flash"
     assert config.gemini.max_cost_per_source_hour_usd == Decimal("1.00")
     assert "secret-value" not in repr(config)
     assert load_gemini_api_key(os.environ) == "secret-value"

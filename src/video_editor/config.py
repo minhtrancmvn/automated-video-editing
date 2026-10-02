@@ -9,6 +9,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from video_editor.analysis.pricing import GEMINI_MODEL
 from video_editor.errors import ErrorCategory, VideoEditorError
 
 
@@ -28,7 +29,7 @@ class GeminiSettings:
     """Validated Gemini execution settings without credential material."""
 
     enabled: bool = False
-    model: str = "gemini-2.5-flash"
+    model: str = GEMINI_MODEL
     broad_fps: Decimal = Decimal("0.5")
     candidate_min_fps: int = 2
     candidate_max_fps: int = 5
@@ -176,9 +177,9 @@ def _gemini_settings(raw: dict[str, Any]) -> GeminiSettings:
             "gemini.max_schema_repair_attempts",
         ),
     )
-    if result.model != "gemini-2.5-flash":
+    if result.model != GEMINI_MODEL:
         raise VideoEditorError(
-            ErrorCategory.CONFIGURATION, "gemini.model must be gemini-2.5-flash"
+            ErrorCategory.CONFIGURATION, f"gemini.model must be {GEMINI_MODEL}"
         )
     if result.broad_fps != Decimal("0.5"):
         raise VideoEditorError(

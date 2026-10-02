@@ -18,7 +18,7 @@ from video_editor.analysis.models import (
     RequestReservation,
 )
 from video_editor.analysis.pricing import (
-    GEMINI_25_FLASH,
+    GEMINI_MODEL,
     ModelPricing,
     maximum_request_cost,
     pricing_for_model,
@@ -29,7 +29,7 @@ from video_editor.persistence.database import JobStore
 
 def _pricing() -> ModelPricing:
     return ModelPricing(
-        model=GEMINI_25_FLASH,
+        model=GEMINI_MODEL,
         media_input_usd_per_million_tokens=Decimal("0.30"),
         text_input_usd_per_million_tokens=Decimal("0.10"),
         output_usd_per_million_tokens=Decimal("2.50"),
@@ -136,7 +136,7 @@ def _analysis_result_data() -> AnalysisResultData:
 
 def test_audio_tokens_use_separate_paid_rate() -> None:
     pricing = ModelPricing(
-        model=GEMINI_25_FLASH,
+        model=GEMINI_MODEL,
         media_input_usd_per_million_tokens=Decimal("0.30"),
         audio_input_usd_per_million_tokens=Decimal("1.00"),
         text_input_usd_per_million_tokens=Decimal("0.30"),
@@ -173,7 +173,7 @@ def test_maximum_request_cost_rejects_negative_or_non_integer_tokens(
 def test_model_pricing_rejects_negative_or_non_finite_costs(price: Decimal) -> None:
     with pytest.raises(ValueError, match="prices"):
         ModelPricing(
-            model=GEMINI_25_FLASH,
+            model=GEMINI_MODEL,
             media_input_usd_per_million_tokens=price,
             text_input_usd_per_million_tokens=Decimal(0),
             output_usd_per_million_tokens=Decimal(0),
@@ -186,7 +186,7 @@ def test_pricing_for_model_uses_injected_pinned_catalog(
     flash_pricing: ModelPricing,
 ) -> None:
     assert (
-        pricing_for_model(GEMINI_25_FLASH, {GEMINI_25_FLASH: (flash_pricing,)})
+        pricing_for_model(GEMINI_MODEL, {GEMINI_MODEL: (flash_pricing,)})
         == flash_pricing
     )
 
@@ -202,20 +202,20 @@ def test_pricing_for_model_fails_closed_for_mismatched_catalog_entry() -> None:
     )
 
     with pytest.raises(VideoEditorError) as raised:
-        pricing_for_model(GEMINI_25_FLASH, {GEMINI_25_FLASH: (mismatched,)})
+        pricing_for_model(GEMINI_MODEL, {GEMINI_MODEL: (mismatched,)})
 
     assert raised.value.code == "pricing_unknown"
 
 
 @pytest.mark.parametrize(
     "catalog",
-    ({}, {GEMINI_25_FLASH: ()}, {GEMINI_25_FLASH: (_pricing(), _pricing())}),
+    ({}, {GEMINI_MODEL: ()}, {GEMINI_MODEL: (_pricing(), _pricing())}),
 )
 def test_pricing_for_model_fails_closed_for_missing_or_ambiguous_prices(
     catalog: dict[str, tuple[ModelPricing, ...]],
 ) -> None:
     with pytest.raises(VideoEditorError) as raised:
-        pricing_for_model(GEMINI_25_FLASH, catalog)
+        pricing_for_model(GEMINI_MODEL, catalog)
 
     assert raised.value.category == ErrorCategory.PROVIDER
     assert raised.value.code == "pricing_unknown"

@@ -198,7 +198,7 @@ def _identity() -> AnalysisCacheIdentity:
         media_width=640,
         media_height=360,
         provider="gemini",
-        model="gemini-2.5-flash",
+        model="gemini-3.8-flash",
         prompt_version="broad-v1",
         response_schema_version="broad-v1",
         implementation_version="analysis-v1",

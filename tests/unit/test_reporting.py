@@ -58,7 +58,7 @@ def test_phase2_report_omits_secret_and_upload_paths(tmp_path: Path) -> None:
         "status": "completed",
         "analysis": {
             "provider": "gemini",
-            "model": "gemini-2.5-flash",
+            "model": "gemini-3.8-flash",
             "api_key": "AIza-secret",
             "manifests": [
                 {
