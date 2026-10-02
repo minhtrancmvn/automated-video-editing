@@ -1303,24 +1303,69 @@ def test_broad_estimate_covers_video_audio_output_and_all_attempts(
     assert maximum >= minimum_per_attempt * 3
 
 
+@pytest.mark.parametrize(
+    ("proxy_end", "measured_video_tokens"),
+    [(Decimal(1), 88), (Decimal("60.026634"), 3475)],
+)
+def test_media_token_estimate_is_calibrated_to_live_measurements(
+    proxy_end: Decimal, measured_video_tokens: int
+) -> None:
+    # Live gemini-3.8-flash usage at 0.5 FPS, VIDEO modality (audio is folded in):
+    # 1 s clip -> 88 tokens, 60.03 s clip -> 3475 tokens. At USD 1 per million
+    # tokens and every other rate zero, estimated cost in micro-USD equals the
+    # estimated media + audio token count for a single attempt.
+    assert GeminiAdapter is not None
+    pricing = ModelPricing(
+        model="gemini-3.8-flash",
+        media_input_usd_per_million_tokens=Decimal(1),
+        audio_input_usd_per_million_tokens=Decimal(1),
+        text_input_usd_per_million_tokens=Decimal(0),
+        output_usd_per_million_tokens=Decimal(0),
+        source_url="https://example.invalid/calibration",
+        effective_date=date(2026, 10, 2),
+    )
+    chunk = SimpleNamespace(
+        chunk_id="chunk-1", proxy_start=Decimal(0), proxy_end=proxy_end
+    )
+    adapter = GeminiAdapter(
+        FakeClient(), retry_policy=RetryPolicy(max_attempts=1), pricing=pricing
+    )
+
+    estimated_tokens = adapter.maximum_request_cost(
+        "manifest-1", chunk, prompt_version="broad-v1"
+    ) * Decimal(1_000_000)
+
+    assert estimated_tokens >= measured_video_tokens * Decimal("1.5")
+    assert estimated_tokens <= measured_video_tokens * Decimal("2.5")
+
+
 def test_candidate_estimate_uses_five_fps_over_its_interval() -> None:
     assert GeminiAdapter is not None
     candidate_interval = SimpleNamespace(
         chunk_id="chunk-1", proxy_start=Decimal(1), proxy_end=Decimal("3.5")
     )
-    adapter = GeminiAdapter(FakeClient(), pricing=_test_pricing())
-
-    maximum = adapter.maximum_request_cost(
-        "manifest-1", candidate_interval, prompt_version="candidate-v2"
+    # Only media and audio carry a price here, at USD 1 per million tokens, so
+    # the estimate in micro-USD is the single-attempt media + audio token count.
+    pricing = ModelPricing(
+        model="gemini-3.8-flash",
+        media_input_usd_per_million_tokens=Decimal(1),
+        audio_input_usd_per_million_tokens=Decimal(1),
+        text_input_usd_per_million_tokens=Decimal(0),
+        output_usd_per_million_tokens=Decimal(0),
+        source_url="https://example.invalid/five-fps",
+        effective_date=date(2026, 10, 2),
+    )
+    adapter = GeminiAdapter(
+        FakeClient(), retry_policy=RetryPolicy(max_attempts=1), pricing=pricing
     )
 
-    # Ceiling of 2.5 seconds at 5 FPS is 13 frames, not broad 0.5 FPS.
-    media_tokens = 13 * 258 + 80
-    minimum_per_attempt = (
-        Decimal(media_tokens) * _test_pricing().media_input_usd_per_million_tokens
-        + Decimal(8192) * _test_pricing().output_usd_per_million_tokens
-    ) / Decimal(1_000_000)
-    assert maximum >= minimum_per_attempt * 3
+    estimated_tokens = adapter.maximum_request_cost(
+        "manifest-1", candidate_interval, prompt_version="candidate-v2"
+    ) * Decimal(1_000_000)
+
+    # Ceiling of 2.5 s at 5 FPS is 13 frames; broad 0.5 FPS would be 2 frames.
+    # Google documents 66 tokens per low-resolution frame and 32 per audio second.
+    assert estimated_tokens >= 13 * 66 + 3 * 32
 
 
 def test_estimate_scales_with_total_retry_and_repair_attempt_budget(

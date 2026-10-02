@@ -40,9 +40,13 @@ MODEL_ID = GEMINI_MODEL
 _BROAD_FPS = 0.5
 _RESPONSE_MIME_TYPE = "application/json"
 _OUTPUT_TOKEN_MAXIMUM = 8192
-_VIDEO_TOKENS_PER_FRAME = 258
+# Calibrated on live gemini-3.8-flash usage (VIDEO modality, audio folded in):
+# a 1 s clip cost 88 tokens and a 60 s clip 3475, a fit of about 60 tokens per
+# frame plus 28 per second. Google documents 66 per frame at low resolution and
+# 32 per second of audio. The values below keep roughly a 1.7x safety margin.
+_VIDEO_TOKENS_PER_FRAME = 100
 _AUDIO_TOKENS_PER_SECOND = 32
-_METADATA_TOKENS_PER_SECOND = 64
+_METADATA_TOKENS_PER_SECOND = 16
 _PROMPT_OVERHEAD_TOKENS = 1024
 _MICRO_USD = Decimal(1_000_000)
 _NANOSECOND = Decimal("0.000000001")
