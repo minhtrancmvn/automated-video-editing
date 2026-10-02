@@ -12,8 +12,8 @@ from io import IOBase
 from typing import Any, TypeVar
 
 from google import genai
-from google.genai import types
-from pydantic import ValidationError
+from google.genai import _transformers, types
+from pydantic import BaseModel, ValidationError
 
 from video_editor.analysis.models import (
     AnalysisChunk,
@@ -43,6 +43,40 @@ _PROMPT_OVERHEAD_TOKENS = 1024
 _MICRO_USD = Decimal(1_000_000)
 _ResponseT = TypeVar("_ResponseT", BroadScanResponse, CandidateRefinementResponse)
 _ValueT = TypeVar("_ValueT")
+
+
+def _without_additional_properties(schema: types.Schema | None) -> types.Schema | None:
+    """Drop the field the Gemini Developer API rejects, at every schema depth."""
+    if schema is None:
+        return None
+    updates: dict[str, Any] = {"additional_properties": None}
+    if schema.properties:
+        updates["properties"] = {
+            name: _without_additional_properties(child)
+            for name, child in schema.properties.items()
+        }
+    if schema.defs:
+        updates["defs"] = {
+            name: _without_additional_properties(child)
+            for name, child in schema.defs.items()
+        }
+    if schema.items is not None:
+        updates["items"] = _without_additional_properties(schema.items)
+    if schema.any_of:
+        updates["any_of"] = [_without_additional_properties(c) for c in schema.any_of]
+    return schema.model_copy(update=updates)
+
+
+def _response_schema(model: type[BaseModel]) -> types.Schema:
+    """Build the SDK schema for a strict response model, minus additionalProperties.
+
+    The strict models forbid extra fields, which the SDK serializes as
+    `additional_properties`. Google rejects that field with HTTP 400, so it is
+    removed here; the response is still validated against the strict model.
+    """
+    schema = _without_additional_properties(_transformers.t_schema(None, model))
+    assert schema is not None
+    return schema
 
 
 class GeminiAdapter:
@@ -334,7 +368,7 @@ class GeminiAdapter:
         )
         config = types.GenerateContentConfig(
             response_mime_type=_RESPONSE_MIME_TYPE,
-            response_schema=response_model,
+            response_schema=_response_schema(response_model),
             max_output_tokens=_OUTPUT_TOKEN_MAXIMUM,
         )
         attempts: list[ProviderAttemptUsage] = []

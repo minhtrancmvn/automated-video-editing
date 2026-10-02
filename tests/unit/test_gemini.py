@@ -583,7 +583,9 @@ def test_broad_request_uses_exact_model_static_metadata_and_strict_schema(
     assert part.video_metadata.start_offset == "0s"
     assert part.video_metadata.end_offset == "6s"
     assert config.response_mime_type == "application/json"
-    assert config.response_schema is BroadScanResponse
+    assert isinstance(config.response_schema, types.Schema)
+    assert config.response_schema.title == "BroadScanResponse"
+    assert set(config.response_schema.properties) == set(BroadScanResponse.model_fields)
     assert isinstance(result.response, BroadScanResponse)
     assert result.response.chunk_id == broad_chunk.chunk_id
 
@@ -636,6 +638,68 @@ def test_locked_sdk_prepares_string_only_timestamp_response_schema(
     assert all(schema.get("type") == "STRING" for schema in timestamp_schemas)
     assert all("anyOf" not in schema for schema in timestamp_schemas)
     assert all("exclusiveMinimum" not in schema for schema in timestamp_schemas)
+
+
+def _wire_keys(value: object) -> set[str]:
+    keys: set[str] = set()
+    if isinstance(value, dict):
+        for key, child in value.items():
+            keys.add(str(key))
+            keys |= _wire_keys(child)
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            keys |= _wire_keys(child)
+    elif hasattr(value, "model_dump"):
+        keys |= _wire_keys(value.model_dump(exclude_none=True))
+    return keys
+
+
+def test_outgoing_broad_request_has_no_unsupported_additional_properties(
+    adapter: Any,
+    fake_client: FakeClient,
+    broad_chunk: object,
+    broad_request: AnalysisRequestContext,
+) -> None:
+    upload = upload_active(adapter)
+    fake_client.models.responses.append(queued_response("broad-response.json"))
+
+    adapter.broad_scan(upload, broad_chunk, broad_request, prompt_version="broad-v1")
+
+    wire_keys = _outgoing_wire_keys(fake_client.models.requests[0])
+    assert "additional_properties" not in wire_keys
+    assert "additionalProperties" not in wire_keys
+
+
+def test_outgoing_candidate_request_has_no_unsupported_additional_properties(
+    adapter: Any,
+    fake_client: FakeClient,
+    candidate: object,
+    candidate_request: AnalysisRequestContext,
+) -> None:
+    upload = upload_active(adapter)
+    fake_client.models.responses.append(queued_response("refinement-response.json"))
+
+    adapter.refine_candidate(
+        upload, candidate, candidate_request, fps=3, prompt_version="candidate-v2"
+    )
+
+    wire_keys = _outgoing_wire_keys(fake_client.models.requests[0])
+    assert "additional_properties" not in wire_keys
+    assert "additionalProperties" not in wire_keys
+
+
+def _outgoing_wire_keys(request: dict[str, object]) -> set[str]:
+    client = genai.Client(api_key=SECRET)
+    try:
+        params = types._GenerateContentParameters(
+            model=request["model"],
+            contents=request["contents"],
+            config=request["config"],
+        )
+        wire = models._GenerateContentParameters_to_mldev(client._api_client, params)
+    finally:
+        client.close()
+    return _wire_keys(wire)
 
 
 def test_broad_prompt_is_versioned_bounded_and_forbids_semantic_expansion(
@@ -691,7 +755,10 @@ def test_candidate_request_uses_bounded_fps_and_duration_string_offsets(
     assert part.video_metadata.fps == float(fps)
     assert part.video_metadata.start_offset == "1s"
     assert part.video_metadata.end_offset == "3.5s"
-    assert request["config"].response_schema is CandidateRefinementResponse
+    schema = request["config"].response_schema
+    assert isinstance(schema, types.Schema)
+    assert schema.title == "CandidateRefinementResponse"
+    assert set(schema.properties) == set(CandidateRefinementResponse.model_fields)
     assert result.response.candidate_id == "candidate-1"
 
 
