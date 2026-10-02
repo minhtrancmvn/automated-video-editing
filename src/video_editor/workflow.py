@@ -1092,10 +1092,29 @@ class WorkflowService:
                 else "short-01.mp4"
             )
             output_path = output / name
-            if (
-                not output_path.is_file()
-                or output_path.stat().st_mtime_ns < plan_path.stat().st_mtime_ns
-            ):
+            if not output_path.is_file():
+                continue
+            recorded: dict[str, Any] = next(
+                (
+                    item.get("metadata", {})
+                    for item in self.store.get_job(job_id).get("artifacts", [])
+                    if item.get("stage") == "render"
+                    and item.get("path") == str(output_path)
+                ),
+                {},
+            )
+            if not recorded.get("pending") or recorded.get("plan") != str(plan_path):
+                continue
+            previous = recorded.get("previous_final")
+            current = output_path.stat()
+            if previous is not None and list(previous) == [
+                current.st_dev,
+                current.st_ino,
+                current.st_size,
+                current.st_mtime_ns,
+            ]:
+                continue
+            if current.st_mtime_ns < plan_path.stat().st_mtime_ns:
                 continue
             metadata = {
                 "plan": str(plan_path),
@@ -1144,21 +1163,6 @@ class WorkflowService:
                 output, estimate, self._expected_destination_volume(current, "output")
             )
             output.mkdir(parents=True, exist_ok=True)
-            for path, plan in zip(plan_paths, plans, strict=True):
-                name = (
-                    "long.mp4"
-                    if plan.output.width == 1920 and plan.output.height == 1080
-                    else "short-01.mp4"
-                )
-                output_path = output / name
-                metadata = {
-                    "plan": str(path),
-                    "plan_digest": hashlib.sha256(path.read_bytes()).hexdigest(),
-                    "warnings": [],
-                }
-                # Persist expected final before render. Resume can recover a renamed
-                # final even if process died before normal artifact persistence.
-                self.store.save_artifact(job_id, "render", output_path, metadata)
             preserved = self._valid_render_results(current, plan_paths)
             preserved.update(
                 {
@@ -1170,11 +1174,39 @@ class WorkflowService:
                 }
             )
             results: list[dict[str, Any]] = []
-            for path in plan_paths:
+            for path, plan in zip(plan_paths, plans, strict=True):
                 existing = preserved.get(path.resolve())
                 if existing is not None:
                     results.append(existing)
                     continue
+                name = (
+                    "long.mp4"
+                    if plan.output.width == 1920 and plan.output.height == 1080
+                    else "short-01.mp4"
+                )
+                # A pending final is not proof that this plan was rendered. Only
+                # _render_plan attests its digest after publishing the final.
+                final_path = output / name
+                previous_final = None
+                if final_path.is_file():
+                    current_final = final_path.stat()
+                    previous_final = [
+                        current_final.st_dev,
+                        current_final.st_ino,
+                        current_final.st_size,
+                        current_final.st_mtime_ns,
+                    ]
+                self.store.save_artifact(
+                    job_id,
+                    "render",
+                    final_path,
+                    {
+                        "plan": str(path),
+                        "warnings": [],
+                        "pending": True,
+                        "previous_final": previous_final,
+                    },
+                )
                 results.append(self._render_plan(job_id, path))
             result = {"outputs": results, "estimated_bytes": estimate}
             self.store.complete_stage(job_id, "render", result)

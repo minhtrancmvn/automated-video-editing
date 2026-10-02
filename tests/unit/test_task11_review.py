@@ -1,4 +1,5 @@
 import hashlib
+import os
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import Mock
@@ -605,6 +606,56 @@ def test_interrupted_render_preserves_valid_output_on_resume(
     render_plan.assert_called_once_with(job_id, second_plan)
 
 
+def test_failed_render_does_not_attest_plan_or_reuse_stale_final(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    plan_path = tmp_path / "plan.json"
+    output_root = config.paths.output_dir / "job"
+    output_root.mkdir(parents=True)
+    output_path = output_root / "long.mp4"
+    output_path.write_bytes(b"valid older render")
+    plan_path.write_text("new plan")
+    # A copied/replaced plan can preserve its old mtime; the older final can
+    # therefore look newer even though it belongs to a different plan.
+    os.utime(
+        output_path, ns=(plan_path.stat().st_mtime_ns, plan_path.stat().st_mtime_ns)
+    )
+    plan = Mock(output=Mock(width=1920, height=1080))
+
+    with JobStore(tmp_path / "state.db") as store:
+        job_id = store.create_job({}, {})
+        service = WorkflowService(config, store)
+        monkeypatch.setattr("video_editor.workflow.load_plan", lambda _path: plan)
+        monkeypatch.setattr("video_editor.workflow._duration_seconds", lambda _plan: 1)
+        monkeypatch.setattr(
+            service, "_configured_destination", lambda _root, _job_id: output_root
+        )
+        monkeypatch.setattr(service, "_destination_volume", lambda *args: Mock())
+        monkeypatch.setattr(
+            service, "_expected_destination_volume", lambda *args: Mock()
+        )
+        monkeypatch.setattr(
+            service,
+            "_artifact_valid",
+            lambda _name, path, _metadata=None: path == output_path,
+        )
+        render = Mock(side_effect=VideoEditorError(ErrorCategory.RENDER, "failed"))
+        monkeypatch.setattr(service, "_render_plan", render)
+
+        with pytest.raises(VideoEditorError, match="failed"):
+            service._ensure_render(job_id, {"plans": [str(plan_path)]})
+        with pytest.raises(VideoEditorError, match="failed"):
+            service._ensure_render(job_id, {"plans": [str(plan_path)]})
+        artifact = store.get_job(job_id)["artifacts"][0]
+        assert artifact["path"] == str(output_path)
+        assert artifact["metadata"]["pending"] is True
+        assert "plan_digest" not in artifact["metadata"]
+        assert render.call_count == 2
+
+    assert output_path.read_bytes() == b"valid older render"
+
+
 def test_render_reuse_rejects_artifact_from_changed_plan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -691,7 +742,13 @@ def test_resume_persists_and_reuses_final_output_without_old_artifact_row(
             "_artifact_valid",
             lambda _name, path, _metadata=None: path == output_path,
         )
-        render = Mock(side_effect=AssertionError("existing final must be reused"))
+        store.save_artifact(
+            job_id,
+            "render",
+            output_path,
+            {"plan": str(plan_path), "pending": True, "previous_final": None},
+        )
+        render = Mock(side_effect=AssertionError("published final must be recovered"))
         monkeypatch.setattr(service, "_render_plan", render)
 
         result = service._ensure_render(job_id, {"plans": [str(plan_path)]})
