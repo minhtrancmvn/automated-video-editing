@@ -9,6 +9,7 @@ from typing import Annotated
 import typer
 
 from video_editor.analysis.gemini import GeminiAdapter
+from video_editor.analysis.pricing import pricing_for_model
 from video_editor.config import resolve_config
 from video_editor.errors import VideoEditorError
 from video_editor.media.storage import inspect_volume
@@ -29,7 +30,11 @@ def _service(
         inspect_volume(config.paths.state_dir)
     WorkflowService.validate_configured_roots(config, config.paths.input_dir)
     # Cloud mode builds the provider from the runtime key only; the key is never stored.
-    provider = GeminiAdapter.from_environment() if config.cloud_enabled else None
+    provider = (
+        GeminiAdapter.from_environment(pricing=pricing_for_model(config.gemini.model))
+        if config.cloud_enabled
+        else None
+    )
     store = JobStore(config.paths.state_dir / "jobs.sqlite3")
     return WorkflowService(config, store, progress, provider=provider), store
 

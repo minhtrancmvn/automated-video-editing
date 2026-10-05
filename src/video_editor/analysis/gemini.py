@@ -422,6 +422,19 @@ class GeminiAdapter:
             )
         raise self._invalid_response()
 
+    def _require_current_pricing(self) -> None:
+        if self._pricing is None:
+            return
+        today = datetime.now(UTC).date()
+        if self._pricing.effective_date > today or (
+            self._pricing.expires_on is not None and today >= self._pricing.expires_on
+        ):
+            raise VideoEditorError(
+                ErrorCategory.PROVIDER,
+                "Gemini pricing pin is not current",
+                code="pricing_unknown",
+            )
+
     def _generate(
         self,
         part: types.Part,
@@ -433,6 +446,7 @@ class GeminiAdapter:
         """Generate within one total attempt budget and retain returned usage."""
         attempts: list[ProviderAttemptUsage] = []
         for attempt in range(1, max_attempts + 1):
+            self._require_current_pricing()
             mapped: VideoEditorError | None = None
             response: Any | None = None
             try:

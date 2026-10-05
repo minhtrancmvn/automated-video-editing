@@ -561,6 +561,84 @@ def test_expired_or_missing_file_requests_authorized_reupload(
     assert fake_client.models.calls == 0
 
 
+def test_expired_pinned_pricing_rejects_generation_without_provider_call(
+    fake_client: FakeClient,
+    broad_chunk: object,
+    broad_request: AnalysisRequestContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert GeminiAdapter is not None
+    pricing = ModelPricing(
+        model="gemini-3.8-flash",
+        media_input_usd_per_million_tokens=Decimal("0.75"),
+        audio_input_usd_per_million_tokens=Decimal("0.75"),
+        text_input_usd_per_million_tokens=Decimal("0.75"),
+        output_usd_per_million_tokens=Decimal("3.75"),
+        source_url="https://ai.google.dev/gemini-api/docs/pricing",
+        effective_date=date(2026, 10, 3),
+        expires_on=date(2027, 1, 1),
+    )
+    adapter = GeminiAdapter(fake_client, pricing=pricing)
+    upload = upload_active(adapter)
+    monkeypatch.setattr(adapter, "wait_until_active", lambda current: current)
+    monkeypatch.setattr(
+        "video_editor.analysis.gemini.datetime",
+        SimpleNamespace(
+            now=lambda _timezone: SimpleNamespace(date=lambda: date(2027, 1, 1))
+        ),
+    )
+
+    with pytest.raises(VideoEditorError) as caught:
+        adapter.broad_scan(
+            upload, broad_chunk, broad_request, prompt_version="broad-v1"
+        )
+
+    assert caught.value.code == "pricing_unknown"
+    assert fake_client.models.calls == 0
+
+
+def test_pricing_expiring_during_file_poll_blocks_generation(
+    fake_client: FakeClient,
+    broad_chunk: object,
+    broad_request: AnalysisRequestContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert GeminiAdapter is not None
+    pricing = ModelPricing(
+        model="gemini-3.8-flash",
+        media_input_usd_per_million_tokens=Decimal("0.75"),
+        audio_input_usd_per_million_tokens=Decimal("0.75"),
+        text_input_usd_per_million_tokens=Decimal("0.75"),
+        output_usd_per_million_tokens=Decimal("3.75"),
+        source_url="https://ai.google.dev/gemini-api/docs/pricing",
+        effective_date=date(2026, 10, 3),
+        expires_on=date(2027, 1, 1),
+    )
+    adapter = GeminiAdapter(fake_client, pricing=pricing)
+    upload = upload_active(adapter)
+
+    def finish_processing(current: object) -> object:
+        current_day[0] = date(2027, 1, 1)
+        return current
+
+    current_day = [date(2026, 12, 31)]
+    monkeypatch.setattr(adapter, "wait_until_active", finish_processing)
+    monkeypatch.setattr(
+        "video_editor.analysis.gemini.datetime",
+        SimpleNamespace(
+            now=lambda _timezone: SimpleNamespace(date=lambda: current_day[0])
+        ),
+    )
+
+    with pytest.raises(VideoEditorError) as caught:
+        adapter.broad_scan(
+            upload, broad_chunk, broad_request, prompt_version="broad-v1"
+        )
+
+    assert caught.value.code == "pricing_unknown"
+    assert fake_client.models.calls == 0
+
+
 def test_broad_request_uses_exact_model_static_metadata_and_strict_schema(
     adapter: Any,
     fake_client: FakeClient,

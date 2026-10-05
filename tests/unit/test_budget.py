@@ -182,6 +182,33 @@ def test_model_pricing_rejects_negative_or_non_finite_costs(price: Decimal) -> N
         )
 
 
+def test_production_gemini_pricing_matches_standard_rate_before_expiry() -> None:
+    pinned = pricing_for_model(GEMINI_MODEL, on_date=date(2026, 10, 3))
+
+    assert pinned.model == "gemini-3.8-flash"
+    assert pinned.media_input_usd_per_million_tokens == Decimal("0.75")
+    assert pinned.audio_input_usd_per_million_tokens == Decimal("0.75")
+    assert pinned.text_input_usd_per_million_tokens == Decimal("0.75")
+    assert pinned.output_usd_per_million_tokens == Decimal("3.75")
+    assert pinned.effective_date <= date(2026, 10, 3)
+    assert pinned.source_url == "https://ai.google.dev/gemini-api/docs/pricing"
+    assert maximum_request_cost(
+        pinned, 1_000_000, 1_000_000, 1_000_000, audio_tokens=1_000_000
+    ) == Decimal("6.00")
+
+
+def test_production_gemini_pricing_expires_before_scheduled_rate_increase() -> None:
+    assert (
+        pricing_for_model(GEMINI_MODEL, on_date=date(2026, 12, 31)).model
+        == GEMINI_MODEL
+    )
+
+    with pytest.raises(VideoEditorError) as raised:
+        pricing_for_model(GEMINI_MODEL, on_date=date(2027, 1, 1))
+
+    assert raised.value.code == "pricing_unknown"
+
+
 def test_pricing_for_model_uses_injected_pinned_catalog(
     flash_pricing: ModelPricing,
 ) -> None:
