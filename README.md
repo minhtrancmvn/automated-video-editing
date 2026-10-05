@@ -68,7 +68,7 @@ video-editor run /Volumes/TravelSSD/footage --config config.toml
 
 `run` executes `inspect`, `proxy`, `plan`, `render`, `validate`, and `report`. It prints job and stage progress to stderr while keeping the final result on stdout:
 
-```text
+
 job 76dabac4-31db-451d-bf15-1ccb26575403 started
 job 76dabac4-31db-451d-bf15-1ccb26575403: [1/6] inspect started
 job 76dabac4-31db-451d-bf15-1ccb26575403: [1/6] inspect completed
