@@ -1,0 +1,17 @@
+interval_id,batch_id,source_id,source_file,start,end,partition,label_status
+trip-1-attempt03-review-001,trip-1,3e980377317a02f4e034b401aa6efc506b97573c5abc922828b71b3a0c19d9db,GX011488.MP4,112.0,175.0,train,unreviewed
+trip-1-attempt03-review-002,trip-1,3e980377317a02f4e034b401aa6efc506b97573c5abc922828b71b3a0c19d9db,GX011488.MP4,970.0,1005.0,train,unreviewed
+trip-1-attempt03-review-003,trip-1,3e980377317a02f4e034b401aa6efc506b97573c5abc922828b71b3a0c19d9db,GX011488.MP4,1775.0,1810.0,train,unreviewed
+trip-1-attempt03-review-004,trip-1,3e980377317a02f4e034b401aa6efc506b97573c5abc922828b71b3a0c19d9db,GX011488.MP4,2396.552166999999826657585800,2446.552166999999826657585800,train,unreviewed
+trip-1-attempt03-review-005,trip-1,3e980377317a02f4e034b401aa6efc506b97573c5abc922828b71b3a0c19d9db,GX011488.MP4,2686.552166999999826657585800,2721.552166999999826657585800,train,unreviewed
+trip-1-attempt03-review-006,trip-1,12ecefb255f860f9b8fcdafaa4c0853ece2afe6f5e09fda7e573aa5dc8e36ae6,GX011489.MP4,305.0,365.0,train,unreviewed
+trip-1-attempt03-review-007,trip-1,12ecefb255f860f9b8fcdafaa4c0853ece2afe6f5e09fda7e573aa5dc8e36ae6,GX011489.MP4,1169.0,1189.0,train,unreviewed
+trip-1-attempt03-review-008,trip-1,12ecefb255f860f9b8fcdafaa4c0853ece2afe6f5e09fda7e573aa5dc8e36ae6,GX011489.MP4,1384.0,1400.0,train,unreviewed
+trip-1-attempt03-review-009,trip-1,12ecefb255f860f9b8fcdafaa4c0853ece2afe6f5e09fda7e573aa5dc8e36ae6,GX011489.MP4,2100.0,2160.0,train,unreviewed
+trip-1-attempt03-review-010,trip-1,12ecefb255f860f9b8fcdafaa4c0853ece2afe6f5e09fda7e573aa5dc8e36ae6,GX011489.MP4,2332.0,2354.0,train,unreviewed
+trip-1-attempt03-review-011,trip-1,12ecefb255f860f9b8fcdafaa4c0853ece2afe6f5e09fda7e573aa5dc8e36ae6,GX011489.MP4,2678.0,2695.0,train,unreviewed
+trip-1-attempt03-review-012,trip-1,12ecefb255f860f9b8fcdafaa4c0853ece2afe6f5e09fda7e573aa5dc8e36ae6,GX011489.MP4,3348.0,3365.0,train,unreviewed
+trip-1-attempt03-review-013,trip-1,12ecefb255f860f9b8fcdafaa4c0853ece2afe6f5e09fda7e573aa5dc8e36ae6,GX011489.MP4,3624.0,3645.0,train,unreviewed
+trip-1-attempt03-review-014,trip-1,12ecefb255f860f9b8fcdafaa4c0853ece2afe6f5e09fda7e573aa5dc8e36ae6,GX011489.MP4,4120.0,4145.0,train,unreviewed
+trip-1-attempt03-review-015,trip-1,0531915eb95148a774d33e9342f2b123ff1324e8e0515a4818d435fba48e2bea,GX021489.MP4,345.0,405.0,train,unreviewed
+trip-1-attempt03-review-016,trip-1,0531915eb95148a774d33e9342f2b123ff1324e8e0515a4818d435fba48e2bea,GX021489.MP4,615.0,646.412,train,unreviewed

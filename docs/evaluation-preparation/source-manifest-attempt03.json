@@ -1,0 +1,48 @@
+{
+  "schema_version": "development-source-manifest-v1",
+  "prepared_at_utc": "2026-10-22T06:06:14.791706+00:00",
+  "batch_id": "trip-1",
+  "job_id": "1b4de182-583e-4978-911b-46cdc708b5f8",
+  "scope": "attempt03 three-source subset; not entire trip inventory",
+  "partition": "train",
+  "assignment_note": "Development-only assignment recorded now after prior model/output exposure; no retroactive or pristine holdout claim.",
+  "media_hash_rescan": false,
+  "database_access": "mode=ro source record export",
+  "baseline_path": "/Volumes/VideoEditorState20261020Attempt03/phase2-trip-batch-20261020-attempt03/immutable-before.json",
+  "baseline_sha256": "8a647c1d1a2b823fdce0d51cf3ae8270a3d7313824d15fd02cd6848211f9c9cd",
+  "sources": [
+    {
+      "source_id": "0531915eb95148a774d33e9342f2b123ff1324e8e0515a4818d435fba48e2bea",
+      "identity_version": "bounded-v1",
+      "input_path": "/Volumes/ssd/video-editor/phase2-trip-batch-20261012/input/GX021489.MP4",
+      "source_file": "GX021489.MP4",
+      "recorded_size_bytes": 1648755893,
+      "recorded_duration_seconds": "646.412433",
+      "recorded_whole_file_sha256": "c901c1f70f7bec8597a8a355484fb5924bf9d05564e65051d16c50ebbe2be95c",
+      "sha256_basis": "Historical immutable-before.json; not freshly hashed in this preparation.",
+      "persisted_source_record_sha256": "98823752cbf0e2529a0cf51b5933a1fbd11e9a6f8c0a4b5d6bb17994ac7d0177"
+    },
+    {
+      "source_id": "12ecefb255f860f9b8fcdafaa4c0853ece2afe6f5e09fda7e573aa5dc8e36ae6",
+      "identity_version": "bounded-v1",
+      "input_path": "/Volumes/ssd/video-editor/phase2-trip-batch-20261012/input/GX011489.MP4",
+      "source_file": "GX011489.MP4",
+      "recorded_size_bytes": 11797926368,
+      "recorded_duration_seconds": "4228.224",
+      "recorded_whole_file_sha256": "b10d285e8b99367367c5bed752a25a59dcffcc19b2c44623c5945d529225d496",
+      "sha256_basis": "Historical immutable-before.json; not freshly hashed in this preparation.",
+      "persisted_source_record_sha256": "48b3d59cc59ccc4308e9ed560f6b5dbe5f577a618247371a10b79163c8795440"
+    },
+    {
+      "source_id": "3e980377317a02f4e034b401aa6efc506b97573c5abc922828b71b3a0c19d9db",
+      "identity_version": "bounded-v1",
+      "input_path": "/Volumes/ssd/video-editor/phase2-trip-batch-20261012/input/GX011488.MP4",
+      "source_file": "GX011488.MP4",
+      "recorded_size_bytes": 8348700416,
+      "recorded_duration_seconds": "2721.552167",
+      "recorded_whole_file_sha256": "b4f753f3311f980839362f8dd5c672955148275e5c4c8b68846db45934d82c82",
+      "sha256_basis": "Historical immutable-before.json; not freshly hashed in this preparation.",
+      "persisted_source_record_sha256": "b06f429fdab526b5430e908226e445e2e79feefe9edc11e0005cf6b33b0d1129"
+    }
+  ]
+}

@@ -1,0 +1,130 @@
+{
+  "schema_version": "development-review-queue-v1",
+  "prepared_at_utc": "2026-10-22T06:06:14.791706+00:00",
+  "job_id": "1b4de182-583e-4978-911b-46cdc708b5f8",
+  "batch_id": "trip-1",
+  "partition": "train",
+  "release_eligible": false,
+  "human_label_rows_created": 0,
+  "predictions_hidden": false,
+  "exposure_note": "Prior model/output exposure exists; removing score columns is not blinding or pristine holdout.",
+  "sampling": "All 16 saved broad-model-proposed intervals; no ranking/selection filter. Boundaries themselves are model-proposed.",
+  "sampling_limit": "Candidate-conditioned development queue, not representative whole-source labels or valid must-include recall population. Independent full-source sampling/review required.",
+  "inventory_path": "/Volumes/VideoEditorState20261020Attempt03/phase2-trip-batch-20261020-attempt03/offline-candidate-inventory-20261021.json",
+  "inventory_sha256": "517b028b96cf90f22fbbdc75dfaf053050d79b2da1e30091445ef4d390462996",
+  "queue_sha256": "760425f1865783e997c8d57be4bb083797e4043eb996e4b5597da748feca8de9",
+  "rows": [
+    {
+      "interval_id": "trip-1-attempt03-review-001",
+      "chunk_id": "analysis-chunk-fbba97cbb16497f38543b4b8dd986f3f31f31d21c37c20b4ba0bb86c1f906dda",
+      "provider_candidate_id": "cand_001",
+      "broad_cache_key": "3a17669449ddf2facde8aa613dfde7da26c451cd8619ae6033f31b2c22ffe5ab",
+      "original_review_number": 1
+    },
+    {
+      "interval_id": "trip-1-attempt03-review-002",
+      "chunk_id": "analysis-chunk-54b92fa0417da8e016cd7f99894791635e77556a296449ebbdab98fdcce1a73c",
+      "provider_candidate_id": "cand_1",
+      "broad_cache_key": "c376c77713f7223830623cfa65dcdfe6fcf11657382ea1fe813a9ee59d7e963f",
+      "original_review_number": 2
+    },
+    {
+      "interval_id": "trip-1-attempt03-review-003",
+      "chunk_id": "analysis-chunk-ef60ce4da5d96c196385ef025f724d077b36deed64f74b4ee8c474f87b2305d0",
+      "provider_candidate_id": "candidate_1",
+      "broad_cache_key": "ac8d0c5c4d8576e96c00bca703b93e3459495ae93eb6577db977c490a0c72d99",
+      "original_review_number": 3
+    },
+    {
+      "interval_id": "trip-1-attempt03-review-004",
+      "chunk_id": "analysis-chunk-63a51e073c5fe5aadffe4f99328fc7ded670d37674cfaa0b676bdd592887d8ff",
+      "provider_candidate_id": "cand_001",
+      "broad_cache_key": "2ee3e49fd5962f9251054fe0731d5968a1dc43132aff24ad6605d033ea6d8789",
+      "original_review_number": 4
+    },
+    {
+      "interval_id": "trip-1-attempt03-review-005",
+      "chunk_id": "analysis-chunk-63a51e073c5fe5aadffe4f99328fc7ded670d37674cfaa0b676bdd592887d8ff",
+      "provider_candidate_id": "cand_002",
+      "broad_cache_key": "2ee3e49fd5962f9251054fe0731d5968a1dc43132aff24ad6605d033ea6d8789",
+      "original_review_number": 5
+    },
+    {
+      "interval_id": "trip-1-attempt03-review-006",
+      "chunk_id": "analysis-chunk-16f306c6a26c674d2ff6914dc688af84b174bee92ced2d977d9ae3e4e2f41693",
+      "provider_candidate_id": "cand_1",
+      "broad_cache_key": "9d56c03eb57405ddfadafab2a71f7a8031a432e9042cf57a992f39d7397a4f97",
+      "original_review_number": 6
+    },
+    {
+      "interval_id": "trip-1-attempt03-review-007",
+      "chunk_id": "analysis-chunk-d37206475a9bcde35a65de22c0e156cab35fad34d6c8750ba3f80cd1bf8ebe44",
+      "provider_candidate_id": "cand_1",
+      "broad_cache_key": "74271110e30a96a2abc52f3352c5a5669394498fdbf90198dac9dbe50addeae6",
+      "original_review_number": 7
+    },
+    {
+      "interval_id": "trip-1-attempt03-review-008",
+      "chunk_id": "analysis-chunk-d37206475a9bcde35a65de22c0e156cab35fad34d6c8750ba3f80cd1bf8ebe44",
+      "provider_candidate_id": "cand_2",
+      "broad_cache_key": "74271110e30a96a2abc52f3352c5a5669394498fdbf90198dac9dbe50addeae6",
+      "original_review_number": 8
+    },
+    {
+      "interval_id": "trip-1-attempt03-review-009",
+      "chunk_id": "analysis-chunk-47e0da26958902915f9743592e56b3d98e195a0fa47bae41e0981bce2beae28c",
+      "provider_candidate_id": "candidate_001",
+      "broad_cache_key": "1bfe4eaf1b001d2b848a234547875b7ff74b66fffb24fc7cf866c6d8476c2403",
+      "original_review_number": 9
+    },
+    {
+      "interval_id": "trip-1-attempt03-review-010",
+      "chunk_id": "analysis-chunk-4eb149cf4391e550f284ff2905799882a4795a3dc4b80f1f1976ba4dd01352f7",
+      "provider_candidate_id": "cand_1",
+      "broad_cache_key": "26bc7f34d22d4e31b10345db939e6887b0b26ba6d30b2a6f276eed03080ff642",
+      "original_review_number": 10
+    },
+    {
+      "interval_id": "trip-1-attempt03-review-011",
+      "chunk_id": "analysis-chunk-4eb149cf4391e550f284ff2905799882a4795a3dc4b80f1f1976ba4dd01352f7",
+      "provider_candidate_id": "cand_2",
+      "broad_cache_key": "26bc7f34d22d4e31b10345db939e6887b0b26ba6d30b2a6f276eed03080ff642",
+      "original_review_number": 11
+    },
+    {
+      "interval_id": "trip-1-attempt03-review-012",
+      "chunk_id": "analysis-chunk-e9419de14396a1c870576facbffd13bb858f938f42b68c9e8a0df226586d16a4",
+      "provider_candidate_id": "cand_1",
+      "broad_cache_key": "707a2fad9f5a9d2f123b2bc87c9975f47b4a5bbb7904679123a7b2903173fd66",
+      "original_review_number": 12
+    },
+    {
+      "interval_id": "trip-1-attempt03-review-013",
+      "chunk_id": "analysis-chunk-48674f76a7d2b1f480b22550fd3759a2699e0080be3e367a307e7df9585edca8",
+      "provider_candidate_id": "candidate_1",
+      "broad_cache_key": "3ea0c8c86b9688d7d06964997e917415e4dabd1a4d2c3a935b5908568ebca6ef",
+      "original_review_number": 13
+    },
+    {
+      "interval_id": "trip-1-attempt03-review-014",
+      "chunk_id": "analysis-chunk-48674f76a7d2b1f480b22550fd3759a2699e0080be3e367a307e7df9585edca8",
+      "provider_candidate_id": "candidate_2",
+      "broad_cache_key": "3ea0c8c86b9688d7d06964997e917415e4dabd1a4d2c3a935b5908568ebca6ef",
+      "original_review_number": 14
+    },
+    {
+      "interval_id": "trip-1-attempt03-review-015",
+      "chunk_id": "analysis-chunk-b66d2526ab454bb98344e5a0e492b8146187e4d6c1f4036dde668bf0a862c8c1",
+      "provider_candidate_id": "cand_1",
+      "broad_cache_key": "747fea638319072125c4f3617c3519e6d3f009e0ec6df5ff08ecd6f64e233291",
+      "original_review_number": 15
+    },
+    {
+      "interval_id": "trip-1-attempt03-review-016",
+      "chunk_id": "analysis-chunk-b66d2526ab454bb98344e5a0e492b8146187e4d6c1f4036dde668bf0a862c8c1",
+      "provider_candidate_id": "cand_2",
+      "broad_cache_key": "747fea638319072125c4f3617c3519e6d3f009e0ec6df5ff08ecd6f64e233291",
+      "original_review_number": 16
+    }
+  ]
+}

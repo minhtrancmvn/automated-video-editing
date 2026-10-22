@@ -66,13 +66,13 @@ video-editor resume JOB_ID --config CONFIG
 video-editor run /Volumes/TravelSSD/footage --config config.toml
 ```
 
-`run` executes `inspect`, `proxy`, `plan`, `render`, `validate`, and `report`. It prints job and stage progress to stderr while keeping the final result on stdout:
+`run` executes `inspect`, `proxy`, `plan`, `render`, `validate`, and `report`. It prints job and stage progress to stderr while keeping the final result on stdout. Illustrative output (`JOB_ID` is a placeholder):
 
-
-job 76dabac4-31db-451d-bf15-1ccb26575403 started
-job 76dabac4-31db-451d-bf15-1ccb26575403: [1/6] inspect started
-job 76dabac4-31db-451d-bf15-1ccb26575403: [1/6] inspect completed
-job 76dabac4-31db-451d-bf15-1ccb26575403: [2/6] proxy started
+```text
+job JOB_ID started
+job JOB_ID: [1/6] inspect started
+job JOB_ID: [1/6] inspect completed
+job JOB_ID: [2/6] proxy started
 ```
 
 Progress reports stage activity, not FFmpeg frame percentages. `inspect`, `plan`, `render-from-plan`, and `resume` use the same progress output when they execute stages.
@@ -102,6 +102,8 @@ video-editor resume JOB_ID --config config.toml
 Supported recursive extensions: `.3gp`, `.avi`, `.m2ts`, `.m4v`, `.mkv`, `.mov`, `.mp4`, `.mts`, `.webm`. Unsupported or unreadable candidates are warned or skipped when other valid media remains; inspect report records skipped inputs. GoPro `GOPR####` and `G[A-Z]CCFFFF` names receive conservative chapter/session chronology evidence. Filename ordering is deterministic, not semantic understanding.
 
 ## Phase 2 automatic highlights — limited live contract evidence
+
+Current vertical-short implementation plan and verified resume state: [Vertical shorts handoff](docs/vertical-shorts-handoff.md). Broader project status: [Phase 2 progress and resume guide](docs/phase-2-progress.md). Update these after meaningful milestones; root [HANDOFF.json](HANDOFF.json) and [.continue-here.md](.continue-here.md) capture the current session handoff.
 
 Phase 2 adds nine resumable stages: `inspect → proxy → segment → analyze → rank → plan → render → validate → report`. Analysis uses generated, registered H.264 proxy chunks with compressed audio. Each upload is checked against its persisted manifest, source fingerprint, mapping, generated root, and file digest; original media is never uploaded. Broad Gemini scan is fixed at 0.5 FPS, detailed candidate sampling uses 2, 3, or 5 FPS, and the exact model is `gemini-3.8-flash`. Broad coverage must reach 100% before refinement, planning, or rendering.
 

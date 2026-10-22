@@ -1,0 +1,160 @@
+{
+  "schema_version": "evaluation-preparation-inventory-v1",
+  "prepared_at_utc": "2026-10-22T05:55:32.580516+00:00",
+  "status": "preparation_only_release_blocked",
+  "release_eligible": false,
+  "scope": "Read-only existing evidence summaries; no source/media hash rescan, provider call, DB mutation, threshold change, or human labeling.",
+  "evidence_root": "/Volumes/VideoEditorState20261020Attempt03/phase2-trip-batch-20261020-attempt03",
+  "contract_root": "/Users/coffeemug/Programming/automated-video-editing/.claude/worktrees/feature-phase2-automatic-highlights",
+  "job_id": "1b4de182-583e-4978-911b-46cdc708b5f8",
+  "batch_id": "trip-1",
+  "batch_independence": "One known trip; three independent collections not established. Additional files/jobs from this trip do not create independent batches.",
+  "human_labels": {
+    "status": "not_supplied",
+    "worksheet_rows": 0
+  },
+  "partition_status": "not_assigned; current trip already exposed to predictions and output feedback",
+  "threshold_freeze_provenance": "not_established; checked-in threshold fixture synthetic and unfrozen",
+  "holdout_only_scoring": "not_implemented",
+  "metric_threshold_application": "not_implemented_in_current_exploratory_evaluator",
+  "independent_artifact_attestation": "not_implemented",
+  "spend": {
+    "basis": "token_usage_derived_microUSD_ledger",
+    "spent_usd": "0.515086",
+    "reserved_usd": "0",
+    "remaining_usd": "0.422183",
+    "invoice_verification": "not_supplied",
+    "unknown_billing_note": "Prior archived unknown-billing holds separate; no release/settlement performed."
+  },
+  "acceptance": {
+    "basis": "user feedback in current conversation",
+    "statement": "the video looks good",
+    "scope": "attempt03 long edit",
+    "release_approval": "not_established",
+    "human_preference_trials": "not_established"
+  },
+  "warnings": [
+    "persistent_black_bars"
+  ],
+  "warning_limit": "Dark sampled footage may confuse detection; not proven false throughout export.",
+  "evidence": [
+    {
+      "path": "local-preparation-result.json",
+      "size_bytes": 469,
+      "sha256": "a1ea6d3ae332fde1ce62e9ae667a35f2672c92f00bb477e40303ee1afff7cf22",
+      "evidence_type": "local_result_summary",
+      "reported_capture_timestamp": null,
+      "job_id": "1b4de182-583e-4978-911b-46cdc708b5f8",
+      "batch_id": "trip-1",
+      "supports": "inspect/proxy/segment preparation and generated chunks",
+      "limitations": "Reported preparation only; not independent quality or batch evidence.",
+      "current_verification": "File read, JSON parsed and SHA-256 computed locally; underlying reported operations not re-executed.",
+      "independent_verifier_identity": null
+    },
+    {
+      "path": "broad-final-verification-20261021.json",
+      "size_bytes": 1096,
+      "sha256": "7f217184a8d40799643fbd70590c4b9145bf6799d57decfbb8f6dbda92b5e15a",
+      "evidence_type": "local_result_summary",
+      "reported_capture_timestamp": "2026-10-21T04:13:24.703483+00:00",
+      "job_id": "1b4de182-583e-4978-911b-46cdc708b5f8",
+      "batch_id": "trip-1",
+      "supports": "11 broad requests, full reported coverage, token/ledger costs and cleanup",
+      "limitations": "Historical broad-only snapshot; later workflow status supersedes it. Costs are usage-derived, not invoice-confirmed.",
+      "current_verification": "File read, JSON parsed and SHA-256 computed locally; underlying reported operations not re-executed.",
+      "independent_verifier_identity": null
+    },
+    {
+      "path": "candidate-refinement-final-verification-20261021.json",
+      "size_bytes": 2740,
+      "sha256": "415a96570b9cfb1a513649471b4dd15370a53f66c52f6811a273b532c720307e",
+      "evidence_type": "local_result_summary",
+      "reported_capture_timestamp": "2026-10-21T06:15:00Z",
+      "job_id": "1b4de182-583e-4978-911b-46cdc708b5f8",
+      "batch_id": "trip-1",
+      "supports": "8 approved refinements, one successful attempt each, reported cleanup and ledger settlement",
+      "limitations": "Provider scores/boxes are not human labels. Usage-derived ledger, not provider invoice.",
+      "current_verification": "File read, JSON parsed and SHA-256 computed locally; underlying reported operations not re-executed.",
+      "independent_verifier_identity": null
+    },
+    {
+      "path": "local-plan-result-20261022.json",
+      "size_bytes": 531,
+      "sha256": "2fbbdfe8e77fb04f13fa966b5432e2f67726b49817b457e355ae28101c8dc7ec",
+      "evidence_type": "local_result_summary",
+      "reported_capture_timestamp": "2026-10-22T04:32:04.996820+00:00",
+      "job_id": "1b4de182-583e-4978-911b-46cdc708b5f8",
+      "batch_id": "trip-1",
+      "supports": "7 selected of 8 ranked, saved plan paths and zero reported provider calls",
+      "limitations": "No independent threshold-freeze or output-quality attestation.",
+      "current_verification": "File read, JSON parsed and SHA-256 computed locally; underlying reported operations not re-executed.",
+      "independent_verifier_identity": null
+    },
+    {
+      "path": "local-render-result-20261022.json",
+      "size_bytes": 1813,
+      "sha256": "3042c45224c6b6348fe137b64cdba4c2e5a0f8bb6de349d7e321f1e4aa1bddca",
+      "evidence_type": "local_result_summary",
+      "reported_capture_timestamp": "2026-10-22T04:49:25.802146+00:00",
+      "job_id": "1b4de182-583e-4978-911b-46cdc708b5f8",
+      "batch_id": "trip-1",
+      "supports": "Long output dimensions/duration, report paths, warning, zero local provider calls",
+      "limitations": "No vertical output or blinded human comparison; report does not independently attest its own claims.",
+      "current_verification": "File read, JSON parsed and SHA-256 computed locally; underlying reported operations not re-executed.",
+      "independent_verifier_identity": null
+    },
+    {
+      "path": "post-render-preservation-20261022.json",
+      "size_bytes": 161,
+      "sha256": "e38bcac48cbaaebc53af60c35b8eb16b0be71e77f253f3d1be01dc7c14d48238",
+      "evidence_type": "local_result_summary",
+      "reported_capture_timestamp": "2026-10-22T04:51:58.471937+00:00",
+      "job_id": "1b4de182-583e-4978-911b-46cdc708b5f8",
+      "batch_id": "trip-1",
+      "supports": "Reported 40 protected paths unchanged after render",
+      "limitations": "Aggregate historical result; no per-path hashes inside this summary. No fresh source/media hash scan in this preparation.",
+      "current_verification": "File read, JSON parsed and SHA-256 computed locally; underlying reported operations not re-executed.",
+      "independent_verifier_identity": null
+    },
+    {
+      "path": "ssd-remount-verification-20261022.json",
+      "size_bytes": 186,
+      "sha256": "a30335e13c91bc955c117bb0ce096120e8e4982ba772d3adcd197bf707965bf0",
+      "evidence_type": "local_result_summary",
+      "reported_capture_timestamp": "2026-10-21T19:55:20.846340+00:00",
+      "job_id": "1b4de182-583e-4978-911b-46cdc708b5f8",
+      "batch_id": "trip-1",
+      "supports": "Reported protected-path preservation across remount",
+      "limitations": "Historical aggregate check, not broad source-safety or volume-ownership attestation.",
+      "current_verification": "File read, JSON parsed and SHA-256 computed locally; underlying reported operations not re-executed.",
+      "independent_verifier_identity": null
+    }
+  ],
+  "contract_files": [
+    {
+      "path": "src/video_editor/evaluation.py",
+      "size_bytes": 15187,
+      "sha256": "000ab3d3997e65bf24c488fa5841476011c3c8047ca8549d365a6faac97e0587"
+    },
+    {
+      "path": "tests/evaluation/schema.json",
+      "size_bytes": 11462,
+      "sha256": "19b0a03a923b17c1b915f66eaea009c91df4fb334a33bc13cdb67d484492be3a"
+    },
+    {
+      "path": "tests/evaluation/thresholds-v1.json",
+      "size_bytes": 561,
+      "sha256": "ae861f6f87ad18242591cb81a976450f66948402bf09aefadcbc06f3be9e0483"
+    }
+  ],
+  "missing_evidence": [
+    "At least 100 genuinely human-labeled candidate intervals across at least 3 independent batches, with whole-batch partition isolation.",
+    "Prediction-hidden annotation audit and adjudication; genuine untouched holdout.",
+    "Real calibration evidence digest and verified committed threshold freeze before holdout access.",
+    "Independently verified source/upload/output/plan and billing linkage.",
+    "Frame/time-linked crop measurements and real short outputs for crop/diversity denominators.",
+    "Blinded human-preference study with trial-level records.",
+    "Release-capable holdout-only scoring and metric threshold checks; provenance verifier remains absent."
+  ],
+  "checksum_note": "Detached checksums detect later file drift, not trusted authorship, invoice authenticity, or release approval."
+}

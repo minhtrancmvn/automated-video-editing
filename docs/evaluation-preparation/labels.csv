@@ -1,0 +1,1 @@
+interval_id,batch_id,source_id,start,end,partition,must_include,acceptable,weak,duplicate,duplicate_of,chapter,order,subject_boxes,acceptable_transitions
