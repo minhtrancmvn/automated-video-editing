@@ -47,7 +47,8 @@ def test_service_wires_production_pricing_only_for_cloud(
     try:
         if cloud_enabled:
             assert factory.call_count == 1
-            (pricing,) = tuple(factory.call_args.kwargs.values())
+            pricing = factory.call_args.kwargs["pricing"]
+            assert factory.call_args.kwargs["retry_policy"].max_attempts == 3
             assert pricing.model == config.gemini.model
             assert pricing.audio_input_usd_per_million_tokens == Decimal("0.75")
             assert service.provider is adapter

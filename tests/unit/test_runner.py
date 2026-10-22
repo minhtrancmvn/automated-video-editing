@@ -202,28 +202,52 @@ def test_runner_kills_child_that_ignores_terminate_after_signal(
 def test_runner_rejects_second_process_for_same_output(
     tmp_path: Path,
 ) -> None:
-    script = """
-import time
+    ready = tmp_path / "render-ready"
+    release = tmp_path / "render-release"
+    child = (
+        "import time; from pathlib import Path; "
+        f"Path({str(ready)!r}).touch(); "
+        f"release = Path({str(release)!r}); "
+        "deadline = time.monotonic() + 15\n"
+        "while not release.exists() and time.monotonic() < deadline: time.sleep(0.01)"
+    )
+    script = f"""
 import sys
 from pathlib import Path
 from video_editor.rendering.compiler import RenderCommand
 from video_editor.rendering.runner import run_render
 from decimal import Decimal
-command = RenderCommand((sys.executable, "-c", "import time; time.sleep(0.4)"), Path(r"{}"), Path(r"{}"), Decimal(1), None)
+command = RenderCommand((sys.executable, "-c", {child!r}), Path({str(tmp_path / "same.mp4.partial")!r}), Path({str(tmp_path / "same.mp4")!r}), Decimal(1), None)
 try:
     run_render(command, lambda: None)
 except Exception as exc:
     print(type(exc).__name__, str(exc), flush=True)
-""".format(tmp_path / "same.mp4.partial", tmp_path / "same.mp4")
+"""
     first = subprocess.Popen(
         [sys.executable, "-c", script], stdout=subprocess.PIPE, text=True
     )
-    time.sleep(0.1)
-    second = subprocess.run(
-        [sys.executable, "-c", script], capture_output=True, text=True, check=False
-    )
-    first.wait(timeout=3)
-    assert "render already in progress" in second.stdout
+    try:
+        deadline = time.monotonic() + 10
+        while (
+            not ready.exists() and first.poll() is None and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+        assert ready.exists(), "first process never acquired render lock"
+        second = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+        assert "render already in progress" in second.stdout
+    finally:
+        release.touch()
+        try:
+            first.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            first.kill()
+            first.communicate(timeout=5)
 
 
 def test_runner_interrupt_after_validation_keeps_partial(

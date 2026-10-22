@@ -682,6 +682,14 @@ def test_generation_keeps_private_random_temp_open_during_ffmpeg(
         "video_editor.analysis.proxy_chunks._validated_probe",
         lambda path, duration, settings, *, ffprobe: (inspected, 64000),
     )
+    from video_editor.analysis import proxy_chunks
+    from video_editor.media.storage import VolumeIdentity
+
+    monkeypatch.setattr(
+        proxy_chunks,
+        "inspect_volume",
+        lambda path: VolumeIdentity(path.stat().st_dev, path, "apfs"),
+    )
 
     manifest = create_cloud_proxy_chunk(
         source,
@@ -755,6 +763,14 @@ def test_generation_uses_no_overwrite_for_private_random_temp(
     monkeypatch.setattr(
         "video_editor.analysis.proxy_chunks._validated_probe",
         lambda path, duration, settings, *, ffprobe: (inspected, 64000),
+    )
+    from video_editor.analysis import proxy_chunks
+    from video_editor.media.storage import VolumeIdentity
+
+    monkeypatch.setattr(
+        proxy_chunks,
+        "inspect_volume",
+        lambda path: VolumeIdentity(path.stat().st_dev, path, "apfs"),
     )
 
     create_cloud_proxy_chunk(
@@ -841,6 +857,14 @@ def test_generation_does_not_overwrite_existing_final_proxy(
     monkeypatch.setattr(
         "video_editor.analysis.proxy_chunks._validated_probe",
         lambda path, duration, settings, *, ffprobe: (inspected, 64000),
+    )
+    from video_editor.analysis import proxy_chunks
+    from video_editor.media.storage import VolumeIdentity
+
+    monkeypatch.setattr(
+        proxy_chunks,
+        "inspect_volume",
+        lambda path: VolumeIdentity(path.stat().st_dev, path, "apfs"),
     )
 
     with pytest.raises(VideoEditorError, match="final proxy path already exists"):
@@ -2293,6 +2317,122 @@ def test_registration_rejects_caller_forged_32kbps_media(
             register_proxy_manifest(forged_manifest, registered.store)
     finally:
         registered.store.__exit__(None, None, None)
+
+
+def test_probe_parser_accepts_known_go_pro_timed_metadata_stream(
+    tmp_path: Path,
+) -> None:
+    from video_editor.analysis.proxy_chunks import _parse_probe_payload
+
+    payload = {
+        "streams": [
+            {
+                "codec_type": "video",
+                "codec_name": "h264",
+                "codec_tag_string": "avc1",
+                "width": 640,
+                "height": 360,
+                "avg_frame_rate": "15/1",
+            },
+            {
+                "codec_type": "audio",
+                "codec_name": "aac",
+                "channels": 1,
+                "bit_rate": "64000",
+            },
+            {
+                "codec_type": "data",
+                "codec_name": "bin_data",
+                "codec_tag_string": "text",
+            },
+        ],
+        "format": {"duration": "10.0"},
+    }
+
+    evidence = _parse_probe_payload(
+        tmp_path / "gopro-timed-metadata.mp4", json.dumps(payload)
+    )
+
+    assert evidence.video_stream_count == 1
+    assert evidence.audio_stream_count == 1
+    assert evidence.probe.video is not None
+    assert evidence.probe.audio is not None
+    assert evidence.audio_bitrate_bps == 64000
+
+
+def test_probe_query_requests_codec_tag_for_gopro_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from video_editor.analysis import proxy_chunks
+
+    payload = {
+        "streams": [
+            {
+                "codec_type": "video",
+                "codec_name": "h264",
+                "width": 640,
+                "height": 360,
+                "avg_frame_rate": "15/1",
+            },
+            {
+                "codec_type": "audio",
+                "codec_name": "aac",
+                "channels": 1,
+                "bit_rate": "64000",
+            },
+            {
+                "codec_type": "data",
+                "codec_name": "bin_data",
+                "codec_tag_string": "text",
+            },
+        ],
+        "format": {"duration": "10.0"},
+    }
+    commands: list[list[str]] = []
+
+    def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(args)
+        return subprocess.CompletedProcess(args, 0, json.dumps(payload), "")
+
+    monkeypatch.setattr(proxy_chunks.subprocess, "run", run)
+    evidence = proxy_chunks._probe_media_evidence(
+        tmp_path / "gopro.mp4", ffprobe="ffprobe"
+    )
+
+    assert evidence.video_stream_count == 1
+    assert "codec_tag_string" in commands[0][commands[0].index("-show_entries") + 1]
+
+
+def test_probe_parser_rejects_unknown_data_stream(tmp_path: Path) -> None:
+    from video_editor.analysis.proxy_chunks import _parse_probe_payload
+
+    payload = {
+        "streams": [
+            {
+                "codec_type": "video",
+                "codec_name": "h264",
+                "codec_tag_string": "avc1",
+                "width": 640,
+                "height": 360,
+                "avg_frame_rate": "15/1",
+            },
+            {
+                "codec_type": "audio",
+                "codec_name": "aac",
+                "channels": 1,
+                "bit_rate": "64000",
+            },
+            {
+                "codec_type": "data",
+                "codec_name": "unknown",
+                "codec_tag_string": "data",
+            },
+        ],
+        "format": {"duration": "10.0"},
+    }
+
+    with pytest.raises(VideoEditorError, match="stream count"):
+        _parse_probe_payload(tmp_path / "unknown-data.mp4", json.dumps(payload))
 
 
 def test_registration_rejects_generated_media_with_extra_subtitle_stream(

@@ -15,6 +15,7 @@ from google import genai
 from google.genai import _transformers, types
 from pydantic import BaseModel, ValidationError
 
+from video_editor.analysis.diagnostics import validation_errors
 from video_editor.analysis.models import (
     AnalysisChunk,
     AnalysisProvider,
@@ -50,6 +51,8 @@ _METADATA_TOKENS_PER_SECOND = 16
 _PROMPT_OVERHEAD_TOKENS = 1024
 _MICRO_USD = Decimal(1_000_000)
 _NANOSECOND = Decimal("0.000000001")
+_FILE_POLL_SECONDS = 5.0
+_FILE_PROCESSING_TIMEOUT_SECONDS = 300.0
 _ResponseT = TypeVar("_ResponseT", BroadScanResponse, CandidateRefinementResponse)
 _ValueT = TypeVar("_ValueT")
 
@@ -88,6 +91,73 @@ def _response_schema(model: type[BaseModel]) -> types.Schema:
     return schema
 
 
+def _response_diagnostic(
+    response: Any, model: type[BaseModel], error: Exception
+) -> dict[str, object]:
+    """Describe rejection without provider content or dynamic unknown field names."""
+    fields = set(model.model_fields) | {
+        "start",
+        "end",
+        "time",
+        "x",
+        "y",
+        "w",
+        "h",
+        "priority",
+        "scene_id",
+        "summary",
+        "actions",
+        "setting",
+        "scenic_interest",
+        "human_interaction",
+        "story_milestone",
+        "technical_problems",
+        "vertical_suitability",
+        "confidence",
+        "candidate_id",
+        "category",
+        "reason",
+    }
+    diagnostic: dict[str, object] = {
+        "reason": "schema_validation"
+        if isinstance(error, ValidationError)
+        else "semantic_validation",
+        "fields": sorted(
+            {
+                component
+                for item in error.errors(include_input=False, include_context=False)
+                for component in item["loc"]
+                if isinstance(component, str) and component in fields
+            }
+        )[:16]
+        if isinstance(error, ValidationError)
+        else [],
+    }
+    if isinstance(error, ValidationError):
+        diagnostic["errors"] = validation_errors(
+            error.errors(include_input=False, include_context=False, include_url=False)
+        )
+    if isinstance(error, VideoEditorError):
+        try:
+            semantic = json.loads(error.safe_details.get("diagnostic", "{}"))
+        except (TypeError, ValueError):
+            semantic = {}
+        if isinstance(semantic, dict) and isinstance(semantic.get("fields"), list):
+            diagnostic["fields"] = sorted(
+                {
+                    field
+                    for field in semantic["fields"]
+                    if field in {"chunk_id", "candidate_id", "start", "end"}
+                }
+            )
+    candidates = getattr(response, "candidates", None) or ()
+    finish = getattr(candidates[0], "finish_reason", None) if candidates else None
+    finish = getattr(finish, "value", finish)
+    if finish in {"STOP", "MAX_TOKENS", "SAFETY", "RECITATION", "OTHER"}:
+        diagnostic["finish_reason"] = finish
+    return diagnostic
+
+
 class GeminiAdapter:
     """Adapt google-genai Files and Models APIs to provider-neutral records."""
 
@@ -108,7 +178,16 @@ class GeminiAdapter:
                 "Gemini API key is required",
                 code="provider_configuration",
             )
-        self._client = client if client is not None else genai.Client(api_key=api_key)
+        self._client = (
+            client
+            if client is not None
+            else genai.Client(
+                api_key=api_key,
+                http_options=types.HttpOptions(
+                    retry_options=types.HttpRetryOptions(attempts=1)
+                ),
+            )
+        )
         self._retry_policy = retry_policy or RetryPolicy()
         self._sleeper = sleeper
         self._maximum_request_cost_usd = maximum_request_cost_usd
@@ -124,12 +203,14 @@ class GeminiAdapter:
         *,
         maximum_request_cost_usd: Decimal | None = None,
         pricing: ModelPricing | None = None,
+        retry_policy: RetryPolicy | None = None,
     ) -> GeminiAdapter:
         """Create adapter from runtime environment without retaining its key."""
         return cls(
             api_key=os.getenv("GEMINI_API_KEY"),
             maximum_request_cost_usd=maximum_request_cost_usd,
             pricing=pricing,
+            retry_policy=retry_policy,
         )
 
     @staticmethod
@@ -174,7 +255,10 @@ class GeminiAdapter:
         prompt_version: str = "broad-v1",
     ) -> Decimal:
         """Estimate default-policy broad cost for live preflight without dispatch."""
-        if prompt_version != "broad-v1" or not authorization.manifest_id:
+        if (
+            prompt_version not in {"broad-v1", "broad-v2"}
+            or not authorization.manifest_id
+        ):
             raise ValueError("broad preflight requires a supported prompt and manifest")
         return GeminiAdapter._estimate_request_maximum(
             chunk,
@@ -198,23 +282,27 @@ class GeminiAdapter:
                 "Gemini pricing is required to bound request cost",
                 code="provider_pricing_unavailable",
             )
-        if not manifest_id or prompt_version not in {"broad-v1", "candidate-v2"}:
+        if not manifest_id or prompt_version not in {
+            "broad-v1",
+            "broad-v2",
+            "candidate-v3",
+            "candidate-v4",
+        }:
             raise VideoEditorError(
                 ErrorCategory.BUDGET,
                 "Unsupported request cost identity",
                 code="provider_invalid_request",
             )
-        fps = Decimal(str(_BROAD_FPS)) if prompt_version == "broad-v1" else Decimal(5)
+        is_broad = prompt_version in {"broad-v1", "broad-v2"}
+        fps = Decimal(str(_BROAD_FPS)) if is_broad else Decimal(5)
         return self._estimate_request_maximum(
             chunk,
             self._pricing,
             fps=fps,
             attempts=self._retry_policy.max_attempts,
-            response_model=(
-                BroadScanResponse
-                if prompt_version == "broad-v1"
-                else CandidateRefinementResponse
-            ),
+            response_model=BroadScanResponse
+            if is_broad
+            else CandidateRefinementResponse,
         )
 
     def upload(self, authorization: AuthorizedUpload) -> UploadedFile:
@@ -255,9 +343,10 @@ class GeminiAdapter:
     def wait_until_active(self, upload: UploadedFile) -> UploadedFile:
         """Poll file processing independently from individual SDK retry attempts."""
         current = upload
-        for attempt in range(1, self._retry_policy.max_attempts + 1):
+        deadline = time.monotonic() + _FILE_PROCESSING_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
             try:
-                remote = self._retry(lambda: self._client.files.get(name=current.name))
+                remote = self._retry(lambda: self._client.files.get(name=upload.name))
             except VideoEditorError as error:
                 if error.code == "provider_file_not_found":
                     raise self._reupload_required(current) from None
@@ -273,11 +362,14 @@ class GeminiAdapter:
                     "Gemini file processing failed",
                     code="provider_file_failed",
                 )
-            if attempt < self._retry_policy.max_attempts:
-                self._sleep(attempt)
+            current = refreshed
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                self._sleeper(min(_FILE_POLL_SECONDS, remaining))
         raise VideoEditorError(
             ErrorCategory.PROVIDER,
-            "Gemini file processing did not become active",
+            f"Gemini file processing did not become active within "
+            f"{_FILE_PROCESSING_TIMEOUT_SECONDS:g} seconds (last state: {current.state})",
             code="provider_file_timeout",
         )
 
@@ -411,11 +503,18 @@ class GeminiAdapter:
                     start=start,
                     end=end,
                 )
-            except (ValidationError, TypeError, ValueError, VideoEditorError):
+            except (ValidationError, TypeError, ValueError, VideoEditorError) as error:
                 if repair_available and remaining_attempts > 0:
                     repair_available = False
                     continue
-                raise self._invalid_response()
+                failure = self._invalid_response()
+                failure.safe_details["diagnostic"] = json.dumps(
+                    _response_diagnostic(response, response_model, error),
+                    sort_keys=True,
+                )
+                raise self._provider_failure(
+                    failure, reservation_id=request.reservation_id, attempts=attempts
+                ) from None
             return ProviderResult(
                 response=parsed,
                 usage=self._aggregate_usage(request.reservation_id, attempts),
@@ -524,12 +623,18 @@ class GeminiAdapter:
         start: Decimal,
         end: Decimal,
     ) -> None:
-        if response.chunk_id != chunk_id:
-            raise GeminiAdapter._invalid_response()
+        mismatches = ["chunk_id"] if response.chunk_id != chunk_id else []
         intervals: tuple[tuple[Decimal, Decimal], ...]
         if isinstance(response, CandidateRefinementResponse):
-            if response.candidate_id != candidate_id:
-                raise GeminiAdapter._invalid_response()
+            mismatches.extend(
+                field
+                for field, expected in (
+                    ("candidate_id", candidate_id),
+                    ("start", start),
+                    ("end", end),
+                )
+                if getattr(response, field) != expected
+            )
             intervals = ((response.start, response.end),)
         else:
             intervals = tuple(
@@ -540,10 +645,19 @@ class GeminiAdapter:
                     *response.candidates,
                 )
             )
-        if any(
-            item_start < start or item_end > end for item_start, item_end in intervals
-        ):
-            raise GeminiAdapter._invalid_response()
+        if any(item_start < start for item_start, _ in intervals):
+            mismatches.append("start")
+        if any(item_end > end for _, item_end in intervals):
+            mismatches.append("end")
+        if mismatches:
+            failure = GeminiAdapter._invalid_response()
+            failure.safe_details["diagnostic"] = json.dumps(
+                {
+                    "reason": "semantic_validation",
+                    "fields": sorted(set(mismatches)),
+                }
+            )
+            raise failure
 
     @staticmethod
     def _attempt_usage(response: Any) -> ProviderAttemptUsage:
@@ -698,37 +812,71 @@ class GeminiAdapter:
         end: Decimal,
     ) -> str:
         interval = f"[{format(start, 'f')}, {format(end, 'f')}] seconds"
-        if prompt_version == "broad-v1" and candidate_id is None:
-            return "\n".join(
+        if prompt_version in {"broad-v1", "broad-v2"} and candidate_id is None:
+            serialized_interval = interval
+            if prompt_version == "broad-v2":
+                serialized_start = GeminiAdapter._duration(start)
+                serialized_end = GeminiAdapter._duration(end)
+                serialized_interval = (
+                    f"[{serialized_start[:-1]}, {serialized_end[:-1]}] seconds"
+                )
+            prompt_lines = [
+                "mode: broad",
+                f"prompt_version: {prompt_version}",
+                f"reservation_id: {request.reservation_id}",
+                f"job_id: {request.job_id}",
+                f"chunk_id: {chunk_id}",
+                f"interval: {interval}",
+            ]
+            if prompt_version == "broad-v2":
+                prompt_lines.extend(
+                    (
+                        f"serialized interval: {serialized_interval}",
+                        "All returned timestamps must be within the serialized interval.",
+                    )
+                )
+            prompt_lines.extend(
                 (
-                    "mode: broad",
-                    "prompt_version: broad-v1",
-                    f"reservation_id: {request.reservation_id}",
-                    f"job_id: {request.job_id}",
-                    f"chunk_id: {chunk_id}",
-                    f"interval: {interval}",
                     "Return only JSON matching response schema.",
                     "Do not transcribe speech.",
                     "Do not infer speech meaning.",
                     "Do not identify any person.",
                 )
             )
-        if prompt_version == "candidate-v2" and candidate_id is not None:
+            return "\n".join(prompt_lines)
+        if (
+            prompt_version in {"candidate-v3", "candidate-v4"}
+            and candidate_id is not None
+        ):
+            geometry = (
+                (
+                    "subject_boxes: JSON array; never null/object.",
+                    "x,y: normalized top-left; w,h: width and height, not corners.",
+                    "Bounds: 0 <= x <= 1; 0 <= y <= 1; w > 0; h > 0; x + w <= 1; y + h <= 1.",
+                    "time: decimal-seconds strings within requested interval; priority: non-negative integer.",
+                    "Use empty array [] if no defensible visible box. Do not invent boxes.",
+                )
+                if prompt_version == "candidate-v4"
+                else ()
+            )
             return "\n".join(
                 (
                     "mode: candidate",
-                    "prompt_version: candidate-v2",
+                    f"prompt_version: {prompt_version}",
                     f"reservation_id: {request.reservation_id}",
                     f"job_id: {request.job_id}",
                     f"chunk_id: {chunk_id}",
                     f"candidate_id: {candidate_id}",
                     f"interval: {interval}",
                     "Return only JSON matching response schema.",
+                    "Echo chunk_id, candidate_id, start, and end exactly as requested.",
+                    "Do not narrow or shift the requested interval.",
                     "Speech meaning may be summarized only for this candidate interval.",
                     (
                         "Return timestamped normalized subject_boxes (time, x, y, w, h,"
                         " priority) inside the interval as tracking seeds only."
                     ),
+                    *geometry,
                     "Do not identify any person.",
                 )
             )
@@ -752,7 +900,14 @@ class GeminiAdapter:
             error.category,
             str(error),
             code=error.code,
-            safe_details={"usage": json.dumps(usage.safe_payload(), sort_keys=True)},
+            safe_details={
+                "usage": json.dumps(usage.safe_payload(), sort_keys=True),
+                **(
+                    {"diagnostic": error.safe_details["diagnostic"]}
+                    if "diagnostic" in error.safe_details
+                    else {}
+                ),
+            },
         )
 
     @staticmethod

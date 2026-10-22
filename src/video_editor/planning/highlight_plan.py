@@ -7,11 +7,12 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from itertools import pairwise
-from typing import Literal
+from typing import Any, Literal
 
 from video_editor.analysis.models import CropTrack
 from video_editor.analysis.ranking import RankedCandidate
-from video_editor.config import HighlightSettings
+from video_editor.analysis.tracking import validate_crop_track
+from video_editor.config import CropSettings, HighlightSettings
 from video_editor.media.sequencing import ChronologyGroup
 from video_editor.models.edit_plan import (
     AnchorMoment,
@@ -417,6 +418,115 @@ def _short_eligible(
         and track is not None
         and track.short_eligible
     )
+
+
+def short_eligibility_diagnostics(
+    candidates: Sequence[RankedCandidate],
+    tracks: Sequence[CropTrack],
+    settings: HighlightSettings,
+    crop_settings: CropSettings,
+) -> dict[str, Any]:
+    """Explain gates observationally; never replace stored crop eligibility."""
+    track_map = {track.clip_id: track for track in tracks}
+    theme_counts = Counter(_theme(candidate) for candidate in candidates)
+    eligible_counts = Counter(
+        _theme(candidate)
+        for candidate in candidates
+        if _short_eligible(candidate, track_map)
+    )
+    rows: list[dict[str, Any]] = []
+    for candidate in sorted(candidates, key=lambda item: item.candidate_id):
+        track = track_map.get(candidate.candidate_id)
+        checks = (
+            (candidate.selected, "not_selected"),
+            (candidate.eligible_short, "rank_short_ineligible"),
+            (candidate.score.total >= _MIN_SHORT_QUALITY, "score_below_minimum"),
+            (candidate.completeness >= _MIN_COMPLETENESS, "completeness_below_minimum"),
+            (
+                candidate.score.raw["vertical"] >= _MIN_VERTICAL,
+                "vertical_below_minimum",
+            ),
+            (track is not None, "crop_track_missing"),
+        )
+        reasons = [reason for passed, reason in checks if not passed]
+        if track is not None and not track.short_eligible:
+            reasons.append("crop_not_eligible")
+        primary_eligible = _short_eligible(candidate, track_map)
+        theme = _theme(candidate)
+        if primary_eligible and eligible_counts[theme] < _MIN_SHORT_MOMENTS:
+            reasons.append("theme_insufficient_moments")
+        crop: dict[str, Any] | None = None
+        if track is not None:
+            validation = validate_crop_track(track, settings=crop_settings)
+            crop_checks = (
+                (bool(validation.sampled_observations), "no_local_observations"),
+                (validation.identity_matches, "identity_mismatch"),
+                (validation.monotonic, "non_monotonic_path"),
+                (validation.bounded, "unbounded_path"),
+                (
+                    validation.retention_ratio
+                    >= crop_settings.minimum_subject_retention_ratio,
+                    "retention_below_minimum",
+                ),
+                (
+                    validation.max_velocity
+                    <= crop_settings.max_velocity_widths_per_second,
+                    "velocity_above_maximum",
+                ),
+                (
+                    validation.max_acceleration
+                    <= crop_settings.max_acceleration_widths_per_second_squared,
+                    "acceleration_above_maximum",
+                ),
+            )
+            crop = {
+                "stored_short_eligible": track.short_eligible,
+                "measurement_source": "recomputed_from_saved_track",
+                "validation": validation.model_dump(mode="json"),
+                "failure_codes": [
+                    reason for passed, reason in crop_checks if not passed
+                ],
+                "eligibility_matches_measurement": track.short_eligible
+                == validation.eligible,
+            }
+        rows.append(
+            {
+                "candidate_id": candidate.candidate_id,
+                "source_id": candidate.source_id,
+                "source_start": str(candidate.source_start),
+                "source_end": str(candidate.source_end),
+                "theme": theme,
+                "theme_candidate_count": theme_counts[theme],
+                "theme_eligible_count": eligible_counts[theme],
+                "score_total": str(candidate.score.total),
+                "completeness": str(candidate.completeness),
+                "raw_vertical": str(candidate.score.raw["vertical"]),
+                "primary_eligible": primary_eligible,
+                "reasons": reasons,
+                "crop": crop,
+            }
+        )
+    return {
+        "version": "short-diagnostics-v1",
+        "scope": "primary gates and pre-duration theme membership; not final plan acceptance",
+        "thresholds": {
+            "minimum_score": str(_MIN_SHORT_QUALITY),
+            "minimum_completeness": str(_MIN_COMPLETENESS),
+            "minimum_raw_vertical": str(_MIN_VERTICAL),
+            "minimum_theme_moments": _MIN_SHORT_MOMENTS,
+            "maximum_short_seconds": settings.short_max_seconds,
+            "maximum_short_count": settings.max_short_count,
+        },
+        "crop_limits": {
+            "minimum_retention": str(crop_settings.minimum_subject_retention_ratio),
+            "maximum_velocity": str(crop_settings.max_velocity_widths_per_second),
+            "maximum_acceleration": str(
+                crop_settings.max_acceleration_widths_per_second_squared
+            ),
+            "safe_margin_ratio": str(crop_settings.safe_margin_ratio),
+        },
+        "candidates": rows,
+    }
 
 
 def _short_clusters(

@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from decimal import Decimal
 from itertools import pairwise
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import cv2
 import numpy as np
@@ -22,6 +22,8 @@ from video_editor.analysis.models import (
 )
 from video_editor.config import CropSettings
 from video_editor.media.proxies import ProxyMapping
+
+TRACKING_VERSION = "crop-tracking-v5"
 
 _ZERO = Decimal(0)
 _ONE = Decimal(1)
@@ -68,25 +70,33 @@ def _track_id(clip_id: str, source_identity: str) -> str:
     return f"crop-{digest}"
 
 
-def _read_frames(proxy: Path) -> tuple[list[NDArray[np.uint8]], Decimal]:
+def _open_proxy(proxy: Path) -> tuple[Any, Decimal]:
     capture = cv2.VideoCapture(str(proxy))
     if not capture.isOpened():
         raise ValueError(f"cannot decode proxy: {proxy}")
-    try:
-        fps = capture.get(cv2.CAP_PROP_FPS)
-        if not np.isfinite(fps) or fps <= 0:
-            raise ValueError("proxy has invalid frame timing")
-        frames: list[NDArray[np.uint8]] = []
-        while True:
+    fps = capture.get(cv2.CAP_PROP_FPS)
+    if not np.isfinite(fps) or fps <= 0:
+        capture.release()
+        raise ValueError("proxy has invalid frame timing")
+    return capture, Decimal(str(fps))
+
+
+def _stream_frames(
+    capture: Any, fps: Decimal, mapping: ProxyMapping, candidate_start: Decimal
+) -> Iterator[tuple[int, NDArray[np.uint8] | None]]:
+    """Yield every frame index; retrieve pixels only from the frame before start."""
+    frame_index = 0
+    while True:
+        if _source_time(frame_index + 1, fps, mapping) < candidate_start:
+            if not capture.grab():
+                return
+            yield frame_index, None
+        else:
             ok, decoded = capture.read()
             if not ok:
-                break
-            frames.append(cast(NDArray[np.uint8], decoded))
-    finally:
-        capture.release()
-    if not frames:
-        raise ValueError("proxy contains no decodable frames")
-    return frames, Decimal(str(fps))
+                return
+            yield frame_index, cast(NDArray[np.uint8], decoded)
+        frame_index += 1
 
 
 def _source_time(frame_index: int, fps: Decimal, mapping: ProxyMapping) -> Decimal:
@@ -237,8 +247,18 @@ def _raw_keyframes(
     fps: Decimal,
     settings: CropSettings,
 ) -> tuple[CropKeyframe, ...]:
+    frame_observations = (
+        item
+        for item in observations
+        if candidate_start <= item.source_time < candidate_end
+    )
     by_frame = {
-        int((item.source_time - candidate_start) * fps): item for item in observations
+        int(
+            ((item.source_time - candidate_start) * fps).to_integral_value(
+                rounding="ROUND_HALF_UP"
+            )
+        ): item
+        for item in frame_observations
     }
     frame_count = max(1, int((candidate_end - candidate_start) * fps))
     last: SubjectObservation | None = None
@@ -309,9 +329,30 @@ def smooth_crop_track(track: CropTrack, settings: CropSettings) -> CropTrack:
             if elapsed <= 0:
                 raise ValueError("crop keyframe times must be strictly increasing")
             if keyframe.fallback == "hold":
-                center_x, center_y = previous.center_x, previous.center_y
-                previous_velocity_x = _ZERO
-                previous_velocity_y = _ZERO
+                width_ratio = Decimal(track.crop_width) / Decimal(track.source_width)
+                height_ratio = Decimal(track.crop_width) / Decimal(track.source_height)
+                deceleration_x = (
+                    settings.max_acceleration_widths_per_second_squared * width_ratio
+                    - _MOTION_EPSILON
+                ) * elapsed
+                deceleration_y = (
+                    settings.max_acceleration_widths_per_second_squared * height_ratio
+                    - _MOTION_EPSILON
+                ) * elapsed
+                velocity_x = previous_velocity_x - _clamp(
+                    previous_velocity_x, -deceleration_x, deceleration_x
+                )
+                velocity_y = previous_velocity_y - _clamp(
+                    previous_velocity_y, -deceleration_y, deceleration_y
+                )
+                center_x = _clamp(
+                    previous.center_x + velocity_x * elapsed, min_x, max_x
+                )
+                center_y = _clamp(
+                    previous.center_y + velocity_y * elapsed, min_y, max_y
+                )
+                previous_velocity_x = (center_x - previous.center_x) / elapsed
+                previous_velocity_y = (center_y - previous.center_y) / elapsed
             else:
                 width_ratio = Decimal(track.crop_width) / Decimal(track.source_width)
                 height_ratio = Decimal(track.crop_width) / Decimal(track.source_height)
@@ -325,9 +366,11 @@ def smooth_crop_track(track: CropTrack, settings: CropSettings) -> CropTrack:
                 )
                 max_acceleration_x = (
                     settings.max_acceleration_widths_per_second_squared * width_ratio
+                    - _MOTION_EPSILON
                 )
                 max_acceleration_y = (
                     settings.max_acceleration_widths_per_second_squared * height_ratio
+                    - _MOTION_EPSILON
                 )
                 requested_velocity_x = (target_x - previous.center_x) / elapsed
                 requested_velocity_y = (target_y - previous.center_y) / elapsed
@@ -386,10 +429,14 @@ def _kinematics(track: CropTrack) -> tuple[Decimal, Decimal]:
 def _keyframe_for_observation(
     track: CropTrack, observation: SubjectObservation
 ) -> CropKeyframe | None:
-    clip_time = observation.source_time - min(
-        (item.source_time for item in track.observations),
-        default=observation.source_time,
-    )
+    origin = track.source_start
+    if origin is None:
+        # Legacy tracks did not record candidate start; preserve their old lookup.
+        origin = min(
+            (item.source_time for item in track.observations),
+            default=observation.source_time,
+        )
+    clip_time = observation.source_time - origin
     return min(
         track.keyframes,
         key=lambda item: (abs(item.time - clip_time), item.time),
@@ -499,7 +546,7 @@ def best_static_crop(track: CropTrack, settings: CropSettings) -> CropTrack:
         key=lambda center: (abs(center[0] - _HALF), abs(center[1] - _HALF), center),
     )
     times = sorted({item.source_time for item in local})
-    origin = times[0]
+    origin = track.source_start if track.source_start is not None else times[0]
     best_track: CropTrack | None = None
     best_retained = -1
     for center_x, center_y in candidates:
@@ -561,76 +608,91 @@ def track_subject(
         output_height=output_size[1],
         crop_width=crop_width,
         crop_height=crop_height,
+        source_start=candidate_start,
         observations=(),
         keyframes=(),
         short_eligible=False,
     )
     if not subject_observations:
         return base
-    frames, fps = _read_frames(proxy)
-    decoded_proxy_end = mapping.proxy_start + Decimal(len(frames)) / fps
+    capture, fps = _open_proxy(proxy)
     candidate_proxy_end = mapping.proxy_start + (
         (candidate_end - mapping.source_start)
         * (mapping.proxy_end - mapping.proxy_start)
         / (mapping.source_end - mapping.source_start)
     )
-    if decoded_proxy_end < candidate_proxy_end:
-        return base
     active_seed: SubjectObservation | None = None
     active_box: NormalizedSubjectBox | None = None
     points: NDArray[np.float32] | None = None
     previous_gray: NDArray[np.uint8] | None = None
     local: list[SubjectObservation] = []
-    for frame_index, frame in enumerate(frames):
-        frame_source_time = _source_time(frame_index, fps, mapping)
-        if frame_source_time < candidate_start or frame_source_time >= candidate_end:
-            previous_gray = cast(
-                NDArray[np.uint8], cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            )
-            continue
-        gray = cast(NDArray[np.uint8], cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
-        seed = _seed_at_frame(subject_observations, frame_index, fps, mapping)
-        propagated_successfully = False
-        if seed is not None:
-            active_seed = seed
-            active_box = seed.box
-            points = _feature_points(gray, active_box)
-        elif (
-            active_seed is not None
-            and active_box is not None
-            and points is not None
-            and previous_gray is not None
+    decoded = 0
+    try:
+        # Whole proxies can be hours long: stream them and retrieve only the
+        # frame before the candidate window plus the window itself.
+        for frame_index, frame in _stream_frames(
+            capture, fps, mapping, candidate_start
         ):
-            propagated = _propagate_points(previous_gray, gray, points)
-            if propagated is None:
-                points = None
-                active_box = None
-            else:
-                previous_points, current_points = propagated
-                active_box = _shift_box(
-                    active_box,
-                    previous_points,
-                    current_points,
-                    (gray.shape[1], gray.shape[0]),
+            decoded = frame_index + 1
+            if frame is None:
+                continue
+            frame_source_time = _source_time(frame_index, fps, mapping)
+            if frame_source_time >= candidate_end:
+                if mapping.proxy_start + Decimal(decoded) / fps >= candidate_proxy_end:
+                    break
+                continue
+            gray = cast(NDArray[np.uint8], cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+            if frame_source_time < candidate_start:
+                previous_gray = gray
+                continue
+            seed = _seed_at_frame(subject_observations, frame_index, fps, mapping)
+            propagated_successfully = False
+            if seed is not None:
+                active_seed = seed
+                active_box = seed.box
+                points = _feature_points(gray, active_box)
+            elif (
+                active_seed is not None
+                and active_box is not None
+                and points is not None
+                and previous_gray is not None
+            ):
+                propagated = _propagate_points(previous_gray, gray, points)
+                if propagated is None:
+                    points = None
+                    active_box = None
+                else:
+                    previous_points, current_points = propagated
+                    active_box = _shift_box(
+                        active_box,
+                        previous_points,
+                        current_points,
+                        (gray.shape[1], gray.shape[0]),
+                    )
+                    points = current_points if active_box is not None else None
+                    propagated_successfully = active_box is not None
+            if (
+                propagated_successfully
+                and active_seed is not None
+                and active_box is not None
+                and points is not None
+            ):
+                local.append(
+                    _local_observation(
+                        frame_index,
+                        fps,
+                        mapping,
+                        active_seed,
+                        active_box,
+                    )
                 )
-                points = current_points if active_box is not None else None
-                propagated_successfully = active_box is not None
-        if (
-            propagated_successfully
-            and active_seed is not None
-            and active_box is not None
-            and points is not None
-        ):
-            local.append(
-                _local_observation(
-                    frame_index,
-                    fps,
-                    mapping,
-                    active_seed,
-                    active_box,
-                )
-            )
-        previous_gray = gray
+            previous_gray = gray
+    finally:
+        capture.release()
+    if decoded == 0:
+        raise ValueError("proxy contains no decodable frames")
+    if mapping.proxy_start + Decimal(decoded) / fps < candidate_proxy_end:
+        return base
     tracked = base.model_copy(
         update={
             "observations": tuple(local),

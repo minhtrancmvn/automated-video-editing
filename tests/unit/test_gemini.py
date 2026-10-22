@@ -520,6 +520,70 @@ def test_waits_from_processing_to_active_then_deletes_upload(
     assert fake_client.files.deleted == ["files/proxy-1"]
 
 
+def test_file_processing_wait_outlives_single_generation_attempt(
+    fake_client: FakeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert GeminiAdapter is not None
+    elapsed = [0.0]
+    delays: list[float] = []
+
+    def advance(seconds: float) -> None:
+        delays.append(seconds)
+        elapsed[0] += seconds
+
+    monkeypatch.setattr(
+        "video_editor.analysis.gemini.time.monotonic", lambda: elapsed[0]
+    )
+    adapter = GeminiAdapter(
+        fake_client, retry_policy=RetryPolicy(max_attempts=1), sleeper=advance
+    )
+    fake_client.files.get_responses.extend(
+        [FakeFiles.response(state="PROCESSING") for _ in range(7)]
+        + [FakeFiles.response(state="ACTIVE")]
+    )
+    upload = upload_active(adapter)
+
+    active = adapter.wait_until_active(upload)
+
+    assert active.state == "ACTIVE"
+    assert elapsed[0] == 35
+    assert delays == [5.0] * 7
+    assert fake_client.files.get_calls == 8
+    assert fake_client.models.calls == 0
+    assert adapter._retry_policy.max_attempts == 1
+
+
+def test_file_processing_timeout_stops_polling_at_deadline(
+    fake_client: FakeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert GeminiAdapter is not None
+    elapsed = [0.0]
+
+    def advance(seconds: float) -> None:
+        elapsed[0] += seconds
+
+    monkeypatch.setattr(
+        "video_editor.analysis.gemini.time.monotonic", lambda: elapsed[0]
+    )
+    adapter = GeminiAdapter(
+        fake_client, retry_policy=RetryPolicy(max_attempts=1), sleeper=advance
+    )
+    fake_client.files.get_responses.extend(
+        FakeFiles.response(state="PROCESSING") for _ in range(100)
+    )
+    upload = upload_active(adapter)
+
+    with pytest.raises(VideoEditorError) as caught:
+        adapter.wait_until_active(upload)
+
+    assert caught.value.code == "provider_file_timeout"
+    assert "300" in str(caught.value)
+    assert "PROCESSING" in str(caught.value)
+    assert elapsed[0] == 300
+    assert fake_client.files.get_calls == 60
+    assert fake_client.models.calls == 0
+
+
 def test_failed_file_processing_is_terminal_and_never_generates_content(
     adapter: Any, fake_client: FakeClient
 ) -> None:
@@ -758,7 +822,7 @@ def test_outgoing_candidate_request_has_no_unsupported_additional_properties(
     fake_client.models.responses.append(queued_response("refinement-response.json"))
 
     adapter.refine_candidate(
-        upload, candidate, candidate_request, fps=3, prompt_version="candidate-v2"
+        upload, candidate, candidate_request, fps=3, prompt_version="candidate-v3"
     )
 
     wire_keys = _outgoing_wire_keys(fake_client.models.requests[0])
@@ -825,7 +889,7 @@ def test_outgoing_schema_tells_model_how_to_write_timestamps(
     else:
         fake_client.models.responses.append(queued_response("refinement-response.json"))
         adapter.refine_candidate(
-            upload, candidate, candidate_request, fps=3, prompt_version="candidate-v2"
+            upload, candidate, candidate_request, fps=3, prompt_version="candidate-v3"
         )
 
     schema = fake_client.models.requests[0]["config"].response_schema
@@ -850,6 +914,44 @@ def _outgoing_wire_keys(request: dict[str, object]) -> set[str]:
     finally:
         client.close()
     return _wire_keys(wire)
+
+
+def test_broad_v2_prompt_states_serialized_nanosecond_interval(
+    adapter: Any,
+    fake_client: FakeClient,
+    broad_chunk: object,
+    broad_request: AnalysisRequestContext,
+):
+    upload = upload_active(adapter)
+    fake_client.models.responses.append(queued_response("broad-response.json"))
+
+    adapter.broad_scan(upload, broad_chunk, broad_request, prompt_version="broad-v2")
+    prompt = request_prompt(fake_client.models.requests[0])
+    assert "prompt_version: broad-v2" in prompt
+    assert "serialized interval: [0, 6] seconds" in prompt
+    assert "All returned timestamps must be within the serialized interval" in prompt
+
+
+def test_broad_v2_prompt_states_serialized_nanosecond_interval_details():
+    from video_editor.analysis.gemini import GeminiAdapter
+
+    end = Decimal("628.2240000000001600710675120")
+    context = AnalysisRequestContext(
+        reservation_id="r", job_id="j", manifest_id="m", mode="broad", chunk_id="c"
+    )
+
+    prompt = GeminiAdapter._prompt(
+        "broad-v2",
+        request=context,
+        chunk_id="c",
+        candidate_id=None,
+        start=Decimal(0),
+        end=end,
+    )
+
+    assert "interval: [0, 628.2240000000001600710675120] seconds" in prompt
+    assert "serialized interval: [0, 628.224] seconds" in prompt
+    assert "All returned timestamps must be within the serialized interval" in prompt
 
 
 def test_broad_prompt_is_versioned_bounded_and_forbids_semantic_expansion(
@@ -895,7 +997,7 @@ def test_candidate_request_uses_bounded_fps_and_duration_string_offsets(
         candidate,
         candidate_request,
         fps=fps,
-        prompt_version="candidate-v2",
+        prompt_version="candidate-v3",
     )
 
     assert CandidateRefinementResponse is not None
@@ -912,6 +1014,45 @@ def test_candidate_request_uses_bounded_fps_and_duration_string_offsets(
     assert result.response.candidate_id == "candidate-1"
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("start", "1.1"),
+        ("end", "3.4"),
+        ("candidate_id", "private-id"),
+        ("chunk_id", "private-chunk"),
+    ],
+)
+def test_candidate_rejects_only_mismatching_fields_and_retains_usage(
+    adapter: Any,
+    fake_client: FakeClient,
+    candidate: object,
+    candidate_request: AnalysisRequestContext,
+    field: str,
+    value: str,
+) -> None:
+    upload = upload_active(adapter)
+    payload = fixture_payload("refinement-response.json")
+    payload[field] = value
+    fake_client.models.responses.extend([ParsedResponse(parsed=payload)] * 2)
+
+    with pytest.raises(VideoEditorError) as caught:
+        adapter.refine_candidate(
+            upload, candidate, candidate_request, fps=3, prompt_version="candidate-v3"
+        )
+
+    details = caught.value.safe_details
+    diagnostic = json.loads(details["diagnostic"])
+    assert diagnostic["reason"] == "semantic_validation"
+    assert diagnostic["fields"] == [field]
+    assert (
+        json.loads(details["usage"])["reservation_id"]
+        == candidate_request.reservation_id
+    )
+    assert "private-id" not in json.dumps(details)
+    assert "private-chunk" not in json.dumps(details)
+
+
 def test_candidate_prompt_is_versioned_and_bounds_speech_meaning(
     adapter: Any,
     fake_client: FakeClient,
@@ -926,13 +1067,13 @@ def test_candidate_prompt_is_versioned_and_bounds_speech_meaning(
         candidate,
         candidate_request,
         fps=3,
-        prompt_version="candidate-v2",
+        prompt_version="candidate-v3",
     )
 
     prompt = request_prompt(fake_client.models.requests[0])
     for required in (
         "mode: candidate",
-        "prompt_version: candidate-v2",
+        "prompt_version: candidate-v3",
         "reservation_id: reservation-candidate-1",
         "job_id: job-1",
         "chunk_id: chunk-1",
@@ -940,6 +1081,8 @@ def test_candidate_prompt_is_versioned_and_bounds_speech_meaning(
         "interval: [1, 3.5] seconds",
         "Return only JSON",
         "Speech meaning may be summarized only for this candidate interval",
+        "Echo chunk_id, candidate_id, start, and end exactly as requested",
+        "Do not narrow or shift the requested interval",
         "Do not identify any person",
     ):
         assert required in prompt
@@ -947,7 +1090,7 @@ def test_candidate_prompt_is_versioned_and_bounds_speech_meaning(
 
 @pytest.mark.parametrize(
     ("operation", "prompt_version"),
-    [("broad", "broad-v2"), ("candidate", "candidate-v1")],
+    [("broad", "broad-v3"), ("candidate", "candidate-v1")],
 )
 def test_unknown_prompt_version_is_rejected_before_generation(
     adapter: Any,
@@ -995,6 +1138,36 @@ def test_generation_refuses_missing_or_mismatched_reservation_before_provider_ca
 
     assert caught.value.code == "reservation_identity_mismatch"
     assert fake_client.models.calls == 0
+
+
+def test_invalid_response_keeps_usage_and_safe_validation_fields(
+    adapter: Any,
+    fake_client: FakeClient,
+    broad_chunk: object,
+    broad_request: AnalysisRequestContext,
+) -> None:
+    upload = upload_active(adapter)
+    payload = fixture_payload("broad-response.json")
+    payload[SECRET] = "private response content"
+    payload["scenes"][0]["start"] = "private timestamp content"
+    fake_client.models.responses.extend([ParsedResponse(parsed=payload)] * 2)
+
+    with pytest.raises(VideoEditorError) as caught:
+        adapter.broad_scan(
+            upload, broad_chunk, broad_request, prompt_version="broad-v1"
+        )
+
+    details = caught.value.safe_details
+    usage = json.loads(details["usage"])
+    diagnostic = json.loads(details["diagnostic"])
+    assert usage["reservation_id"] == broad_request.reservation_id
+    assert len(usage["attempts"]) == 2
+    assert not usage["has_unknown_billing"]
+    assert usage["actual_cost_usd"] is not None
+    assert diagnostic["reason"] == "schema_validation"
+    assert "start" in diagnostic["fields"]
+    assert SECRET not in json.dumps(details)
+    assert "private" not in json.dumps(details)
 
 
 def test_semantic_response_failure_receives_one_repair_only(
@@ -1438,7 +1611,7 @@ def test_candidate_estimate_uses_five_fps_over_its_interval() -> None:
     )
 
     estimated_tokens = adapter.maximum_request_cost(
-        "manifest-1", candidate_interval, prompt_version="candidate-v2"
+        "manifest-1", candidate_interval, prompt_version="candidate-v3"
     ) * Decimal(1_000_000)
 
     # Ceiling of 2.5 s at 5 FPS is 13 frames; broad 0.5 FPS would be 2 frames.
@@ -1500,7 +1673,7 @@ def test_candidate_generation_has_same_output_cap(
     fake_client.models.responses.append(queued_response("refinement-response.json"))
 
     adapter.refine_candidate(
-        upload, candidate, candidate_request, fps=5, prompt_version="candidate-v2"
+        upload, candidate, candidate_request, fps=5, prompt_version="candidate-v3"
     )
 
     assert fake_client.models.requests[0]["config"].max_output_tokens == 8192

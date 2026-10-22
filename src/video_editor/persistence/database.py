@@ -954,6 +954,8 @@ class JobStore:
         self,
         connection: sqlite3.Connection,
         reservation: RequestReservation,
+        *,
+        predecessor_request_id: str | None = None,
     ) -> str | None:
         cached = connection.execute(
             """SELECT 1 FROM analysis_results
@@ -961,6 +963,8 @@ class JobStore:
             (reservation.job_id, reservation.cache_key),
         ).fetchone()
         if cached is not None:
+            if predecessor_request_id is not None:
+                raise ValueError("validated result cannot be retried")
             return None
         existing_rows = connection.execute(
             """SELECT request_id, job_id, cache_key, mode, status,
@@ -970,22 +974,64 @@ class JobStore:
             (reservation.request_id, reservation.job_id, reservation.cache_key),
         ).fetchall()
         maximum = _usd_to_microusd(reservation.maximum_cost_usd, ROUND_CEILING)
-        if existing_rows:
-            if len(existing_rows) != 1:
-                raise ValueError("request ID or cache key is already assigned")
-            existing = existing_rows[0]
+        matching = next(
+            (
+                row
+                for row in existing_rows
+                if row["request_id"] == reservation.request_id
+            ),
+            None,
+        )
+        if matching is not None:
             if (
-                existing["request_id"] != reservation.request_id
-                or existing["job_id"] != reservation.job_id
-                or existing["cache_key"] != reservation.cache_key
-                or existing["mode"] != reservation.mode
-                or int(existing["maximum_cost_microusd"]) != maximum
-                or existing["data_json"] != reservation.model_dump_json()
+                matching["job_id"] != reservation.job_id
+                or matching["cache_key"] != reservation.cache_key
+                or matching["mode"] != reservation.mode
+                or int(matching["maximum_cost_microusd"]) != maximum
+                or matching["data_json"] != reservation.model_dump_json()
             ):
                 raise ValueError("existing reservation does not match request fields")
-            if existing["status"] == "reserved":
-                return str(existing["request_id"])
+            if predecessor_request_id is not None:
+                link = connection.execute(
+                    """SELECT predecessor_request_id FROM analysis_request_retries
+                    WHERE successor_request_id = ?""",
+                    (reservation.request_id,),
+                ).fetchone()
+                if (
+                    link is None
+                    or link["predecessor_request_id"] != predecessor_request_id
+                ):
+                    raise ValueError("existing retry does not match predecessor")
+            if matching["status"] == "reserved":
+                return str(matching["request_id"])
             raise ValueError("existing request is not dispatchable")
+        if predecessor_request_id is None:
+            if existing_rows:
+                raise ValueError("request ID or cache key is already assigned")
+        else:
+            predecessor = self._request_for_update(connection, predecessor_request_id)
+            if (
+                predecessor["job_id"] != reservation.job_id
+                or predecessor["cache_key"] != reservation.cache_key
+                or predecessor["mode"] != reservation.mode
+                or predecessor["status"] != "released"
+                or predecessor["actual_cost_microusd"] != 0
+                or predecessor_request_id == reservation.request_id
+            ):
+                raise ValueError(
+                    "retry requires same-identity confirmed nonbillable predecessor"
+                )
+            if (
+                connection.execute(
+                    """SELECT 1 FROM analysis_request_retries
+                WHERE predecessor_request_id = ?""",
+                    (predecessor_request_id,),
+                ).fetchone()
+                is not None
+            ):
+                raise ValueError("predecessor already has a successor")
+            if any(row["status"] != "released" for row in existing_rows):
+                raise ValueError("cache identity has an unreleased request")
         account = connection.execute(
             """SELECT limit_microusd, spent_microusd, reserved_microusd
             FROM budget_accounts WHERE job_id = ?""",
@@ -1021,7 +1067,34 @@ class JobStore:
             SET reserved_microusd = reserved_microusd + ? WHERE job_id = ?""",
             (maximum, reservation.job_id),
         )
+        if predecessor_request_id is not None:
+            connection.execute(
+                """INSERT INTO analysis_request_retries(
+                    predecessor_request_id, successor_request_id
+                ) VALUES (?, ?)""",
+                (predecessor_request_id, reservation.request_id),
+            )
         return reservation.request_id
+
+    def reserve_retry_request(
+        self,
+        reservation: RequestReservation,
+        *,
+        predecessor_request_id: str,
+    ) -> str | None:
+        """Explicitly reserve a successor to a confirmed nonbillable attempt."""
+        connection = self.connection
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            request_id = self._reserve_request(
+                connection, reservation, predecessor_request_id=predecessor_request_id
+            )
+        except BaseException:
+            connection.rollback()
+            raise
+        else:
+            connection.commit()
+            return request_id
 
     def reserve_request(self, reservation: RequestReservation) -> str | None:
         """Reserve a request maximum under an immediate SQLite write lock."""

@@ -13,6 +13,7 @@ from typing import Literal, cast
 from pydantic import ValidationError
 
 from video_editor.analysis.budget import reserve_all_uncached_broad_requests
+from video_editor.analysis.diagnostics import validation_errors
 from video_editor.analysis.models import (
     AnalysisChunkData,
     AnalysisModel,
@@ -366,6 +367,96 @@ def _provider_error_usage(error: VideoEditorError) -> ProviderUsage | None:
         return None
 
 
+def _persist_failure_evidence(
+    store: JobStore,
+    request_id: str,
+    error: VideoEditorError,
+    usage: ProviderUsage | None,
+) -> None:
+    row = store.connection.execute(
+        "SELECT job_id FROM analysis_requests WHERE request_id = ?", (request_id,)
+    ).fetchone()
+    if row is None:
+        raise KeyError("failure has no persisted request")
+    known_codes = {
+        "provider_response_invalid",
+        "provider_authentication",
+        "provider_invalid_request",
+        "provider_invalid_upload_stream",
+        "provider_file_not_found",
+        "provider_file_reupload_required",
+        "provider_file_timeout",
+        "provider_file_failed",
+        "provider_network",
+        "provider_unavailable",
+        "provider_rate_limited",
+        "pricing_unknown",
+    }
+    payload: dict[str, object] = {
+        "request_id": request_id,
+        "code": error.code if error.code in known_codes else "provider_failure",
+    }
+    try:
+        raw = json.loads(error.safe_details.get("diagnostic", "{}"))
+    except (TypeError, ValueError):
+        raw = {}
+    if isinstance(raw, dict):
+        reason = raw.get("reason")
+        if reason in {"schema_validation", "semantic_validation"}:
+            fields = (
+                set(BroadScanResponse.model_fields)
+                | set(CandidateRefinementResponse.model_fields)
+                | {
+                    "time",
+                    "x",
+                    "y",
+                    "w",
+                    "h",
+                    "priority",
+                    "scene_id",
+                    "summary",
+                    "actions",
+                    "setting",
+                    "scenic_interest",
+                    "human_interaction",
+                    "story_milestone",
+                    "technical_problems",
+                    "vertical_suitability",
+                    "category",
+                    "reason",
+                }
+            )
+            entries = raw.get("fields", [])
+            diagnostic: dict[str, object] = {
+                "reason": reason,
+                "fields": sorted(
+                    {f for f in entries if isinstance(f, str) and f in fields}
+                )[:16]
+                if isinstance(entries, list)
+                else [],
+            }
+            if "errors" in raw:
+                diagnostic["errors"] = validation_errors(raw["errors"])
+            if raw.get("finish_reason") in {
+                "STOP",
+                "MAX_TOKENS",
+                "SAFETY",
+                "RECITATION",
+                "OTHER",
+            }:
+                diagnostic["finish_reason"] = raw["finish_reason"]
+            payload["diagnostic"] = diagnostic
+    if usage is not None:
+        payload["usage"] = usage.safe_payload()
+    # Use persisted identities, never provider text, to name diagnostic files.
+    root = store.db_path.parent / "analysis-failures" / row["job_id"]
+    root.mkdir(parents=True, exist_ok=True)
+    filename = f"analysis-failure-{request_id}.json"
+    path = root / filename
+    path.write_text(json.dumps(payload, sort_keys=True) + "\n")
+    store.save_artifact(row["job_id"], "analyze", path, {"code": payload["code"]})
+
+
 def _record_provider_failure(
     store: JobStore,
     request_id: str,
@@ -384,6 +475,7 @@ def _record_provider_failure(
         store.release_confirmed_nonbillable(request_id)
     else:
         store.mark_request_billing_unknown(request_id)
+    _persist_failure_evidence(store, request_id, error, usage)
 
 
 def _persist_broad_result(
@@ -720,16 +812,27 @@ def run_candidate_refinement(
                 prompt_version=identity.prompt_version,
             )
             response = result.response
-            if (
-                response.chunk_id != request.candidate.chunk_id
-                or response.candidate_id != request.candidate.candidate_id
-                or response.start != request.candidate.start
-                or response.end != request.candidate.end
-            ):
+            mismatches = [
+                field
+                for field in ("chunk_id", "candidate_id", "start", "end")
+                if getattr(response, field) != getattr(request.candidate, field)
+            ]
+            if mismatches:
                 raise VideoEditorError(
                     ErrorCategory.ANALYSIS,
                     "candidate response is outside requested identity or interval",
                     code="provider_response_invalid",
+                    safe_details={
+                        "usage": json.dumps(
+                            result.usage.safe_payload(), sort_keys=True
+                        ),
+                        "diagnostic": json.dumps(
+                            {
+                                "reason": "semantic_validation",
+                                "fields": sorted(mismatches),
+                            }
+                        ),
+                    },
                 )
             _persist_candidate_result(
                 store,

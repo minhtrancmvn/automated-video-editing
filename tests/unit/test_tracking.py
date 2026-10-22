@@ -193,7 +193,15 @@ def test_occlusion_holds_then_eases_center_without_jump(tmp_path: Path) -> None:
     assert max(hold_times) - min(hold_times) <= D("2")
     assert after_loss[0].fallback == "hold"
     assert "ease_center" in [item.fallback for item in after_loss]
-    assert after_loss[0].center_x == track.keyframes[loss_index - 1].center_x
+    before_loss = track.keyframes[loss_index - 1]
+    elapsed = after_loss[0].time - before_loss.time
+    width_ratio = D(track.crop_width) / D(track.source_width)
+    assert abs(after_loss[0].center_x - before_loss.center_x) <= (
+        CropSettings().max_velocity_widths_per_second * width_ratio * elapsed
+    )
+    assert validate_crop_track(track, settings=CropSettings()).max_acceleration <= D(
+        "0.50"
+    )
 
 
 def test_validation_requires_95_percent_local_retention_inside_five_percent_margin() -> (

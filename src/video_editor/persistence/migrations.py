@@ -92,6 +92,42 @@ MIGRATIONS = (
             )""",
         ),
     ),
+    Migration(
+        version=3,
+        statements=(
+            """CREATE TABLE analysis_requests_v3 (
+                request_id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                cache_key TEXT NOT NULL,
+                mode TEXT NOT NULL CHECK(mode IN ('broad', 'candidate')),
+                status TEXT NOT NULL CHECK(status IN (
+                    'reserved', 'dispatched', 'completed', 'released',
+                    'billing_unknown'
+                )),
+                maximum_cost_microusd INTEGER NOT NULL
+                    CHECK(maximum_cost_microusd >= 0),
+                actual_cost_microusd INTEGER CHECK(actual_cost_microusd >= 0),
+                data_json TEXT NOT NULL
+            )""",
+            """INSERT INTO analysis_requests_v3 SELECT
+                request_id, job_id, cache_key, mode, status,
+                maximum_cost_microusd, actual_cost_microusd, data_json
+                FROM analysis_requests""",
+            "DROP TABLE analysis_requests",
+            "ALTER TABLE analysis_requests_v3 RENAME TO analysis_requests",
+            """CREATE UNIQUE INDEX analysis_requests_active_key
+                ON analysis_requests(job_id, cache_key) WHERE status != 'released'""",
+            """CREATE INDEX analysis_requests_history_key
+                ON analysis_requests(job_id, cache_key)""",
+            """CREATE TABLE analysis_request_retries (
+                predecessor_request_id TEXT PRIMARY KEY
+                    REFERENCES analysis_requests(request_id),
+                successor_request_id TEXT NOT NULL UNIQUE
+                    REFERENCES analysis_requests(request_id),
+                CHECK(predecessor_request_id != successor_request_id)
+            )""",
+        ),
+    ),
 )
 LATEST_MIGRATION_VERSION = MIGRATIONS[-1].version
 

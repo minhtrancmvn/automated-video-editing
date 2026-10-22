@@ -5,7 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import wave
-from collections.abc import Iterable
+from collections.abc import Generator, Iterable
+from contextlib import closing
 from dataclasses import asdict, dataclass
 from decimal import Decimal
 from itertools import pairwise
@@ -26,7 +27,7 @@ from video_editor.analysis.models import (
 )
 from video_editor.media.proxies import ProxyMapping
 
-_IMPLEMENTATION_VERSION = "local-segmentation-v3"
+_IMPLEMENTATION_VERSION = "local-segmentation-v4"
 _ZERO = Decimal(0)
 
 
@@ -125,6 +126,10 @@ def _map_time(value: Decimal, mapping: ProxyMapping) -> Decimal:
     source_duration = mapping.source_end - mapping.source_start
     if proxy_duration <= 0 or source_duration <= 0:
         raise ValueError("proxy mapping intervals must be positive")
+    if value == mapping.proxy_start:
+        return mapping.source_start
+    if value == mapping.proxy_end:
+        return mapping.source_end
     return mapping.source_start + (
         (value - mapping.proxy_start) * source_duration / proxy_duration
     )
@@ -181,11 +186,11 @@ def _scored(
 
 def _read_video(
     proxy: Path, settings: SegmentationSettings
-) -> tuple[list[tuple[Decimal, NDArray[np.uint8]]], Decimal]:
+) -> tuple[Generator[tuple[Decimal, NDArray[np.uint8]], None, None], Decimal]:
     capture = cv2.VideoCapture(str(proxy))
-    if not capture.isOpened():
-        raise ValueError(f"cannot decode proxy: {proxy}")
     try:
+        if not capture.isOpened():
+            raise ValueError(f"cannot decode proxy: {proxy}")
         fps = capture.get(cv2.CAP_PROP_FPS)
         frame_count = capture.get(cv2.CAP_PROP_FRAME_COUNT)
         if (
@@ -196,22 +201,34 @@ def _read_video(
         ):
             raise ValueError("proxy has invalid frame timing")
         duration = Decimal(str(frame_count)) / Decimal(str(fps))
-        step = Decimal(1) / Decimal(settings.sample_fps)
-        samples: list[tuple[Decimal, NDArray[np.uint8]]] = []
-        timestamp = _ZERO
-        while timestamp < duration:
-            capture.set(cv2.CAP_PROP_POS_MSEC, float(timestamp * 1000))
-            ok, decoded = capture.read()
-            if not ok:
-                break
-            frame = cast(NDArray[np.uint8], decoded)
-            samples.append((timestamp, frame))
-            timestamp += step
     finally:
         capture.release()
-    if not samples:
-        raise ValueError("proxy contains no decodable frames")
-    return samples, duration
+
+    def samples() -> Generator[tuple[Decimal, NDArray[np.uint8]], None, None]:
+        stream = cv2.VideoCapture(str(proxy))
+        try:
+            if not stream.isOpened():
+                raise ValueError(f"cannot decode proxy: {proxy}")
+            step = Decimal(1) / Decimal(settings.sample_fps)
+            target = _ZERO
+            decoded_index = 0
+            sampled = False
+            while target < duration:
+                ok, decoded = stream.read()
+                if not ok:
+                    break
+                timestamp = Decimal(decoded_index) / Decimal(str(fps))
+                if timestamp >= target:
+                    sampled = True
+                    yield target, cast(NDArray[np.uint8], decoded)
+                    target += step
+                decoded_index += 1
+            if not sampled:
+                raise ValueError("proxy contains no decodable frames")
+        finally:
+            stream.release()
+
+    return samples(), duration
 
 
 def _histogram(frame: NDArray[np.uint8]) -> NDArray[np.float32]:
@@ -224,14 +241,19 @@ def _histogram(frame: NDArray[np.uint8]) -> NDArray[np.float32]:
 
 
 def _scene_ranges(
-    samples: list[tuple[Decimal, NDArray[np.uint8]]],
+    samples: Iterable[tuple[Decimal, NDArray[np.uint8]]],
     duration: Decimal,
     mapping: ProxyMapping,
     settings: SegmentationSettings,
 ) -> tuple[IntervalEvidence, ...]:
     boundaries = [mapping.proxy_start]
-    previous = _histogram(samples[0][1])
-    for timestamp, frame in samples[1:]:
+    iterator = iter(samples)
+    first = next(iterator, None)
+    if first is None:
+        raise ValueError("proxy contains no samples within mapped interval")
+    previous = _histogram(first[1])
+    del first
+    for timestamp, frame in iterator:
         current = _histogram(frame)
         discontinuity = cv2.compareHist(previous, current, cv2.HISTCMP_BHATTACHARYYA)
         if discontinuity >= settings.scene_threshold:
@@ -247,7 +269,7 @@ def _scene_ranges(
 
 
 def _frame_evidence(
-    samples: list[tuple[Decimal, NDArray[np.uint8]]],
+    samples: Iterable[tuple[Decimal, NDArray[np.uint8]]],
     duration: Decimal,
     mapping: ProxyMapping,
     settings: SegmentationSettings,
@@ -394,9 +416,12 @@ def _audio_evidence(
     audio_duration = Decimal(frame_count) / Decimal(sample_rate)
     mapped_duration = mapping.proxy_end - mapping.proxy_start
     sample_tolerance = Decimal(1) / Decimal(sample_rate)
+    # Encoded video/container tails can outlast decoded audio by a few milliseconds.
+    # Allow only a bounded shortfall; evidence still ends at the decoded samples.
+    tail_tolerance = max(sample_tolerance, Decimal("0.05"))
     if (
         audio_duration > mapped_duration
-        or mapped_duration - audio_duration > sample_tolerance
+        or mapped_duration - audio_duration > tail_tolerance
     ):
         raise ValueError("analysis audio duration does not match mapping")
     window_samples = max(1, int(sample_rate * settings.audio_window_seconds))
@@ -523,19 +548,33 @@ def segment_media(
     mapped_duration = mapping.proxy_end - mapping.proxy_start
     # Encoders may emit up to two trailing frames past the mapped end; samples at or
     # after proxy_end are dropped below, so evidence stays mapping-anchored.
-    overshoot_limit = max(Decimal("0.05"), 2 / _frame_rate(proxy))
-    difference = duration - mapped_duration
-    if difference < Decimal("-0.05") or difference > overshoot_limit:
-        raise ValueError("decoded proxy duration does not match mapping")
-    samples = [
-        (timestamp + mapping.proxy_start, frame)
-        for timestamp, frame in samples
-        if timestamp + mapping.proxy_start < mapping.proxy_end
-    ]
-    if not samples:
-        raise ValueError("proxy contains no samples within mapped interval")
-    scenes = _scene_ranges(samples, mapping.proxy_end, mapping, active)
-    video = _frame_evidence(samples, mapping.proxy_end, mapping, active)
+    with closing(samples):
+        overshoot_limit = max(Decimal("0.05"), 2 / _frame_rate(proxy))
+        difference = duration - mapped_duration
+        if difference < Decimal("-0.05") or difference > overshoot_limit:
+            raise ValueError("decoded proxy duration does not match mapping")
+        scenes = _scene_ranges(
+            (
+                (timestamp + mapping.proxy_start, frame)
+                for timestamp, frame in samples
+                if timestamp + mapping.proxy_start < mapping.proxy_end
+            ),
+            mapping.proxy_end,
+            mapping,
+            active,
+        )
+    samples, _ = _read_video(proxy, active)
+    with closing(samples):
+        video = _frame_evidence(
+            (
+                (timestamp + mapping.proxy_start, frame)
+                for timestamp, frame in samples
+                if timestamp + mapping.proxy_start < mapping.proxy_end
+            ),
+            mapping.proxy_end,
+            mapping,
+            active,
+        )
     energy, silence, speech, transients = _audio_evidence(
         audio, mapping, active, mapping.proxy_start
     )

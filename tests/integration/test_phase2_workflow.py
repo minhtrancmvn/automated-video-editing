@@ -46,6 +46,7 @@ class FakeAnalysisProvider:
     invalid_broad: bool = False
     timeout_broad: bool = False
     multiple_shorts: bool = False
+    duplicate_candidate_ids: bool = False
     unknown_billing: bool = False
     uploads: int = 0
     broad_calls: int = 0
@@ -106,6 +107,42 @@ class FakeAnalysisProvider:
         start = D(str(chunk.proxy_start))
         end = D(str(chunk.proxy_end))
         step = (end - start) / 4
+        if self.duplicate_candidate_ids:
+            fixture = self._fixture_json("multi-short-broad.json")
+            candidates = [
+                {
+                    "candidate_id": str(item["candidate_id"]),
+                    "start": format(start + step * index, "f"),
+                    "end": format(start + step * (index + 1), "f"),
+                    "category": str(item["category"]),
+                    "reason": str(item["reason"]),
+                    "confidence": float(item["confidence"]),
+                }
+                for index, item in enumerate(fixture["candidates"])
+            ]
+            scenes = [
+                {
+                    **scene,
+                    "scene_id": f"{request.chunk_id}-{scene['scene_id']}",
+                    "start": format(start + step * D(str(scene["start"])), "f"),
+                    "end": format(start + step * D(str(scene["end"])), "f"),
+                    "summary": f"{request.chunk_id} {scene['summary']}",
+                    "setting": f"{request.chunk_id} {scene['setting']}",
+                }
+                for scene in fixture["scenes"]
+            ]
+            return ProviderResult(
+                response=BroadScanResponse.model_validate(
+                    {
+                        "schema_version": "broad-v1",
+                        "chunk_id": request.chunk_id,
+                        "scenes": scenes,
+                        "speech_presence_ranges": [],
+                        "candidates": candidates,
+                    }
+                ),
+                usage=_usage(request.reservation_id),
+            )
         if self.invalid_broad:
             return ProviderResult(
                 response=BroadScanResponse.model_validate(
@@ -372,6 +409,214 @@ def _source_digests(input_dir: Path) -> dict[str, str]:
         path.name: hashlib.sha256(path.read_bytes()).hexdigest()
         for path in sorted(input_dir.glob("*.mp4"))
     }
+
+
+def test_segmentation_preserves_exact_persisted_source_endpoint(
+    phase2: Phase2Env,
+) -> None:
+    job_id = phase2.service._new_job(phase2.input_dir)
+    phase2.service._ensure_inspect(job_id, phase2.input_dir)
+    proxied = phase2.service._ensure_proxy(job_id)
+    endpoint = "8.0324669999999969149939715862274169921875"
+    for artifact in proxied["artifacts"]:
+        artifact["mapping"]["source_end"] = endpoint
+        artifact["mapping"]["proxy_end"] = endpoint
+    for artifact in _artifacts(phase2.store.get_job(job_id), "proxy"):
+        metadata = artifact["metadata"]
+        metadata["mapping"]["source_end"] = endpoint
+        metadata["mapping"]["proxy_end"] = endpoint
+        phase2.store.save_artifact(job_id, "proxy", Path(artifact["path"]), metadata)
+
+    segmented = phase2.service._ensure_segment(job_id, proxied)
+
+    assert all(D(chunk["source_end"]) == D(endpoint) for chunk in segmented["chunks"])
+    for path in segmented["segmentations"].values():
+        evidence = json.loads(Path(path).read_text())
+        assert D(evidence["scenes"][-1]["source_range"]["end"]) == D(endpoint)
+    assert phase2.provider.uploads == 0
+
+
+@pytest.mark.parametrize("damage", [None, "tampered", "missing", "stale_mapping"])
+def test_interrupted_segmentation_reuses_only_valid_registered_chunks(
+    phase2: Phase2Env, monkeypatch: pytest.MonkeyPatch, damage: str | None
+) -> None:
+    before = _source_digests(phase2.input_dir)
+    job_id = phase2.service._new_job(phase2.input_dir)
+    phase2.service._ensure_inspect(job_id, phase2.input_dir)
+    proxied = phase2.service._ensure_proxy(job_id)
+    real_register = workflow_module.register_proxy_manifest
+    real_create = workflow_module.create_cloud_proxy_chunk
+    creations: list[str] = []
+
+    def counted_create(*args: Any, **kwargs: Any) -> Any:
+        creations.append(str(args[2].source_id))
+        return real_create(*args, **kwargs)
+
+    def interrupt_after_registration(*args: Any, **kwargs: Any) -> None:
+        real_register(*args, **kwargs)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(workflow_module, "create_cloud_proxy_chunk", counted_create)
+    monkeypatch.setattr(
+        workflow_module, "register_proxy_manifest", interrupt_after_registration
+    )
+    with pytest.raises(VideoEditorError) as caught:
+        phase2.service._ensure_segment(job_id, proxied)
+    assert caught.value.interrupted
+    interrupted = phase2.store.get_job(job_id)
+    assert interrupted["stages"]["segment"]["status"] == "interrupted"
+    assert len(interrupted["proxy_manifests"]) == 1
+    registered = interrupted["proxy_manifests"][0]
+    path = Path(registered["data"]["artifact_path"])
+    facts = (
+        path.stat().st_ino,
+        path.stat().st_mtime_ns,
+        hashlib.sha256(path.read_bytes()).hexdigest(),
+    )
+    monkeypatch.setattr(workflow_module, "register_proxy_manifest", real_register)
+    if damage == "tampered":
+        path.write_bytes(path.read_bytes() + b"tampered")
+    elif damage == "missing":
+        path.unlink()
+    elif damage == "stale_mapping":
+        data = registered["data"]
+        data["upstream_settings_hash"] = "stale"
+        phase2.store.connection.execute(
+            "UPDATE proxy_manifests SET data_json = ? WHERE manifest_id = ?",
+            (json.dumps(data), registered["manifest_id"]),
+        )
+        phase2.store.connection.commit()
+    if damage:
+        with pytest.raises(VideoEditorError) as rejected:
+            phase2.service._ensure_segment(job_id, proxied)
+        assert rejected.value.code == "unsafe_upload_candidate"
+        assert len(creations) == 1
+    else:
+        segmented = phase2.service._ensure_segment(job_id, proxied)
+        assert len(creations) == 2
+        assert len(segmented["chunks"]) == 2
+        assert segmented["chunks"][0]["manifest_id"] == registered["manifest_id"]
+        assert facts == (
+            path.stat().st_ino,
+            path.stat().st_mtime_ns,
+            hashlib.sha256(path.read_bytes()).hexdigest(),
+        )
+        assert len(phase2.store.get_job(job_id)["proxy_manifests"]) == 2
+    assert phase2.provider.uploads == 0
+    assert _source_digests(phase2.input_dir) == before
+    assert (
+        phase2.store.connection.execute("SELECT count(*) FROM jobs").fetchone()[0] == 1
+    )
+
+
+def test_exact_echo_version_preserves_broad_cache_and_old_unknown_hold(
+    phase2: Phase2Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert workflow_module.CANDIDATE_PROMPT_VERSION == "candidate-v4"
+    job_id = phase2.service._new_job(phase2.input_dir)
+    phase2.service._ensure_inspect(job_id, phase2.input_dir)
+    proxied = phase2.service._ensure_proxy(job_id)
+    segmented = phase2.service._ensure_segment(job_id, proxied)
+
+    def failed_refinement(*_args: Any, **_kwargs: Any) -> Any:
+        raise VideoEditorError(
+            ErrorCategory.PROVIDER,
+            "offline unknown outcome",
+            code="provider_unavailable",
+        )
+
+    with monkeypatch.context() as old:
+        old.setattr(workflow_module, "CANDIDATE_PROMPT_VERSION", "candidate-v3")
+        old.setattr(phase2.provider, "refine_candidate", failed_refinement)
+        with pytest.raises(VideoEditorError):
+            phase2.service._ensure_analyze(job_id, segmented)
+    connection = phase2.store.connection
+    old_request = dict(
+        connection.execute(
+            "SELECT * FROM analysis_requests WHERE job_id = ? AND mode = 'candidate'",
+            (job_id,),
+        ).fetchone()
+    )
+    assert old_request["status"] == "billing_unknown"
+    broad_rows = [
+        dict(row)
+        for row in connection.execute(
+            "SELECT * FROM analysis_results WHERE job_id = ? AND mode = 'broad' ORDER BY rowid",
+            (job_id,),
+        )
+    ]
+    broad_calls = phase2.provider.broad_calls
+    held = phase2.store.budget_state(job_id).reserved_usd
+
+    analyzed = phase2.service._ensure_analyze(job_id, segmented)
+
+    assert analyzed["coverage"]["complete"]
+    assert len(analyzed["candidates"]) == 8
+    assert phase2.provider.broad_calls == broad_calls
+    assert [
+        dict(row)
+        for row in connection.execute(
+            "SELECT * FROM analysis_results WHERE job_id = ? AND mode = 'broad' ORDER BY rowid",
+            (job_id,),
+        )
+    ] == broad_rows
+    assert (
+        dict(
+            connection.execute(
+                "SELECT * FROM analysis_requests WHERE request_id = ?",
+                (old_request["request_id"],),
+            ).fetchone()
+        )
+        == old_request
+    )
+    assert phase2.store.budget_state(job_id).reserved_usd == held
+    candidates = connection.execute(
+        "SELECT data_json FROM analysis_results WHERE job_id = ? AND mode = 'candidate'",
+        (job_id,),
+    ).fetchall()
+    assert len(candidates) == 8
+    assert all(
+        json.loads(row[0])["prompt_version"] == "candidate-v4" for row in candidates
+    )
+    assert all(
+        json.loads(row[0])["response_schema_version"] == "candidate-v2"
+        for row in candidates
+    )
+
+
+def test_phase2_duplicate_candidate_ids_are_chunk_qualified(
+    phase2: Phase2Env,
+) -> None:
+    phase2.provider.duplicate_candidate_ids = True
+    job_id = phase2.service._new_job(phase2.input_dir)
+    phase2.service._ensure_inspect(job_id, phase2.input_dir)
+    proxied = phase2.service._ensure_proxy(job_id)
+    segmented = phase2.service._ensure_segment(job_id, proxied)
+
+    analyzed = phase2.service._ensure_analyze(job_id, segmented)
+    ranked = phase2.service._ensure_rank(job_id, segmented, analyzed)
+
+    candidates = analyzed["candidates"]
+    assert len(candidates) == 8
+    assert len({item["refined"]["candidate_id"] for item in candidates}) == 8
+    assert all(
+        item["broad"]["candidate_id"] == item["refined"]["candidate_id"]
+        for item in candidates
+    )
+    for item in candidates:
+        chunk_id = item["chunk_id"]
+        assert item["refined"]["candidate_id"].startswith(f"phase2:{chunk_id}:")
+        assert all(
+            scene["scene_id"].startswith(f"{chunk_id}-") for scene in item["scenes"]
+        )
+    assert len(ranked["ranked"]) == 8
+    assert len({item["candidate_id"] for item in ranked["ranked"]}) == 8
+    planned = phase2.service._ensure_highlight_plan(job_id, proxied, analyzed, ranked)
+    assert planned["plans"]
+    assert len({track["clip_id"] for track in planned["tracks"]}) == len(
+        planned["tracks"]
+    )
+    assert phase2.provider.candidate_calls == 8
 
 
 def test_phase2_stage_order_and_complete_outputs(phase2: Phase2Env) -> None:

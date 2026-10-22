@@ -14,6 +14,7 @@ from pydantic import (
     Field,
     StrictBool,
     ValidationError,
+    field_serializer,
     field_validator,
     model_validator,
 )
@@ -453,6 +454,11 @@ class CropKeyframe(_V2PlanModel):
     def validate_decimal_fields(cls, value: Any) -> Decimal:
         """Parse crop values with exact finite decimal rules."""
         return _decimal(value)
+
+    @field_serializer("time", "center_x", "center_y", when_used="json")
+    def serialize_decimal_fields(self, value: Decimal) -> str:
+        """Write exact plain decimals without quantizing crop motion."""
+        return format(value, "f")
 
 
 class FramingV2(_V2PlanModel):

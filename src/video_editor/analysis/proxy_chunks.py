@@ -28,6 +28,7 @@ from video_editor.errors import ErrorCategory, VideoEditorError
 from video_editor.media.discovery import IDENTITY_VERSION, bounded_fingerprint
 from video_editor.media.probe import AudioStream, MediaProbe, VideoStream
 from video_editor.media.proxies import ProxyMapping
+from video_editor.media.storage import inspect_volume
 from video_editor.persistence.database import JobStore
 
 _IMPLEMENTATION_VERSION = "cloud-proxy-v1"
@@ -431,19 +432,24 @@ def _validate_generation_inputs(
             ErrorCategory.STORAGE, "generated root overlaps original source tree"
         )
     generated_root.parent.mkdir(parents=True, exist_ok=True)
+    generated_volume = inspect_volume(generated_root.parent)
     try:
         generated_root.mkdir(mode=0o700)
     except FileExistsError:
         root_stat = generated_root.lstat()
     else:
         root_stat = generated_root.lstat()
-        os.chmod(generated_root, 0o700)
-        root_stat = generated_root.lstat()
+        if generated_volume.filesystem != "exfat":
+            os.chmod(generated_root, 0o700)
+            root_stat = generated_root.lstat()
     if (
         not stat.S_ISDIR(root_stat.st_mode)
-        or stat.S_IMODE(root_stat.st_mode) != 0o700
         or root_stat.st_uid != os.getuid()
         or root_stat.st_nlink < 1
+        or (
+            generated_volume.filesystem != "exfat"
+            and stat.S_IMODE(root_stat.st_mode) != 0o700
+        )
     ):
         raise VideoEditorError(
             ErrorCategory.STORAGE, "generated job root is not private and owned"
@@ -531,6 +537,45 @@ def _consume_generation_proof(
         del _GENERATION_PROOFS[id(manifest)]
 
 
+def _seal_generated_proxy(
+    path: Path,
+    expected: os.stat_result,
+    duration: Decimal,
+    *,
+    exfat: bool,
+) -> tuple[os.stat_result, str, _MediaEvidence | None]:
+    """Bind final bytes to the generated inode through one no-follow descriptor."""
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not _same_source_facts(expected, opened)
+            or not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+        ):
+            raise VideoEditorError(
+                ErrorCategory.STORAGE, "final proxy identity changed"
+            )
+        descriptor_path = Path(f"/dev/fd/{descriptor}")
+        evidence = None
+        if exfat:
+            evidence = _probe_media_evidence(
+                descriptor_path, ffprobe=_TRUSTED_FFPROBE, pass_fds=(descriptor,)
+            )
+            _enforce_media_policy(evidence, duration)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        digest = _sha256(descriptor_path)
+        if not _same_source_facts(
+            opened, os.fstat(descriptor)
+        ) or not _same_source_facts(opened, path.lstat()):
+            raise VideoEditorError(
+                ErrorCategory.STORAGE, "final proxy identity changed"
+            )
+        return opened, digest, evidence
+    finally:
+        os.close(descriptor)
+
+
 def create_cloud_proxy_chunk(
     source: Path,
     generated_root: Path,
@@ -570,6 +615,7 @@ def create_cloud_proxy_chunk(
         source_start,
         source_end,
     )
+    generated_volume = inspect_volume(root_resolved)
     identity_payload = json.dumps(
         {
             "implementation_version": _IMPLEMENTATION_VERSION,
@@ -586,8 +632,15 @@ def create_cloud_proxy_chunk(
     identity = hashlib.sha256(identity_payload).hexdigest()
     manifest_id = f"proxy-manifest-{identity}"
     chunk_id = f"analysis-chunk-{identity}"
-    final = root_resolved / f"{identity}.cloud-proxy.mp4"
+    generated_volume = inspect_volume(root_resolved)
+    is_exfat = generated_volume.filesystem == "exfat"
+    final = root_resolved / (
+        f"{identity}.{secrets.token_hex(24)}.cloud-proxy.mp4"
+        if is_exfat
+        else f"{identity}.cloud-proxy.mp4"
+    )
     partial = root_resolved / f".{secrets.token_hex(24)}.mp4"
+    artifact_in_progress = final if is_exfat else partial
     root_stat = root_resolved.lstat()
     partial_owned = False
     duration = source_end - source_start
@@ -619,14 +672,16 @@ def create_cloud_proxy_chunk(
 
         root_stat = root_resolved.lstat()
         reserve_flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
-        partial_fd = os.open(partial, reserve_flags, 0o600)
-        partial_owned = True
+        output_path = final if is_exfat else partial
+        artifact_in_progress = output_path
+        partial_fd = os.open(output_path, reserve_flags, 0o600)
+        partial_owned = not is_exfat
         try:
             reserved_stat = os.fstat(partial_fd)
             if (
                 not stat.S_ISREG(reserved_stat.st_mode)
                 or reserved_stat.st_nlink != 1
-                or stat.S_IMODE(reserved_stat.st_mode) != 0o600
+                or (not is_exfat and stat.S_IMODE(reserved_stat.st_mode) != 0o600)
             ):
                 raise VideoEditorError(
                     ErrorCategory.STORAGE, "temporary proxy reservation is unsafe"
@@ -649,8 +704,10 @@ def create_cloud_proxy_chunk(
                 output_fd=partial_fd,
             )
             os.fsync(partial_fd)
+            published_stat = os.fstat(partial_fd)
         finally:
             os.close(partial_fd)
+        partial_stat = output_path.lstat()
         current_source_stat = os.fstat(source_fd)
         if (
             not _same_source_facts(source_stat, current_source_stat)
@@ -661,8 +718,11 @@ def create_cloud_proxy_chunk(
             raise VideoEditorError(
                 ErrorCategory.STORAGE, "generated root identity changed"
             )
-        partial_stat = partial.lstat()
-        partial_read_fd = os.open(partial, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        artifact_in_progress = output_path
+        partial_stat = artifact_in_progress.lstat()
+        partial_read_fd = os.open(
+            artifact_in_progress, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        )
         try:
             opened_partial_stat = os.fstat(partial_read_fd)
             if (
@@ -676,12 +736,12 @@ def create_cloud_proxy_chunk(
         finally:
             os.close(partial_read_fd)
         inspected, probed_audio_bitrate = _validated_probe(
-            partial,
+            artifact_in_progress,
             duration,
             active,
             ffprobe=_TRUSTED_FFPROBE,
         )
-        current_partial_stat = partial.lstat()
+        current_partial_stat = artifact_in_progress.lstat()
         if (
             not _same_identity(partial_stat, current_partial_stat)
             or current_partial_stat.st_nlink != 1
@@ -693,28 +753,42 @@ def create_cloud_proxy_chunk(
             raise VideoEditorError(
                 ErrorCategory.STORAGE, "generated root identity changed"
             )
-        try:
-            os.link(partial, final, follow_symlinks=False)
-        except FileExistsError as exc:
-            raise VideoEditorError(
-                ErrorCategory.STORAGE, "final proxy path already exists"
-            ) from exc
-        final_stat = final.lstat()
-        if not _same_identity(partial_stat, final_stat):
-            raise VideoEditorError(
-                ErrorCategory.STORAGE, "final proxy identity changed during publication"
-            )
-        partial.unlink()
-        partial_owned = False
+        if is_exfat:
+            partial_owned = False
+            if not _same_identity(partial_stat, final.lstat()):
+                raise VideoEditorError(
+                    ErrorCategory.STORAGE,
+                    "final proxy identity changed during generation",
+                )
+        else:
+            try:
+                os.link(partial, final, follow_symlinks=False)
+            except FileExistsError as exc:
+                raise VideoEditorError(
+                    ErrorCategory.STORAGE, "final proxy path already exists"
+                ) from exc
+            final_stat = final.lstat()
+            if not _same_identity(partial_stat, final_stat):
+                raise VideoEditorError(
+                    ErrorCategory.STORAGE,
+                    "final proxy identity changed during publication",
+                )
+            partial.unlink()
+            partial_owned = False
     except BaseException:
-        if partial_owned:
+        if partial_owned and not is_exfat:
             _cleanup_private_temp(partial, root_resolved, root_stat)
         raise
     finally:
         os.close(source_fd)
 
-    file_stat = final.stat(follow_symlinks=False)
+    file_stat, file_digest, sealed_evidence = _seal_generated_proxy(
+        final, published_stat, duration, exfat=is_exfat
+    )
     root_stat = root_resolved.stat(follow_symlinks=False)
+    if sealed_evidence is not None:
+        inspected = sealed_evidence.probe
+        probed_audio_bitrate = sealed_evidence.audio_bitrate_bps
     video = inspected.video
     audio = inspected.audio
     assert video is not None and video.width is not None and video.height is not None
@@ -743,7 +817,7 @@ def create_cloud_proxy_chunk(
         proxy_end=duration,
         media_duration=_decimal_probe(inspected.duration, "duration"),
         file_size_bytes=file_stat.st_size,
-        file_digest_sha256=_sha256(final),
+        file_digest_sha256=file_digest,
         file_device=file_stat.st_dev,
         file_inode=file_stat.st_ino,
         video_codec=_expected_video_codec(active.video_codec),
@@ -1172,7 +1246,19 @@ def _parse_probe_payload(path: Path, raw: str) -> _MediaEvidence:
         format_data = payload["format"]
         videos = [item for item in streams if item.get("codec_type") == "video"]
         audios = [item for item in streams if item.get("codec_type") == "audio"]
-        if len(streams) != 2 or len(videos) != 1 or len(audios) != 1:
+        timed_metadata = [
+            item
+            for item in streams
+            if item.get("codec_type") == "data"
+            and item.get("codec_name") == "bin_data"
+            and item.get("codec_tag_string") == "text"
+        ]
+        if (
+            len(videos) != 1
+            or len(audios) != 1
+            or len(timed_metadata) > 1
+            or len(streams) != 2 + len(timed_metadata)
+        ):
             raise _upload_error(
                 "generated media must contain exactly one video and one audio stream count"
             )
@@ -1213,7 +1299,7 @@ def _probe_media_evidence(
         "-v",
         "error",
         "-show_entries",
-        "stream=codec_type,codec_name,width,height,avg_frame_rate,channels,bit_rate:format=duration",
+        "stream=codec_type,codec_name,codec_tag_string,width,height,avg_frame_rate,channels,bit_rate:format=duration",
         "-print_format",
         "json",
         str(path),

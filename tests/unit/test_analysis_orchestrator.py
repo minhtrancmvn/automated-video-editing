@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -1006,6 +1007,118 @@ def test_cached_candidate_is_returned_without_provider_call(tmp_path: Path) -> N
         assert second_provider.candidate_calls == 0
         assert len(second.candidates) == 1
         assert second.candidates[0].candidate_id == request.candidate.candidate_id
+
+
+def test_candidate_failure_persists_safe_code_and_settles_returned_usage(
+    tmp_path: Path,
+) -> None:
+    class InvalidProvider(FakeProvider):
+        def refine_candidate(self, upload, candidate, request, fps, *, prompt_version):
+            del upload, candidate, fps, prompt_version
+            raise VideoEditorError(
+                ErrorCategory.PROVIDER,
+                "private provider response",
+                code="provider_response_invalid",
+                safe_details={
+                    "usage": json.dumps(
+                        _usage(request.reservation_id, False).safe_payload()
+                    ),
+                    "diagnostic": json.dumps(
+                        {"reason": "schema_validation", "fields": ["start"]}
+                    ),
+                    "private": "AIza-not-for-persistence",
+                },
+            )
+
+    with JobStore(tmp_path / "state.db") as store:
+        job_id = store.create_job({}, {})
+        store.initialize_budget(job_id, D(1))
+        _save_chunk(store, job_id, "chunk-1", D(0))
+        provider = InvalidProvider(store, job_id)
+        request = _candidate_request(1, 0.1)
+        complete = coverage_report(
+            [SourceRange(source_id="source-1", start=D(0), end=D(1))],
+            [SourceRange(source_id="source-1", start=D(0), end=D(1))],
+        )
+
+        outcome = run_candidate_refinement(
+            store=store,
+            paths=_paths(tmp_path),
+            provider=provider,
+            job_id=job_id,
+            broad_outcome=AnalysisOutcome(state="complete", coverage=complete),
+            requests=(request,),
+            segmentations=(),
+            upload_validator=_authorize,
+        )
+
+        assert outcome.state == "analysis_incomplete"
+        artifacts = store.get_job(job_id)["artifacts"]
+        diagnostic_artifact = next(
+            a
+            for a in artifacts
+            if a["name"] == f"analysis-failure-{request.request_id}.json"
+        )
+        payload = json.loads(Path(diagnostic_artifact["path"]).read_text())
+        assert payload["code"] == "provider_response_invalid"
+        assert payload["diagnostic"] == {
+            "reason": "schema_validation",
+            "fields": ["start"],
+        }
+        assert payload["usage"]["reservation_id"] == request.request_id
+        assert "private" not in json.dumps(payload)
+        assert "AIza" not in json.dumps(payload)
+        assert store.budget_state(job_id).reserved_usd == 0
+        assert provider.deleted == ["files/manifest-chunk-1"]
+
+
+def test_candidate_interval_rejection_retains_usage_and_failure_evidence(
+    tmp_path: Path,
+) -> None:
+    class WrongIntervalProvider(FakeProvider):
+        def refine_candidate(self, upload, candidate, request, fps, *, prompt_version):
+            result = super().refine_candidate(
+                upload, candidate, request, fps, prompt_version=prompt_version
+            )
+            return result.model_copy(
+                update={
+                    "response": result.response.model_copy(update={"start": D("0.1")})
+                }
+            )
+
+    with JobStore(tmp_path / "state.db") as store:
+        job_id = store.create_job({}, {})
+        store.initialize_budget(job_id, D(1))
+        _save_chunk(store, job_id, "chunk-1", D(0))
+        request = _candidate_request(1, 0.1)
+        provider = WrongIntervalProvider(store, job_id)
+        complete = coverage_report(
+            [SourceRange(source_id="source-1", start=D(0), end=D(1))],
+            [SourceRange(source_id="source-1", start=D(0), end=D(1))],
+        )
+        outcome = run_candidate_refinement(
+            store=store,
+            paths=_paths(tmp_path),
+            provider=provider,
+            job_id=job_id,
+            broad_outcome=AnalysisOutcome(state="complete", coverage=complete),
+            requests=(request,),
+            segmentations=(),
+            upload_validator=_authorize,
+        )
+        assert outcome.state == "analysis_incomplete"
+        artifact = store.get_job(job_id)["artifacts"][0]
+        payload = json.loads(Path(artifact["path"]).read_text())
+        assert payload["diagnostic"]["reason"] == "semantic_validation"
+        assert payload["diagnostic"]["fields"] == ["start"]
+        assert payload["usage"]["reservation_id"] == request.request_id
+        assert store.budget_state(job_id).reserved_usd == 0
+        assert (
+            store.find_analysis_result(
+                job_id, analysis_cache_key(request.cache_identity)
+            )
+            is None
+        )
 
 
 def test_candidate_unknown_billing_persists_validated_bounded_result(

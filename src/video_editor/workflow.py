@@ -10,7 +10,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from pathlib import Path
 from typing import Any, TypeVar, cast
 
@@ -34,6 +34,7 @@ from video_editor.analysis.models import (
     CandidateWindow,
     CropTrack,
     LocalSegmentation,
+    ProxyManifestData,
     SourceRange,
 )
 from video_editor.analysis.orchestrator import (
@@ -49,6 +50,7 @@ from video_editor.analysis.proxy_chunks import (
     create_cloud_proxy_chunk,
     plan_chunk_ranges,
     register_proxy_manifest,
+    validate_upload_candidate,
 )
 from video_editor.analysis.ranking import (
     RankedCandidate,
@@ -56,7 +58,7 @@ from video_editor.analysis.ranking import (
     rank_candidates,
 )
 from video_editor.analysis.segmentation import segment_media
-from video_editor.analysis.tracking import track_subject
+from video_editor.analysis.tracking import TRACKING_VERSION, track_subject
 from video_editor.config import AppConfig
 from video_editor.errors import ErrorCategory, VideoEditorError
 from video_editor.media.capabilities import detect_capabilities
@@ -93,7 +95,10 @@ from video_editor.models.edit_plan import (
     write_plan,
 )
 from video_editor.persistence.database import JobStore, StageStatus
-from video_editor.planning.highlight_plan import create_highlight_plans
+from video_editor.planning.highlight_plan import (
+    create_highlight_plans,
+    short_eligibility_diagnostics,
+)
 from video_editor.planning.sample_plan import create_sample_plans
 from video_editor.rendering.compiler import compile_render
 from video_editor.rendering.runner import run_render
@@ -117,7 +122,7 @@ IMPLEMENTATION_VERSION = "phase1-workflow-v2"
 STAGE_IMPLEMENTATION_VERSIONS = {
     "inspect": "inspect-v2",
     "proxy": "proxy-v2",
-    "segment": "segment-v1",
+    "segment": "segment-v2",
     "analyze": "gemini-static-v1",
     "rank": "ranking-v1",
     "plan": "highlight-plan-v1",
@@ -139,8 +144,9 @@ EXIT_CODES = {
     ErrorCategory.BUDGET: 19,
 }
 _T = TypeVar("_T")
-BROAD_PROMPT_VERSION = "broad-v1"
-CANDIDATE_PROMPT_VERSION = "candidate-v2"
+BROAD_PROMPT_VERSION = "broad-v2"
+CANDIDATE_PROMPT_VERSION = "candidate-v4"
+CANDIDATE_IDENTITY_VERSION = "chunk-qualified-candidate-v1"
 RANKING_SETTINGS = RankingSettings()
 _PROVIDER = "gemini"
 
@@ -189,21 +195,8 @@ def _report_job_view(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def _plain_track(track: CropTrack) -> CropTrack:
-    """Quantize keyframes so plan JSON never uses exponent notation."""
-    return track.model_copy(
-        update={
-            "keyframes": tuple(
-                keyframe.model_copy(
-                    update={
-                        "time": keyframe.time.quantize(_MICRO),
-                        "center_x": keyframe.center_x.quantize(_MICRO),
-                        "center_y": keyframe.center_y.quantize(_MICRO),
-                    }
-                )
-                for keyframe in track.keyframes
-            )
-        }
-    )
+    """Preserve exact crop motion; plan keyframes serialize plain decimals."""
+    return track
 
 
 def _gate_error(
@@ -1457,27 +1450,66 @@ class WorkflowService:
                 self.store.save_artifact(job_id, "segment", path)
                 segmentations[mapping.source_id] = str(path)
                 source = sources[mapping.source_id]
-                duration = mapping.source_end - mapping.source_start
-                for start, end in plan_chunk_ranges(duration, []):
-                    manifest = create_cloud_proxy_chunk(
-                        Path(source["path"]),
-                        cache,
-                        mapping,
-                        mapping.source_start + start,
-                        mapping.source_start + end,
-                        job_id=job_id,
-                        source_fingerprint=str(source["fingerprint"]),
-                        paths=self.config.paths,
-                        store=self.store,
+                # Persisted float-derived Decimals can exceed context precision.
+                # Keep range translation exact without changing upload comparisons.
+                endpoints = (mapping.source_start, mapping.source_end)
+                with localcontext() as context:
+                    context.prec = max(
+                        context.prec,
+                        max(value.adjusted() for value in endpoints)
+                        - min(int(value.as_tuple().exponent) for value in endpoints)
+                        + 2,
                     )
-                    register_proxy_manifest(manifest, self.store)
-                    data = manifest.data
+                    duration = mapping.source_end - mapping.source_start
+                    ranges = [
+                        (mapping.source_start + start, mapping.source_start + end)
+                        for start, end in plan_chunk_ranges(duration, [])
+                    ]
+                for start, end in ranges:
+                    registered = next(
+                        (
+                            item
+                            for item in job.get("proxy_manifests", [])
+                            if item["data"].get("source_id") == mapping.source_id
+                            and Decimal(item["data"]["source_start"]) == start
+                            and Decimal(item["data"]["source_end"]) == end
+                        ),
+                        None,
+                    )
+                    if registered is not None:
+                        # Never re-register or replace committed chunk bytes. Reuse
+                        # requires the same full provenance gate as an upload.
+                        with validate_upload_candidate(
+                            registered["manifest_id"],
+                            job_id,
+                            self.store,
+                            self.config.paths,
+                        ):
+                            data = ProxyManifestData.model_validate(registered["data"])
+                        manifest_id = registered["manifest_id"]
+                        digest = registered["digest"]
+                    else:
+                        manifest = create_cloud_proxy_chunk(
+                            Path(source["path"]),
+                            cache,
+                            mapping,
+                            start,
+                            end,
+                            job_id=job_id,
+                            source_fingerprint=str(source["fingerprint"]),
+                            paths=self.config.paths,
+                            store=self.store,
+                        )
+                        register_proxy_manifest(manifest, self.store)
+                        data = manifest.data
+                        manifest_id = manifest.manifest_id
+                        digest = manifest.digest
                     chunks.append(
                         {
-                            "manifest_id": manifest.manifest_id,
-                            "chunk_id": manifest.chunk_id,
-                            "source_id": manifest.source_id,
-                            "digest": manifest.digest,
+                            "manifest_id": manifest_id,
+                            "chunk_id": data.chunk_id,
+                            "source_id": data.source_id,
+                            "digest": digest,
                             "source_identity": data.source_identity,
                             "source_fingerprint": data.source_fingerprint,
                             "mapping_version": data.mapping_version,
@@ -1524,7 +1556,7 @@ class WorkflowService:
             provider=_PROVIDER,
             model=self.config.gemini.model,
             prompt_version=BROAD_PROMPT_VERSION,
-            response_schema_version="broad-v1",
+            response_schema_version="broad-v2",
             implementation_version=STAGE_IMPLEMENTATION_VERSIONS["analyze"],
         )
 
@@ -1534,6 +1566,7 @@ class WorkflowService:
             "model": self.config.gemini.model,
             "broad_prompt": BROAD_PROMPT_VERSION,
             "candidate_prompt": CANDIDATE_PROMPT_VERSION,
+            "candidate_identity": CANDIDATE_IDENTITY_VERSION,
             "cost_cap_per_hour": str(self.config.gemini.max_cost_per_source_hour_usd),
         }
 
@@ -1583,8 +1616,8 @@ class WorkflowService:
             )
             if outcome.state != "complete":
                 raise _gate_error(job_id, outcome, "broad analysis")
-            candidate_requests: list[CandidateAnalysisRequest] = []
-            broad_by_id: dict[str, tuple[str, BroadCandidate]] = {}
+            broad_by_identity: dict[tuple[str, str], BroadCandidate] = {}
+            chunk_context: dict[str, tuple[dict[str, Any], BroadAnalysisRequest]] = {}
             scenes_by_chunk: dict[str, list[dict[str, Any]]] = {}
             for item, request, source_range in zip(
                 chunks, requests, ranges, strict=True
@@ -1609,40 +1642,68 @@ class WorkflowService:
                 scenes_by_chunk[item["chunk_id"]] = [
                     scene.model_dump(mode="json") for scene in scenes
                 ]
+                chunk_context[item["chunk_id"]] = (item, request)
                 for broad in per_chunk.candidates:
                     if not isinstance(broad, BroadCandidate):
                         continue
-                    broad_by_id[broad.candidate_id] = (item["chunk_id"], broad)
-                    # Suffix the implementation version per candidate so several
-                    # candidates in one chunk never share one cache key.
-                    identity = request.cache_identity.model_copy(
-                        update={
-                            "mode": "candidate",
-                            "prompt_version": CANDIDATE_PROMPT_VERSION,
-                            "response_schema_version": "candidate-v2",
-                            "implementation_version": (
-                                f"{STAGE_IMPLEMENTATION_VERSIONS['analyze']}:"
-                                f"{broad.candidate_id}"
-                            ),
-                        }
-                    )
-                    candidate_requests.append(
-                        CandidateAnalysisRequest(
-                            manifest_id=item["manifest_id"],
-                            candidate=CandidateWindow(
-                                chunk_id=item["chunk_id"],
-                                candidate_id=broad.candidate_id,
-                                start=broad.start,
-                                end=broad.end,
-                            ),
-                            cache_identity=identity,
-                            maximum_cost_usd=provider.maximum_request_cost(
-                                item["manifest_id"],
-                                _ChunkWindow(item["chunk_id"], broad.start, broad.end),
-                                prompt_version=CANDIDATE_PROMPT_VERSION,
-                            ),
+                    key = (item["chunk_id"], broad.candidate_id)
+                    if key in broad_by_identity:
+                        raise VideoEditorError(
+                            ErrorCategory.ANALYSIS,
+                            "broad candidate IDs must be unique within each chunk",
+                            code="provider_response_invalid",
                         )
+                    broad_by_identity[key] = broad
+            identity_counts: dict[str, int] = {}
+            for _, provider_id in broad_by_identity:
+                identity_counts[provider_id] = identity_counts.get(provider_id, 0) + 1
+            output_identities = {
+                key: (
+                    key[1]
+                    if identity_counts[key[1]] == 1
+                    else f"phase2:{key[0]}:{key[1]}"
+                )
+                for key in broad_by_identity
+            }
+            if len(set(output_identities.values())) != len(output_identities):
+                raise VideoEditorError(
+                    ErrorCategory.ANALYSIS,
+                    "candidate identities are not unique after chunk qualification",
+                    code="provider_response_invalid",
+                )
+            candidate_requests: list[CandidateAnalysisRequest] = []
+            for key, broad in broad_by_identity.items():
+                item, request = chunk_context[key[0]]
+                # Keep the provider ID for provider/storage identity. Candidate
+                # results are re-keyed only in the analyze-stage output below.
+                identity = request.cache_identity.model_copy(
+                    update={
+                        "mode": "candidate",
+                        "prompt_version": CANDIDATE_PROMPT_VERSION,
+                        "response_schema_version": "candidate-v2",
+                        "implementation_version": (
+                            f"{STAGE_IMPLEMENTATION_VERSIONS['analyze']}:"
+                            f"{broad.candidate_id}"
+                        ),
+                    }
+                )
+                candidate_requests.append(
+                    CandidateAnalysisRequest(
+                        manifest_id=item["manifest_id"],
+                        candidate=CandidateWindow(
+                            chunk_id=item["chunk_id"],
+                            candidate_id=broad.candidate_id,
+                            start=broad.start,
+                            end=broad.end,
+                        ),
+                        cache_identity=identity,
+                        maximum_cost_usd=provider.maximum_request_cost(
+                            item["manifest_id"],
+                            _ChunkWindow(item["chunk_id"], broad.start, broad.end),
+                            prompt_version=CANDIDATE_PROMPT_VERSION,
+                        ),
                     )
+                )
             segmentations = [
                 LocalSegmentation.model_validate_json(Path(path).read_text())
                 for path in segmented.get("segmentations", {}).values()
@@ -1658,17 +1719,27 @@ class WorkflowService:
             )
             if refined.state != "complete":
                 raise _gate_error(job_id, refined, "candidate refinement")
-            candidates = [
-                {
-                    "chunk_id": broad_by_id[item.candidate_id][0],
-                    "scenes": scenes_by_chunk[broad_by_id[item.candidate_id][0]],
-                    "broad": broad_by_id[item.candidate_id][1].model_dump(mode="json"),
-                    "refined": item.model_dump(mode="json"),
-                }
-                for item in refined.candidates
-                if isinstance(item, CandidateRefinementResponse)
-                and item.candidate_id in broad_by_id
-            ]
+            candidates = []
+            for item in refined.candidates:
+                if not isinstance(item, CandidateRefinementResponse):
+                    continue
+                key = (item.chunk_id, item.candidate_id)
+                candidate_broad = broad_by_identity.get(key)
+                if candidate_broad is None:
+                    continue
+                output_candidate_id = output_identities[key]
+                candidates.append(
+                    {
+                        "chunk_id": item.chunk_id,
+                        "scenes": scenes_by_chunk[item.chunk_id],
+                        "broad": candidate_broad.model_copy(
+                            update={"candidate_id": output_candidate_id}
+                        ).model_dump(mode="json"),
+                        "refined": item.model_copy(
+                            update={"candidate_id": output_candidate_id}
+                        ).model_dump(mode="json"),
+                    }
+                )
             return {
                 "coverage": outcome.coverage.model_dump(mode="json"),
                 "candidates": candidates,
@@ -1741,13 +1812,19 @@ class WorkflowService:
                 str(item["source_id"]): (Path(item["proxy"]), _mapping(item["mapping"]))
                 for item in proxied.get("artifacts", [])
             }
-            refined = {
-                item["refined"]["candidate_id"]: (
+            refined = {}
+            for item in analyzed.get("candidates", []):
+                candidate_id = item["refined"]["candidate_id"]
+                if candidate_id in refined:
+                    raise VideoEditorError(
+                        ErrorCategory.ANALYSIS,
+                        "analyzed candidate IDs must be unique",
+                        code="provider_response_invalid",
+                    )
+                refined[candidate_id] = (
                     CandidateRefinementResponse.model_validate(item["refined"]),
                     self._chunk_data(job_id, item["chunk_id"]),
                 )
-                for item in analyzed.get("candidates", [])
-            }
             ranked = [
                 RankedCandidate.model_validate(item)
                 for item in ranked_result.get("ranked", [])
@@ -1834,6 +1911,9 @@ class WorkflowService:
             return {
                 "plans": paths,
                 "tracks": [track.model_dump(mode="json") for track in tracks],
+                "short_diagnostics": short_eligibility_diagnostics(
+                    ranked, tracks, self.config.highlights, self.config.crop
+                ),
                 "themes": list(plan_set.themes),
                 "chapters": list(plan_set.long_evidence.chapter_progression),
                 "transition_map": TRANSITION_MAP_VERSION,
@@ -1847,6 +1927,7 @@ class WorkflowService:
                 "planner": STAGE_IMPLEMENTATION_VERSIONS["plan"],
                 "highlights": vars(self.config.highlights),
                 "crop": vars(self.config.crop),
+                "tracking": TRACKING_VERSION,
                 "transition_map": TRANSITION_MAP_VERSION,
             },
             ErrorCategory.PLAN,
@@ -2060,6 +2141,9 @@ class WorkflowService:
             "evidence_map": EVIDENCE_MAP_VERSION,
             "chapters": planned.get("chapters", []),
             "short_themes": planned.get("themes", []),
+            "short_diagnostics": planned.get(
+                "short_diagnostics", {"status": "not_recorded"}
+            ),
         }
         state = _report_job_view(state)
         state["cloud_usage"] = analyzed.get("budget", {}).get("spent_usd", "0")

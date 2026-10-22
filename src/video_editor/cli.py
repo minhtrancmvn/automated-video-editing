@@ -9,6 +9,7 @@ from typing import Annotated
 import typer
 
 from video_editor.analysis.gemini import GeminiAdapter
+from video_editor.analysis.models import RetryPolicy
 from video_editor.analysis.pricing import pricing_for_model
 from video_editor.config import resolve_config
 from video_editor.errors import VideoEditorError
@@ -31,7 +32,10 @@ def _service(
     WorkflowService.validate_configured_roots(config, config.paths.input_dir)
     # Cloud mode builds the provider from the runtime key only; the key is never stored.
     provider = (
-        GeminiAdapter.from_environment(pricing=pricing_for_model(config.gemini.model))
+        GeminiAdapter.from_environment(
+            pricing=pricing_for_model(config.gemini.model),
+            retry_policy=RetryPolicy(max_attempts=config.gemini.max_transient_attempts),
+        )
         if config.cloud_enabled
         else None
     )

@@ -286,6 +286,7 @@ class CropTrack(AnalysisModel):
     output_height: int = Field(gt=0)
     crop_width: int = Field(gt=0)
     crop_height: int = Field(gt=0)
+    source_start: FiniteDecimal | None = Field(default=None, ge=0)
     observations: tuple[SubjectObservation, ...]
     keyframes: tuple[CropKeyframe, ...]
     short_eligible: bool
