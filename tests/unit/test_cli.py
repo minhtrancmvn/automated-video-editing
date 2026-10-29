@@ -8,12 +8,49 @@ from typer.testing import CliRunner
 
 from video_editor.cli import _service, app
 from video_editor.config import AppConfig, GeminiSettings, PathSettings
+from video_editor.errors import ErrorCategory, VideoEditorError
+
+
+def test_bounded_broad_preflight_does_not_create_store_or_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from video_editor.bounded_broad import preflight
+
+    paths = PathSettings(
+        *(
+            tmp_path / name
+            for name in ("input", "workspace", "cache", "output", "state")
+        )
+    )
+    config = AppConfig(paths=paths, storage_reserve_bytes=0)
+    factory = Mock(side_effect=AssertionError("provider must not be constructed"))
+    monkeypatch.setattr(
+        "video_editor.bounded_broad.GeminiAdapter.from_environment", factory
+    )
+
+    result = preflight(tmp_path / "GX011485.MP4", Decimal(0), Decimal(720), config)
+
+    assert result["request_maximum_usd"] == "0.262051"
+    assert result["request_cap_usd"] == "0.262051"
+    factory.assert_not_called()
+    assert not paths.state_dir.exists()
+    with pytest.raises(VideoEditorError) as raised:
+        preflight(tmp_path / "GX011485.MP4", Decimal(0), Decimal(901), config)
+    assert raised.value.category is ErrorCategory.ANALYSIS
 
 
 def test_cli_exposes_phase_one_commands() -> None:
     result = CliRunner().invoke(app, ["--help"])
     assert result.exit_code == 0
-    for command in ("inspect", "plan", "render-from-plan", "run", "status", "resume"):
+    for command in (
+        "inspect",
+        "plan",
+        "render-from-plan",
+        "run",
+        "status",
+        "resume",
+        "bounded-broad",
+    ):
         assert command in result.stdout
 
 

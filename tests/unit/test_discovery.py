@@ -28,6 +28,27 @@ def test_discovery_returns_empty_list_for_empty_readable_folder(tmp_path: Path) 
     assert discover_sources(tmp_path) == []
 
 
+def test_discovery_accepts_one_explicit_supported_video_file(tmp_path: Path) -> None:
+    clip = tmp_path / "GX011485.MP4"
+    clip.write_bytes(b"synthetic fixture")
+
+    sources = discover_sources(clip)
+
+    assert len(sources) == 1
+    assert sources[0].path == clip
+    assert sources[0].discovery_index == 0
+    assert sources[0].identity_version == "bounded-v1"
+    assert sources[0].fingerprint == bounded_fingerprint(clip)
+
+
+def test_discovery_rejects_explicit_unsupported_file_extension(tmp_path: Path) -> None:
+    clip = tmp_path / "notes.txt"
+    clip.write_text("not media")
+
+    with pytest.raises(VideoEditorError, match="unsupported video file extension"):
+        discover_sources(clip)
+
+
 def test_discovery_includes_symlinked_video_without_recursing_symlink_dirs(
     tmp_path: Path,
 ) -> None:

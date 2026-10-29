@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Annotated
 
@@ -11,8 +12,9 @@ import typer
 from video_editor.analysis.gemini import GeminiAdapter
 from video_editor.analysis.models import RetryPolicy
 from video_editor.analysis.pricing import pricing_for_model
+from video_editor.bounded_broad import run_bounded_broad
 from video_editor.config import resolve_config
-from video_editor.errors import VideoEditorError
+from video_editor.errors import ErrorCategory, VideoEditorError
 from video_editor.media.storage import inspect_volume
 from video_editor.models.edit_plan import load_plan
 from video_editor.persistence.database import JobStore
@@ -113,6 +115,42 @@ def status(
 ) -> None:
     """Show workflow state and available outputs."""
     _invoke(config, "status", job_id)
+
+
+@app.command("bounded-broad")
+def bounded_broad(
+    source: Path,
+    config: ConfigOption,
+    start: str = typer.Option(..., "--start"),
+    end: str = typer.Option(..., "--end"),
+    attempt_id: str = typer.Option(..., "--attempt-id"),
+    dispatch: bool = typer.Option(False, "--dispatch"),
+) -> None:
+    """Preflight one bounded broad request; dispatch only with --dispatch."""
+    try:
+        try:
+            start_value = Decimal(start)
+            end_value = Decimal(end)
+        except InvalidOperation as exc:
+            raise VideoEditorError(
+                ErrorCategory.ANALYSIS, "start and end must be decimal seconds"
+            ) from exc
+        resolved_config = resolve_config(config)
+        result = run_bounded_broad(
+            source=source,
+            start=start_value,
+            end=end_value,
+            attempt_id=attempt_id,
+            config=resolved_config,
+            dispatch=dispatch,
+        )
+        typer.echo(result)
+    except (VideoEditorError, OSError, InvalidOperation) as exc:
+        if isinstance(exc, VideoEditorError):
+            typer.echo(f"{exc.category}: {exc}", err=True)
+            raise typer.Exit(code=error_exit_code(exc)) from exc
+        typer.echo(f"bounded broad preflight failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
 
 
 @app.command()

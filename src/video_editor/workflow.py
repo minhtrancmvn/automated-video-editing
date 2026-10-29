@@ -144,9 +144,9 @@ EXIT_CODES = {
     ErrorCategory.BUDGET: 19,
 }
 _T = TypeVar("_T")
-BROAD_PROMPT_VERSION = "broad-v2"
+BROAD_PROMPT_VERSION = "broad-v3"
 CANDIDATE_PROMPT_VERSION = "candidate-v4"
-CANDIDATE_IDENTITY_VERSION = "chunk-qualified-candidate-v1"
+CANDIDATE_IDENTITY_VERSION = "broad-lineage-window-v2"
 RANKING_SETTINGS = RankingSettings()
 _PROVIDER = "gemini"
 
@@ -1681,9 +1681,14 @@ class WorkflowService:
                         "mode": "candidate",
                         "prompt_version": CANDIDATE_PROMPT_VERSION,
                         "response_schema_version": "candidate-v2",
-                        "implementation_version": (
-                            f"{STAGE_IMPLEMENTATION_VERSIONS['analyze']}:"
-                            f"{broad.candidate_id}"
+                        "implementation_version": _hash(
+                            [
+                                CANDIDATE_IDENTITY_VERSION,
+                                analysis_cache_key(request.cache_identity),
+                                broad.candidate_id,
+                                broad.start.as_integer_ratio(),
+                                broad.end.as_integer_ratio(),
+                            ]
                         ),
                     }
                 )

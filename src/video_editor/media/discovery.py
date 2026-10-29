@@ -86,7 +86,7 @@ def bounded_fingerprint(path: Path, chunk_bytes: int = 1_048_576) -> str:
 def discover_sources(
     root: Path, extensions: frozenset[str] = VIDEO_EXTENSIONS
 ) -> list[SourceCandidate]:
-    """Recursively discover supported video files in deterministic path order."""
+    """Discover supported video files recursively or inspect one explicit file."""
 
     try:
         root_stat = root.stat()
@@ -94,39 +94,48 @@ def discover_sources(
         raise _inspection_error(
             f"cannot inspect discovery root {root}: {exc}", exc
         ) from exc
-    if not stat.S_ISDIR(root_stat.st_mode):
-        raise VideoEditorError(
-            ErrorCategory.INSPECTION, f"discovery root {root} is not a directory"
-        )
 
     normalized = _normalized_extensions(extensions)
-    candidates: list[Path] = []
-    pending = [root]
-    try:
-        while pending:
-            directory = pending.pop()
-            with os.scandir(directory) as handle:
-                entries = sorted(handle, key=lambda entry: entry.name)
-                for entry in entries:
-                    entry_stat = entry.stat(follow_symlinks=False)
-                    entry_path = Path(entry.path)
-                    if stat.S_ISDIR(entry_stat.st_mode):
-                        pending.append(entry_path)
-                        continue
-                    try:
-                        followed_stat = entry.stat(follow_symlinks=True)
-                    except FileNotFoundError:
-                        continue
-                    if (
-                        stat.S_ISREG(followed_stat.st_mode)
-                        and entry_path.suffix.lower() in normalized
-                    ):
-                        candidates.append(entry_path)
-        candidates.sort(key=lambda path: path.relative_to(root).as_posix())
-    except OSError as exc:
-        raise _inspection_error(
-            f"cannot inspect discovery root {root}: {exc}", exc
-        ) from exc
+    if stat.S_ISREG(root_stat.st_mode):
+        if root.suffix.lower() not in normalized:
+            raise VideoEditorError(
+                ErrorCategory.INSPECTION,
+                f"unsupported video file extension: {root.suffix or '<none>'}",
+            )
+        candidates = [root]
+    elif stat.S_ISDIR(root_stat.st_mode):
+        candidates = []
+        pending = [root]
+        try:
+            while pending:
+                directory = pending.pop()
+                with os.scandir(directory) as handle:
+                    entries = sorted(handle, key=lambda entry: entry.name)
+                    for entry in entries:
+                        entry_stat = entry.stat(follow_symlinks=False)
+                        entry_path = Path(entry.path)
+                        if stat.S_ISDIR(entry_stat.st_mode):
+                            pending.append(entry_path)
+                            continue
+                        try:
+                            followed_stat = entry.stat(follow_symlinks=True)
+                        except FileNotFoundError:
+                            continue
+                        if (
+                            stat.S_ISREG(followed_stat.st_mode)
+                            and entry_path.suffix.lower() in normalized
+                        ):
+                            candidates.append(entry_path)
+            candidates.sort(key=lambda path: path.relative_to(root).as_posix())
+        except OSError as exc:
+            raise _inspection_error(
+                f"cannot inspect discovery root {root}: {exc}", exc
+            ) from exc
+    else:
+        raise VideoEditorError(
+            ErrorCategory.INSPECTION,
+            f"discovery root {root} is not a directory or regular video file",
+        )
 
     sources: list[SourceCandidate] = []
     for discovery_index, path in enumerate(candidates):

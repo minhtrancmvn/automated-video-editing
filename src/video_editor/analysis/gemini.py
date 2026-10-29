@@ -7,7 +7,7 @@ import os
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
-from decimal import ROUND_CEILING, ROUND_HALF_EVEN, Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, Decimal
 from io import IOBase
 from typing import Any, TypeVar
 
@@ -256,7 +256,7 @@ class GeminiAdapter:
     ) -> Decimal:
         """Estimate default-policy broad cost for live preflight without dispatch."""
         if (
-            prompt_version not in {"broad-v1", "broad-v2"}
+            prompt_version not in {"broad-v1", "broad-v2", "broad-v3"}
             or not authorization.manifest_id
         ):
             raise ValueError("broad preflight requires a supported prompt and manifest")
@@ -285,6 +285,7 @@ class GeminiAdapter:
         if not manifest_id or prompt_version not in {
             "broad-v1",
             "broad-v2",
+            "broad-v3",
             "candidate-v3",
             "candidate-v4",
         }:
@@ -293,7 +294,7 @@ class GeminiAdapter:
                 "Unsupported request cost identity",
                 code="provider_invalid_request",
             )
-        is_broad = prompt_version in {"broad-v1", "broad-v2"}
+        is_broad = prompt_version in {"broad-v1", "broad-v2", "broad-v3"}
         fps = Decimal(str(_BROAD_FPS)) if is_broad else Decimal(5)
         return self._estimate_request_maximum(
             chunk,
@@ -458,12 +459,15 @@ class GeminiAdapter:
                 "Gemini prompt exceeds reserved text allowance",
                 code="provider_invalid_request",
             )
+        metadata_start, metadata_end = self._serialized_interval(
+            prompt_version, start, end
+        )
         active = self.wait_until_active(upload)
         part = types.Part(
             file_data=types.FileData(file_uri=active.uri, mime_type=active.mime_type),
             video_metadata=types.VideoMetadata(
-                start_offset=self._duration(start),
-                end_offset=self._duration(end),
+                start_offset=metadata_start,
+                end_offset=metadata_end,
                 fps=fps,
             ),
         )
@@ -812,11 +816,15 @@ class GeminiAdapter:
         end: Decimal,
     ) -> str:
         interval = f"[{format(start, 'f')}, {format(end, 'f')}] seconds"
-        if prompt_version in {"broad-v1", "broad-v2"} and candidate_id is None:
+        if (
+            prompt_version in {"broad-v1", "broad-v2", "broad-v3"}
+            and candidate_id is None
+        ):
             serialized_interval = interval
-            if prompt_version == "broad-v2":
-                serialized_start = GeminiAdapter._duration(start)
-                serialized_end = GeminiAdapter._duration(end)
+            if prompt_version in {"broad-v2", "broad-v3"}:
+                serialized_start, serialized_end = GeminiAdapter._serialized_interval(
+                    prompt_version, start, end
+                )
                 serialized_interval = (
                     f"[{serialized_start[:-1]}, {serialized_end[:-1]}] seconds"
                 )
@@ -828,11 +836,19 @@ class GeminiAdapter:
                 f"chunk_id: {chunk_id}",
                 f"interval: {interval}",
             ]
-            if prompt_version == "broad-v2":
+            if prompt_version in {"broad-v2", "broad-v3"}:
                 prompt_lines.extend(
                     (
                         f"serialized interval: {serialized_interval}",
                         "All returned timestamps must be within the serialized interval.",
+                    )
+                )
+            if prompt_version == "broad-v3":
+                prompt_lines.extend(
+                    (
+                        "All start/end values: elapsed decimal seconds on supplied proxy timeline; do not reset zero at interval start.",
+                        "Convert MM:SS by minutes*60+seconds, never concatenate digits: 04:16 = 256, 06:45 = 405, 12:00 = 720.",
+                        "Use decimal strings for scenes, speech_presence_ranges and candidates.",
                     )
                 )
             prompt_lines.extend(
@@ -987,6 +1003,21 @@ class GeminiAdapter:
             "Gemini response has invalid chunk identity or timestamp data",
             code="provider_response_invalid",
         )
+
+    @staticmethod
+    def _serialized_interval(
+        prompt_version: str, start: Decimal, end: Decimal
+    ) -> tuple[str, str]:
+        if prompt_version == "broad-v3":
+            start = start.quantize(_NANOSECOND, rounding=ROUND_CEILING)
+            end = end.quantize(_NANOSECOND, rounding=ROUND_FLOOR)
+            if end <= start:
+                raise VideoEditorError(
+                    ErrorCategory.PROVIDER,
+                    "Gemini interval collapses at nanosecond precision",
+                    code="provider_invalid_request",
+                )
+        return GeminiAdapter._duration(start), GeminiAdapter._duration(end)
 
     @staticmethod
     def _duration(value: Decimal) -> str:

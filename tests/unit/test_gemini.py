@@ -1090,7 +1090,7 @@ def test_candidate_prompt_is_versioned_and_bounds_speech_meaning(
 
 @pytest.mark.parametrize(
     ("operation", "prompt_version"),
-    [("broad", "broad-v3"), ("candidate", "candidate-v1")],
+    [("broad", "broad-v99"), ("candidate", "candidate-v1")],
 )
 def test_unknown_prompt_version_is_rejected_before_generation(
     adapter: Any,
