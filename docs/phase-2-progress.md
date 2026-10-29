@@ -1,8 +1,19 @@
 # Phase 2 Progress and Resume Guide
 
-Last verified: **2026-10-22**. Audience: project owner and the next coding session. This is the canonical current-status document; update it after meaningful milestones, failures, paid attempts, or budget decisions. Historical implementation reports remain in the SDD ledger.
+Last status update: **2026-10-29**. Verification dates below identify each completed check. Audience: project owner and the next coding session. This is the canonical current-status document; update it after meaningful milestones, failures, paid attempts, or budget decisions. Historical implementation reports remain in the SDD ledger.
 
-## Current checkpoint: accepted attempt03 long edit
+## Current checkpoint: bounded scan quarantined; timestamp contract hardened offline
+
+- Development work remains uncommitted on `feat/bounded-broad-scan` at `693c97c`. Existing `feature/phase2-automatic-highlights` worktree and local recovery archive remain preserved. Accepted attempt03 output below is unchanged.
+- Exact approved attempt `dcim-1485-broad-20261028-01` completed one logical broad request for `GX011485.MP4` source seconds 0–720 using `gemini-3.8-flash`, `broad-v2`, 0.5 FPS, 8192 output-token cap and at most three generation attempts. No refinement/render. Application ledger settled USD 0.082152, reserved zero, remaining USD 1.417848. These are usage-derived ledger values, not provider invoice attestation; exact generation-attempt count was not persisted. Approval is consumed, not reusable.
+- Job `5775c9e6-c91f-4e62-9411-e016b5c8ac14` and durable attempt claim/request show bounded completion. Generic workflow job status remains `running` because standalone path does not finalize full workflow state; no process remains. Do not invoke ordinary `resume`, delete claim, or rewrite status to force another attempt.
+- Local sampled-frame review quarantines both returned candidates. Numeric windows 416–440 and 645–705 seconds do not match descriptions at sampled times. Wider timeline evidence strongly supports MMSS-shaped values (04:16–04:40 and 06:45–07:05), but raw wire response is unavailable and this is not an authorized timestamp correction or validated trim. Requested endpoint 720 remains 12-minute seconds, not 07:20. See [provisional review](evaluation-preparation/bounded-broad-review-20261029.json); later local diagnosis lives under `/Volumes/ssd/video-editor/workspace/5775c9e6-c91f-4e62-9411-e016b5c8ac14/temporal-diagnosis-20261029`.
+- Forward-only `broad-v3` prompt explicitly names elapsed decimal seconds on supplied proxy timeline, keeps interval origin, and supplies clock-conversion arithmetic examples. Prompt and metadata now share inward nanosecond bounds (start upward, end downward); collapsed intervals fail before remote-file activation/generation. Strict validation retains original Decimal bounds. Historical broad prompts/rounding, response schema, paid result rows and budget ceiling remain unchanged. No automatic MMSS conversion or semantic-grounding oracle added.
+- Verified migration review exposed silent candidate loss when changed broad bounds collided with an old refinement key. Refinement provenance now hashes broad cache lineage, candidate ID and exact numeric window using context-free integer ratios; registered chunk source bounds remain unchanged. Analyze identity version invalidates old completed-stage output. Changed broad provenance/window triggers fresh refinement; same new provenance reuses its cache. Ordinary run/resume can therefore incur fresh broad/refinement charges; no such run is authorized. Historical cache rows are not rewritten.
+- Offline regressions cover outgoing unit instructions, historical prompt text/rounding, serialized/nonzero offsets, unchanged clock-shaped legal seconds including 720, strict bounds rejection, collapsed intervals, legacy cache preservation, broad lineage and exact high-precision candidate windows. Each defect had expected RED assertion failures before its fix. Latest full offline gate: **1018 passed, 1 live test deselected, 1 existing multiprocessing/fork deprecation warning in 427.56 seconds**. Final focused gate: 103 passed/1 deselected in 1.06 seconds. Ruff lint/format (92 source/test files), source MyPy (37 files), compilation, offline wheel/sdist build and credential-free actual CLI preflight passed. Complete named output and contract evidence saved under `/tmp/video-editor-bounded-broad-20261026/review-fixes-20261029/`; prompt length 763–817 UTF-8 bytes, unchanged strict schema 3,923 bytes, nominal three-attempt reservation USD 0.262051. Prior 1007-test timestamp-contract gate remains historical. No live `broad-v3` validation performed. Stronger wording may reduce ambiguity but does not prove model timing accuracy.
+- No audiovisual playback or human acceptance of new candidates. Still inspection cannot establish motion smoothness, speech intelligibility, exact cuts or continuous stop duration. Existing review remains release-ineligible; no labels, independent batches, billing attestation or threshold changes inferred.
+
+## Accepted attempt03 long edit
 
 User reviewed attempt03 export on 2026-10-22 and said “the video looks good.” This records acceptance of this long edit, not release approval or acceptance of vertical shorts.
 
@@ -12,15 +23,15 @@ User reviewed attempt03 export on 2026-10-22 and said “the video looks good.�
 - Validator warning `persistent_black_bars` remains recorded. Sampled frames suggest dark night footage affects detection; neither samples nor user acceptance prove the warning false over every frame.
 - Billing: 11 completed broad requests plus 8 completed refinements, USD 0.515086 spent, USD 0 reserved, USD 0.422183 remaining under USD 0.937269 cap. Local rank/plan/render made zero provider calls. Remaining funds do not authorize new calls. Prior archived unknown-billing holds remain separate and untouched.
 - Preservation evidence: `post-render-preservation-20261022.json` records 40 protected hashes checked with no mismatch at 2026-10-22T04:51:58.471937+00:00. This is the render-time scan, not a new closeout hash scan.
-- Pending code includes chunk-qualified candidate identity and streaming crop tracking. Real planning previously exhausted memory by decoding an entire proxy; streaming completed the plan in 52 seconds with about 207 MB peak RSS. These changes remain uncommitted on `feature/phase2-automatic-highlights`; main lacks them. Preserve unrelated pending edits.
+- Chunk-qualified candidate identity, streaming crop tracking, failure-safe billing settlement, and retry-safe exFAT proxy generation are committed in `ad409e3` and merged into local main. Real planning previously exhausted memory by decoding an entire proxy; streaming completed the plan in 52 seconds with about 207 MB peak RSS. Preserve unrelated instruction edits and recovery files in the existing feature worktree.
 - October 12 acceleration and frame-index follow-ups were subsequently implemented with strict-limit regression tests and tracking-v4/v5 provenance. Do not restart those completed investigations from stale handoff text. Streaming review found no verified defect.
-- Current offline gate: **962 passed, 1 live test deselected, 1 known multiprocessing/fork deprecation warning in 398.69 seconds**. Ruff lint passed; all 85 source/test files pass formatting after a formatting-only duplicate-ID test fix; source MyPy passed for 36 files. Duplicate-ID regression rerun passed. Offline wheel/sdist build, supported `video-editor --help`, patch whitespace, checkpoint/ledger validation, and synthetic blocked-release CLI passed. No provider, Keychain, media/DB mutation, commit, push, or worktree cleanup during closeout.
+- Latest recorded full offline gate before local merge: **973 passed, 1 live test deselected, 1 multiprocessing/fork deprecation warning in 446.89 seconds**. Ruff lint and formatting passed for 86 source/test files; source MyPy passed for 36 files. Post-merge smoke tests passed 28/28 against main. These are recorded checks for committed source, not a fresh full-suite run for this documentation correction. Earlier acceptance closeout separately verified offline wheel/sdist build, supported `video-editor --help`, checkpoint/ledger validation, and synthetic blocked-release CLI. No new provider calls, Keychain access, source-media changes, or real job DB writes during commit/merge work; no push.
 
 ### Next task and release boundary
 
 Task 14 local preparation is complete: [labeling workflow and worksheets](evaluation-preparation/README.md), seven-summary evidence inventory, and detached checksums. Follow-on registration adds one exposed `trip-1` train/development batch, three persisted source records with historical hashes, and all 16 saved broad-candidate intervals as an explicitly biased unlabeled review queue. Label and audit sheets remain empty. No calibration/holdout batch, human labels, or new release attestations created. Schema/worksheet/link/digest checks passed; existing evaluation tests passed 11/11; synthetic CLI still blocked. Evaluator and threshold files unchanged. Preparation records current trip as already exposed to predictions/output feedback, not pristine holdout.
 
-Local acceptance closeout and current offline quality gate are complete. Keep Task 14 release evaluation blocked until independent artifact/billing/threshold provenance, holdout-only scoring, and real labels from at least three independent batches and 100 candidate intervals exist. Current footage belongs to one trip; additional files from that trip are not independent batches. Synthetic evaluation CLI still returns `release_status=blocked` and `metrics_status=unverified_input`. Do not fabricate labels, relax score/crop thresholds, run paid analysis, rerender accepted output, or commit/push without separate authorization.
+Local acceptance closeout, offline quality gate, and approved local merges are complete. Keep Task 14 release evaluation blocked until independent artifact/billing/threshold provenance, holdout-only scoring, and real labels from at least three independent batches and 100 candidate intervals exist. Current footage belongs to one trip; additional files from that trip are not independent batches. Next input is at least two genuinely independent collections with source locations, authorization, and independence rationale, plus genuine human annotation under the [labeling workflow](evaluation-preparation/README.md). Current 16 model-proposed windows support development review only, not full-source missed-highlight recall. No calibration/holdout collection or human label is registered. Synthetic evaluation CLI still returns `release_status=blocked` and `metrics_status=unverified_input`. Do not fabricate labels, relax score/crop thresholds, run paid analysis, rerender accepted output, or make further commits/pushes without separate authorization.
 
 ## Historical checkpoint: October 12 sandbox and crop comparison
 
@@ -68,28 +79,32 @@ Plan: [Phase 2 implementation plan](superpowers/plans/2026-09-28-phase-2-automat
 |---|---|---|
 | 0 | Closure state and execution gates | Complete |
 | 1–3 | Config/secret boundary, migrations/budget ledger, edit-plan v2 | Complete |
-| 4–7 | Registered proxies, segmentation, Gemini adapter, analysis/coverage gate | Implemented and offline-tested; live integration fixes below remain uncommitted |
-| 8–11 | Ranking/dedup/diversity, tracking, long/short planning, rendering | Complete at offline-test level |
-| 12 | Nine-stage CLI, resume, reporting | Complete at offline-test level; sandbox acceptance still pending |
+| 4–7 | Registered proxies, segmentation, Gemini adapter, analysis/coverage gate | Implemented, offline-tested, and merged locally with integration fixes in `ad409e3` |
+| 8–11 | Ranking/dedup/diversity, tracking, long/short planning, rendering | Complete at offline-test level; attempt03 long edit accepted, no vertical short accepted |
+| 12 | Nine-stage CLI, resume, reporting | Implemented and offline-tested; attempt03 completed all nine stages and long edit accepted |
 | 13 | Offline end-to-end safety and acceptance fixtures | Complete |
-| 14 | Evaluation harness, release gate, documentation | **Partial**: exploratory metrics exist; independently verified release evaluation is missing |
+| 14 | Evaluation harness, release gate, documentation | **Partial**: local preparation merged in `6466d24`; independently verified release evaluation is missing |
 
-Do not convert this task count into a release-completion percentage. Integration and output-quality acceptance are unfinished.
+Do not convert this task count into a release-completion percentage. One accepted long edit does not establish general output quality, vertical-short acceptance, or release readiness.
 
 ## Repository state and where to work
 
 - Main checkout: `/Users/coffeemug/Programming/automated-video-editing`.
 - Active feature worktree: `/Users/coffeemug/Programming/automated-video-editing/.claude/worktrees/feature-phase2-automatic-highlights`.
-- Feature branch: `feature/phase2-automatic-highlights`.
-- Last verified main and pushed feature head: **`b8743d4`**. Recheck before acting; other sessions can move branches.
-- Pricing commit: `849c165`; main integration: `b8743d4`.
+- Current primary-checkout branch: `feat/bounded-broad-scan`; bounded service and timestamp-contract work remain uncommitted. Separate existing feature-worktree branch: `feature/phase2-automatic-highlights`.
+- Last verified local main: **`693c97c`**. Source/tests commit `ad409e3`, evaluation/acceptance docs commit `6466d24`, and instruction commit `693c97c` were merged locally. None of these three commits was pushed by this work. Recheck before acting; other sessions can move branches.
+- Existing feature HEAD: `6466d24`. Its separate dirty `AGENTS.md`/`CLAUDE.md` edits and untracked `.continue-here.md`/`HANDOFF.json` were preserved, not merged over newer main instructions. Do not overwrite or clean that worktree.
+- Pricing commit: `849c165`; earlier main integration: `b8743d4`.
 - Earlier milestones: schema wire fix `708f1ef`, model switch `f4466b1`, timestamp guidance `61395a5`, duration precision `8242dca`, estimator calibration `a9ad5d8`, reservation ceiling `362eca9`.
-- Main does **not** contain the latest uncommitted fixes listed below. Run sandbox tests from the feature worktree, not from main's environment.
-- Root `task_plan.md` describes the completed Phase 1 HERO12 benchmark. It is historical, not the active Phase 2 status. Start here and in `HANDOFF.json` instead.
+- Main contains historical integration inventory below, not current uncommitted bounded/timestamp changes. Continue scoped work on `feat/bounded-broad-scan`; do not overwrite dirty feature worktree or execute stale recovery next steps.
+- `resume-archive/` remains intentionally local and untracked. Its 20 files were hash-verified unchanged during local merges. Preserve archive; do not batch-merge archived refs or delete recovery data without owner approval.
+- Root `task_plan.md` describes the completed Phase 1 HERO12 benchmark. It is historical, not active Phase 2 status. This guide and [evaluation preparation](evaluation-preparation/README.md) are current references; feature recovery files contain stale operational state.
 
-### Uncommitted work to preserve
+### Historical integration inventory, now merged locally
 
-| File | Pending change |
+Following source/test entries summarize previously pending work included in `ad409e3`; they are not a new pending-change list. Separate feature instruction/recovery edits remain excluded. Historical checkpoints above retain their original verification counts and operational state.
+
+| File | Merged change or preservation status |
 |---|---|
 | `src/video_editor/analysis/gemini.py` | Independent bounded processing wait; returned usage on invalid responses; safe structural diagnostics; exact candidate endpoint/ID validation; exact-echo candidate-v3 prompt; explicit SDK single-attempt policy and environment retry wiring |
 | `src/video_editor/cli.py` | Wire existing max_transient_attempts into adapter RetryPolicy |
@@ -101,11 +116,13 @@ Do not convert this task count into a release-completion percentage. Integration
 | `tests/unit/test_analysis_orchestrator.py` | Durable diagnostics, settlement, precise interval-rejection regressions |
 | `tests/unit/test_segmentation.py` | Tail-gap boundaries/truncation rejection and exact endpoint tests |
 | `tests/integration/test_phase2_workflow.py` | Interrupted chunk reuse and missing/tampered/stale chunk rejection |
-| `AGENTS.md`, `CLAUDE.md` | Separate instruction/index edits; provenance not confirmed. Leave untouched and do not stage blindly. `CLAUDE.md` also has a worktree-cleanup rule removed in its diff. |
+| `AGENTS.md`, `CLAUDE.md` | Main-checkout instruction updates committed separately in `693c97c`. Older feature-worktree instruction diffs remain preserved and excluded. |
 
-Documentation/handoff files added at this checkpoint are separate from the code fixes. No commit or push is authorized by a request to save context.
+Evaluation and acceptance documentation was committed separately in `6466d24`. Feature `.continue-here.md` and `HANDOFF.json` remain untracked recovery files, not current execution instructions. This status correction authorizes no further commit or push.
 
-## Fresh SSD sandbox preparation
+## Historical fresh SSD sandbox preparation
+
+October 6–7 preparation snapshot only; completed/superseded by later checkpoints. This section grants no current execution or paid approval.
 
 - Large-file root: `/Volumes/ssd/video-editor/phase2-sandbox-20261006/{input,workspace,cache,output}`; mounted exFAT, about313.91GiB free after copies.
 - Config: `~/Library/Application Support/video-editor/phase2-ssd-sandbox-20261006/config.toml`.
@@ -138,7 +155,7 @@ Documentation/handoff files added at this checkpoint are separate from the code 
 
 The entire trip has 18 source files, about 11.56 hours and 142.17 GiB. All belong to evaluation batch `trip-1`. First three files were selected only as technical subsets: `GX011485.MP4`, `GX011486.MP4`, `GX011487.MP4`. They are not independent train/calibration/holdout batches.
 
-### Current job ledger
+### Historical archived-job ledger
 
 These are **local ledger amounts**, not independently verified invoices. Snapshot read from SQLite on 2026-10-06:
 
@@ -160,7 +177,7 @@ These are **local ledger amounts**, not independently verified invoices. Snapsho
 - Tail chunk (source origin 720): `cand_1` at **50–65 s**, `cand_2` at **98.5–116 s**, relative to that chunk's proxy.
 - IDs are scoped by their actual chunk and cache identity. Do not infer equivalence from a short ID string alone.
 
-## Remaining-candidate preflight (2026-10-06)
+## Historical remaining-candidate preflight (2026-10-06)
 
 Read-only SQLite and offline estimation verified all four remaining windows. Existing broad cache keys match current broad identities; no broad rescan is needed. Exact-echo prompt now has distinct `candidate-v3` identity in workflow and adapter; response schema remains `candidate-v2`. All four new prompt cache keys are unused. Old `candidate-v2` unknown request remains held and unchanged.
 
@@ -200,7 +217,9 @@ Prices used: Gemini Developer API Standard input USD 0.75 per million tokens; ou
 
 Broad VIDEO token counts were about 58 tokens/s on the 60- and 900-second samples. AUDIO was not listed separately. This does not prove that audio is free or always folded into VIDEO. A few measurements do not establish a guaranteed upper bound, deterministic tokenization for all footage, story quality, or full-trip cost.
 
-## Failures already understood—do not rediscover
+## Historical failure inventory—do not rediscover
+
+Point-in-time descriptions below predate local merge. Entries described as pending were subsequently committed in `ad409e3`; later checkpoint evidence above supersedes their old running/pending state.
 
 | Failure | Evidence and resolution |
 |---|---|
@@ -225,11 +244,19 @@ Broad VIDEO token counts were about 58 tokens/s on the 60- and 900-second sample
 - Reserve before dispatch. Returned complete usage can settle through existing ownership/cost checks; unknown billing remains held. No speculative release or unapproved limit increase.
 - Keep **10 GiB storage reserve**. Recheck available space before renders/resumes. Never delete caches or reduce reserve without approval.
 - Key lives in macOS Keychain under service `automated-video-editing-gemini`, account = login user. Runtime use only; never put value in chat, files, logs, reports, config or git. Keychain entry is not automatically exported to the CLI. User intends rotation when testing ends.
-- Active paid scope on2026-10-07: **four exact refinements** for job `ebc41996-05a2-476c-acc4-14fb7ebcd22c`,5FPS,8192 output cap,one attempt each,combined reservation<=USD0.216075; user explicitly approved after fresh broad success. Source windows245–320,490–585,770–782,858–873s. Refinement batch stopped after first paid call: subject_boxes schema rejection,USD0.006257 settled,zero validated candidate caches. Remaining three were not dispatched. Exclusive batch marker retained; no automatic restart or retry. Two broad approvals consumed withUSD0.049672 settlement; never rescan automatically. No rank/plan/render or paid retry approved. Next diagnose offline before requesting any further paid scope.
+- Historical paid scope on2026-10-07 (superseded; not current authorization): **four exact refinements** for job `ebc41996-05a2-476c-acc4-14fb7ebcd22c`,5FPS,8192 output cap,one attempt each,combined reservation<=USD0.216075; user explicitly approved after fresh broad success. Source windows245–320,490–585,770–782,858–873s. Refinement batch stopped after first paid call: subject_boxes schema rejection,USD0.006257 settled,zero validated candidate caches. Remaining three were not dispatched. Exclusive batch marker retained; no automatic restart or retry. Two broad approvals consumed withUSD0.049672 settlement; never rescan automatically. No rank/plan/render or paid retry approved. Next diagnose offline before requesting any further paid scope.
 - Do not create a new job claiming it can directly reuse job-owned manifests/cache rows from the old job. Ownership checks prohibit that. Do not bypass them or reset the original request's state to enable retry.
 - No automatic full-trip run. No automatic commit, push or merge of pending fixes.
 
-## Next actions, in order
+## Current next actions
+
+1. Obtain independent collection metadata and genuine human development annotations using [collection readiness](evaluation-preparation/collection-readiness.md) and [labeling workflow](evaluation-preparation/README.md). Do not inspect untouched holdout during development or turn this exposed trip into multiple batches.
+2. Keep release blocked until independently verified artifact/billing/threshold linkage, holdout-only scoring, applied thresholds, and human-study evidence exist. Satisfying dataset-size metadata alone is insufficient.
+3. Preserve accepted output, old ledgers/unknown holds, active feature edits, and local recovery archive. No paid analysis, rerender, commit, push, or cleanup is authorized by this status correction.
+
+### Historical next actions from October 7, not executable instructions
+
+Following list is retained only as recovery history. Sandbox completion, attempt03 long-edit acceptance, and local commits subsequently occurred; old paid scopes are not renewed. Use current next actions above.
 
 1. **Use fresh SSD config; do not resume archived job.** Verify SSD mount/identity, source SHA-256 and free space before execution. Old ledger/evidence retained; old cache/workspace now exist only as SSD archives, not valid imported job artifacts.
 2. **Execute approved four-refinement scope after exact local preflight.** Latest full875tests passed; new SSD job `ebc41996-05a2-476c-acc4-14fb7ebcd22c` has two validated broad caches and complete coverage. Revalidate source/volume/storage, exact chunk-scoped candidate windows,5FPS and USD0.216075 aggregate cap before runtime key. One-shot private runner `refine-only-20261007.py` stops before rank/plan/render and prohibits repeated dispatch. OldUSD0.222501 estimate remains historical.
@@ -241,8 +268,8 @@ Broad VIDEO token counts were about 58 tokens/s on the 60- and 900-second sample
 
 ## Evidence and navigation
 
-- Human handoff: [Continue here](../.continue-here.md).
-- Machine handoff: [HANDOFF.json](../HANDOFF.json).
+- Current evaluation handoff: [Task 14 preparation](evaluation-preparation/README.md) and [collection readiness](evaluation-preparation/collection-readiness.md).
+- Historical `.continue-here.md` and `HANDOFF.json` exist only as untracked recovery files in the preserved feature worktree; they are not current main-checkout instructions.
 - Architecture: [architecture.md](architecture.md).
 - Historical SDD ledger: [progress.md](../.superpowers/sdd/2026-09-28-phase-2-automatic-highlights/progress.md). It contains point-in-time claims; use this document for current state.
 - Focused task plans: `processing-wait-task_plan.md`, `audio-tail-task_plan.md`, `endpoint-recovery-task_plan.md`, `refinement-diagnostics-task_plan.md`, `refinement-contract-task_plan.md` beside the SDD ledger.
@@ -250,14 +277,30 @@ Broad VIDEO token counts were about 58 tokens/s on the 60- and 900-second sample
 - Read-only preflight evidence: `<sandbox>/evidence/sandbox-preflight-20261006.json`, `sandbox-ledger-preflight-20261006.json`, `sandbox-candidate-inputs-20261006.json`, `sandbox-candidate-preflight-20261006.json` and `sandbox-preflight-offline-tests-20261006.log`. Focused plan: `.superpowers/sdd/2026-09-28-phase-2-automatic-highlights/sandbox-preflight/task_plan.md`.
 - Versioned prompt preflight: `<sandbox>/evidence/sandbox-candidate-v3-preflight-20261006.json`; current totals and new/old key comparison, no dispatch. Code task plan: `.superpowers/sdd/2026-09-28-phase-2-automatic-highlights/bounded-refinement/task_plan.md`.
 - One-attempt readiness evidence: `<sandbox>/evidence/sandbox-one-attempt-ready-20261006.json`; parsed config, unchanged ledger/cache, no active process and current storage failure. No paid approval or dispatch.
-- Current gate logs: `<sandbox>/evidence/bounded-refinement-full-20261006.log`, `bounded-refinement-quality-20261006.log`, `bounded-refinement-green-20261006.log` and `bounded-refinement-format-failure-20261006.log`.
+- Historical October 6 gate logs: `<sandbox>/evidence/bounded-refinement-full-20261006.log`, `bounded-refinement-quality-20261006.log`, `bounded-refinement-green-20261006.log` and `bounded-refinement-format-failure-20261006.log`.
 - Durable sanitized failure files: `<sandbox>/state/analysis-failures/<job_id>/analysis-failure-<request_id>.json`.
-- Full offline gate log: `/private/tmp/claude-501/-Users-coffeemug-Programming-automated-video-editing/b6ecea29-3978-433a-bc97-073d1566314c/tasks/bn0l5n21h.output`. Terminal task logs are temporary; durable job evidence and this status record must remain sufficient if they disappear.
+- Latest full offline gate: `/tmp/video-editor-bounded-broad-20261026/review-fixes-20261029/full-offline-final.log` (1018 passed, 1 live deselected, 1 existing fork warning, 427.56 seconds). Historical merged-source gate: `/tmp/video-editor-task14-O7CSPHBQ/full-offline-final.log` (973 passed, 1 live deselected, 1 fork warning, 446.89 seconds); post-merge smoke: `/tmp/video-editor-task14-O7CSPHBQ/main-smoke.log` (28 passed). Temporary logs may disappear; recorded status is not a replacement for missing independently verifiable release evidence.
 - Private evidence may contain scene/provider text in raw CLI outputs; do not publish or commit raw sandbox logs.
 
 ## Updating this record
 
 After a meaningful change, replace the current checkpoint, repository state, stage table, budget table, evidence references and next action together. Append a dated entry below and in the historical SDD ledger. Never mark completion solely from a shell exit code: verify the relevant DB row, file, returned usage or rendered output. Record failed gates and any skipped validation. Leave unresolved billing explicit.
+
+### 2026-10-29 offline cache-provenance and timestamp-precision fixes
+
+Independent review reproduced candidate loss across the broad-v2/broad-v3 migration: old refinement bounds failed semantic cache checks, but the same validated cache key prevented a new reservation. A separate inherited broad-v2 rounding issue could advertise an endpoint outside original Decimal bounds. Scoped fixes retain broad lineage plus candidate ID/exact window in refinement provenance and use inward nanosecond metadata/prompt bounds for broad-v3 only. A further RED regression caught context-dependent Decimal normalization collisions; integer ratios now preserve exact numeric identity. Chunk source bounds, historical paid records, raw response validation, schema, retry/output limits and USD 0.262051 reservation remain unchanged.
+
+Final full offline suite: **1018 passed, 1 live deselected, 1 existing fork warning in 427.56 seconds**. Focused suite: 103 passed/1 deselected in 1.06 seconds. Disposable source with fixes removed fails ten regressions with one integer control passing; fixed primary source passes all eleven new cases in ten consecutive runs. Ruff (92 files), MyPy (37 sources), compilation, offline wheel/sdist build and actual credential-free nominal CLI preflight pass. Logs: `/tmp/video-editor-bounded-broad-20261026/review-fixes-20261029/`. Independent follow-up agent review was blocked by its stale isolated checkout and supplied no verdict; source/AST checks and behavioral tests were performed locally. An interrupted earlier full run does not count as a passing gate. No live broad-v3 semantic validation, new labels, release eligibility, provider calls, credential access, real media/DB writes, commits or pushes.
+
+### 2026-10-22 local merge and status reconciliation
+
+Verified local main contains `ad409e3`, `6466d24`, and `693c97c`. Reconciled stale pending/main-lacks descriptions and marked superseded execution instructions historical. Fresh offline evaluation contract tests passed **11/11 in 0.20 seconds**; no new full-suite run for documentation-only correction. Prior full-suite evidence remains 973 passed/1 live deselected/1 fork warning. Labels/audit remain empty, one batch and 16 development queue intervals remain registered, and release stays blocked. No commit or push for this correction; protected archive and feature files remain unchanged.
+
+### 2026-10-22 DCIM pool inventory and scoped acceptance feedback
+
+User asked to expand video pool using remaining DCIM footage and said portions included in accepted `long.mp4` are acceptable. Read-only `ffprobe` inventory of `/Volumes/ssd/DCIM/100GOPRO` found 18 MP4s, 152,659,041,281 bytes and 41,600.725834 seconds total; 15 filenames outside attempt03 subset total 34,004.537234 seconds. Companions `.LRV`/`.THM` excluded. Filename/count/byte/duration match historical benchmark inventory, but DCIM content hashes were not rescanned; this does not prove additional independent collections. No media copied, decoded, or changed; no DB/provider use.
+
+Saved attempt03 plan SHA-256 `6c4056196106b13ca146abec3276ff38ad2804b073104d72ceeb8ad9e3c02661` matches render report plan digest. Seven exact queue intervals map to plan clips and are recorded as `acceptable=true`: 001, 002, 004, 006, 007, 008, 010. Nine omitted queue intervals remain unreviewed. This is output-exposed development feedback; strict label/audit sheets remain header-only because other fields were not provided. See [pool inventory](evaluation-preparation/dcim-development-pool-20261022.json), [accepted spans](evaluation-preparation/accepted-intervals-attempt03.json), [partial judgments](evaluation-preparation/acceptable-feedback-attempt03.csv), and [feedback record](evaluation-preparation/user-feedback-attempt03.json). New-record checksums pass. No provider analysis, new job, collection registration, commit, or push. Release remains blocked.
 
 ### 2026-10-06 checkpoint
 

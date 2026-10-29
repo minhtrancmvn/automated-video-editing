@@ -16,6 +16,12 @@ Checked 2026-10-22 against existing project documentation and preparation record
 
 Prior Phase 1 vertical renders used first-eight-second sample planning. Their existence does not establish Phase 2 automatic-short quality or supply current short-diversity/crop evaluation evidence.
 
+## DCIM expansion and partial owner feedback (2026-10-22)
+
+User authorized expanding video pool using remaining DCIM footage. Metadata-only inventory at `/Volumes/ssd/DCIM/100GOPRO` found 18 MP4s totaling 41,600.725834 seconds and 152,659,041,281 bytes, including 15 filenames outside attempt03 subset. Count/bytes/duration match historical full-trip benchmark; no new trip independence inferred and no media content hash scan performed. See [development pool inventory](dcim-development-pool-20261022.json). Additional footage is available for development preparation, not registered calibration/holdout evidence or paid execution.
+
+User also accepts portions included in prior `long.mp4`. Seven queue intervals match exact saved-plan spans and chunk-qualified identity, with plan digest linked to saved render report; [partial feedback](acceptable-feedback-attempt03.csv) records these judgments. Other required label fields and nine omitted queue judgments remain unknown. This is real output-exposed acceptance feedback, not complete or blinded release labels.
+
 ## Required external input
 
 1. Supply at least two additional genuinely independent collections, with collection context, source locations, ownership/authorization, and independence rationale. If more collections are available, choose a justified split rather than minimizing to the numerical precondition.

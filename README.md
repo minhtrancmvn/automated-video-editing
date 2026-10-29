@@ -60,6 +60,24 @@ video-editor status JOB_ID --config CONFIG
 video-editor resume JOB_ID --config CONFIG
 ```
 
+### One-interval broad scan
+
+`bounded-broad` is separate from `run`/`resume`: it accepts one explicit video file and one source-local interval, submits one logical broad request, and never refines candidates or renders. Example below performs a nominal offline preflight only:
+
+```bash
+video-editor bounded-broad /Volumes/ssd/DCIM/100GOPRO/GX011485.MP4 --config config.toml --start 0 --end 720 --attempt-id dcim-1485-broad-01
+```
+
+Preflight does not open footage, generate media, create a job/database, read a key, or construct a provider client. Its estimate is nominal: actual source duration, generated proxy digest, and final bound are checked only during dispatch preparation. Current bounded interface fixes model to `gemini-3.8-flash`, broad sampling to 0.5 FPS, generation attempts to three, per-request reservation ceiling to USD 0.262051, and job budget to USD 1.50. These are conservative application reservations, not provider billing guarantees. Pricing expiry fails closed.
+
+New broad requests use `broad-v3`: timestamps must be elapsed decimal seconds on the supplied proxy timeline, with explicit arithmetic examples such as `04:16 = 256`. Prompt and video metadata share a nanosecond interval rounded inward: start upward, end downward. An interval with no positive duration after serialization fails before remote-file activation or generation; strict response validation still uses original Decimal bounds. Response schema remains unchanged; no digit-shape heuristic rejects or converts valid seconds. This is prompt disambiguation, not proof of temporal grounding. Historical `broad-v1`/`broad-v2` prompts, rounding behavior and stored results remain unchanged.
+
+Candidate refinement cache identity retains the broad cache lineage, candidate ID and exact canonical candidate window without changing registered chunk source bounds. Changed broad provenance or candidate bounds requires fresh refinement; matching new provenance can reuse its validated result. Analyze-stage identity also changes. Ordinary `run`/`resume` may therefore require fresh paid analysis rather than reuse older broad or candidate results; never resume a bounded attempt through that path.
+
+Only after fresh approval of exact source/range/cost **and prompt version** may `--dispatch` be added. Dispatch inspects that file alone and first creates its **whole-source local proxy/audio cache** using existing provenance and storage guards, then generates and authorizes only the requested cloud proxy interval. Local preparation may take substantially longer and use more SSD space than the selected interval suggests. No original media is uploaded. Runtime `GEMINI_API_KEY` is needed only after final proxy/cost validation.
+
+Use durable local state storage. Attempt IDs are atomically claimed under `<state_dir>/bounded-attempts/` before job preparation. Reusing any claimed ID is refused, including incomplete setup, failed dispatch, and unknown billing; this entry point has no automatic retry/resume across invocations. A claim with a job ID links to existing job/ledger state. After interruption or status-write failure, inspect claim and database before considering a separately approved new attempt; never delete claims or use a new ID to blindly retry. A different state directory is a separate ledger and does not share replay protection. `status JOB_ID` may inspect job state; do not use ordinary `resume` for a bounded attempt because it can invoke the full workflow.
+
 `plan` uses positional `OUTPUT_PATH`, and it must equal configured `output_dir`. One-command acceptance path:
 
 ```bash

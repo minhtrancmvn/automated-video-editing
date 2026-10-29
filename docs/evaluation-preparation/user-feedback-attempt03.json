@@ -1,0 +1,23 @@
+{
+  "schema_version": "development-user-feedback-v1",
+  "recorded_on": "2026-10-22",
+  "job_id": "1b4de182-583e-4978-911b-46cdc708b5f8",
+  "batch_id": "trip-1",
+  "partition": "train",
+  "release_eligible": false,
+  "reviewer": "project owner",
+  "feedback_verbatim": "if they're within the long.mp4 video before then they're all acceptable",
+  "reference_output": "/Volumes/ssd/video-editor/phase2-trip-batch-20261020-attempt03/output/1b4de182-583e-4978-911b-46cdc708b5f8/long.mp4",
+  "judgment": "acceptable",
+  "scope": "Source portions actually included in the previously accepted attempt03 long.mp4 only. Wider broad-candidate windows are not accepted solely because they overlap an included portion.",
+  "exposure": "User reviewed generated output; feedback is not blinded source annotation or pristine holdout evidence.",
+  "coverage_mapping_status": "seven_exact_queue_intervals_matched_to_saved_plan_and_render_report_digest",
+  "accepted_source_spans_file": "accepted-intervals-attempt03.json",
+  "partial_acceptable_judgments_file": "acceptable-feedback-attempt03.csv",
+  "mapping_limit": "Saved plan matches render report digest; video bytes and rendered boundary fidelity were not revalidated. This is development feedback, not independent artifact attestation.",
+  "unreviewed_material": "Omitted source portions, unselected windows, and additional DCIM footage remain unreviewed.",
+  "other_label_fields": "Not supplied. No must_include, weak, duplicate, chapter, chronology, subject-box, or transition judgments inferred.",
+  "strict_evaluation_label_rows_created": 0,
+  "pool_expansion_request_verbatim": "extend the video pool as the DCIM folder still contains a lot more footage",
+  "pool_expansion_scope": "Read-only local metadata inventory first. Additional files do not establish independent collections or authorize paid analysis."
+}

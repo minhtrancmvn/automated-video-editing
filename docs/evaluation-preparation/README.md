@@ -23,6 +23,14 @@ Open `review-queue-attempt03.csv` to locate existing source windows, then review
 
 Only `trip-1` is currently registered. Existing-project inventory search found no evidence establishing further independent collections; see [collection readiness and required input](collection-readiness.md). No calibration or holdout batch exists. Train assignment was recorded during this preparation, not backdated before prior analysis. Existing evidence inventory describes the preceding preparation snapshot; its `not_assigned` field is historical and superseded for this train registration only. It remains valid that no release partition set or threshold freeze is established.
 
+## Expanded development pool and owner feedback (2026-10-22)
+
+User requested remaining DCIM footage be added to video pool. [DCIM metadata inventory](dcim-development-pool-20261022.json) now lists all 18 MP4s under `/Volumes/ssd/DCIM/100GOPRO`: 152,659,041,281 bytes and 41,600.725834 seconds (11h 33m). Fifteen filenames are outside attempt03's three-file subset, totaling 34,004.537234 seconds (9h 27m). LRV/THM companions are excluded from primary footage count. This expands local development inventory only; no files were copied, analyzed by a provider, or registered into a new job. Names/count/bytes match historical trip inventory, but source content hashes were not rescanned. No new independent collection or holdout assignment established.
+
+Owner states portions included in accepted `long.mp4` are acceptable. [Verbatim feedback](user-feedback-attempt03.json), [exact saved-plan mapping](accepted-intervals-attempt03.json), and [seven partial judgments](acceptable-feedback-attempt03.csv) record `acceptable=true` for queue IDs **001, 002, 004, 006, 007, 008, 010** only. Each matches exact source endpoints and chunk-qualified candidate identity; saved plan SHA-256 matches render report's plan digest. Video bytes and rendered boundary fidelity were not revalidated here. Remaining nine queue intervals stay unreviewed, not rejected.
+
+Original queue and its checksums remain unchanged as preparation snapshot. Apply feedback CSV as an overlay when reviewing; its seven judgments are output-exposed development feedback, not complete `EvaluationLabel` rows or blind annotation. Strict `labels.csv` and `annotation-audit.csv` remain header-only because required fields were not supplied. Do not default unknown must-include, duplicate, chronology, box, or transition fields. [Pool/feedback checksums](pool-feedback-checksums.sha256) cover new records separately without rewriting earlier evidence manifests.
+
 ## Human labeling workflow
 
 1. Register genuinely independent collections in `batches.csv` before labeling. Record collection description, independence rationale, source manifest path and SHA-256, and a reviewer. Files or excerpts from the same trip remain one batch. Current trip cannot become three batches by renaming files.

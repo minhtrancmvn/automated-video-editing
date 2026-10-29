@@ -1,0 +1,113 @@
+{
+  "schema_version": 1,
+  "review_date": "2026-10-29",
+  "review_type": "assistant_local_sampled_frame_review",
+  "release_eligible": false,
+  "human_acceptance_labels_written": false,
+  "attempt_id": "dcim-1485-broad-20261028-01",
+  "job_id": "5775c9e6-c91f-4e62-9411-e016b5c8ac14",
+  "request_id": "991955f5-bdb3-5482-9d95-c0f521f37517",
+  "source_path": "/Volumes/ssd/DCIM/100GOPRO/GX011485.MP4",
+  "source_interval_seconds": [0, 720],
+  "proxy_sha256": "a5e6d3bf4f1a97d206ff9a7d672b8fb3365ed2581c9423fc818226bb23ed3b37",
+  "time_basis": "source-local seconds; bounded proxy starts at source second zero",
+  "live_scan": {
+    "model": "gemini-3.8-flash",
+    "prompt_version": "broad-v2",
+    "sampling_fps": 0.5,
+    "contract_coverage_seconds": 720,
+    "semantic_accuracy_established": false,
+    "app_settled_cost_usd": "0.082152",
+    "provider_invoice_independently_verified": false,
+    "additional_paid_calls_during_review": 0
+  },
+  "evidence_directory": "/Volumes/ssd/video-editor/workspace/5775c9e6-c91f-4e62-9411-e016b5c8ac14/candidate-review-20261029",
+  "evidence_files": {
+    "frame_index": "frame-index.json",
+    "candidate_1_contact_sheet": "candidate_1-contact-sheet.jpg",
+    "candidate_2_contact_sheet": "candidate_2-contact-sheet.jpg",
+    "original_proxy_comparison": "source-proxy-comparison.jpg",
+    "original_proxy_sample_index": "source-proxy-check.json",
+    "checksums": "checksums.json"
+  },
+  "candidates": [
+    {
+      "candidate_id": "candidate_1",
+      "provider_interval_seconds": [416, 440],
+      "provider_description": "Smooth transition from city streets onto an expansive illuminated highway bridge with distant lit hotels.",
+      "sample_times_seconds": [408, 412, 416, 420, 424, 428, 432, 436, 440, 444, 448, 452],
+      "observations": [
+        "Samples at 408, 412 and 416 show a traffic-signal intersection stop.",
+        "Samples at 420 and 424 contain pronounced blur.",
+        "Samples at 428, 432 and 436 show illuminated multi-lane road travel; 440 onward shows a darker, narrower road.",
+        "Bridge identity and distant lit hotels are not established by these samples."
+      ],
+      "provisional_recommendation": "hold_from_automatic_edit",
+      "editorial_note": "Possible connective travel footage, not an established clean highlight. Inspect 428-438 seconds in full motion before considering a short connective beat; this is a playback focus, not a validated trim or edit decision.",
+      "acceptance_status": "not_human_labeled"
+    },
+    {
+      "candidate_id": "candidate_2",
+      "provider_interval_seconds": [645, 705],
+      "provider_description": "Rider pauses at a junction to inspect map navigation on the smartphone before venturing onto a dark rural highway.",
+      "sample_times_seconds": [637, 645, 653, 661, 669, 677, 685, 693, 701, 705, 709, 713],
+      "observations": [
+        "Samples throughout the proposed interval show changing road position, roadside features and passing headlights.",
+        "Mounted navigation display is visible, but sampled frames do not substantiate a stationary junction map-check event.",
+        "The proposed story-milestone description conflicts with sampled road-travel evidence; sparse frames do not rule out a brief unsampled stop."
+      ],
+      "provisional_recommendation": "quarantine_description_and_timing",
+      "editorial_note": "Do not use as a confirmed navigation story milestone or accepted evaluation label. Inspect full-motion footage and investigate temporal grounding before spending on refinement.",
+      "acceptance_status": "not_human_labeled"
+    }
+  ],
+  "original_proxy_spot_check": {
+    "sample_times_seconds": [416, 669],
+    "observed": "Original and cached proxy show the same road/cockpit scene at each sampled timestamp; no obvious large offset at these points.",
+    "full_mapping_validation": false
+  },
+  "local_diagnostics": {
+    "candidate_1": {
+      "context_interval_seconds": [408, 452],
+      "exit_code": 0,
+      "scene_events_above_0_25": 0,
+      "black_intervals_detected": 0,
+      "silence_intervals_detected": 0,
+      "audio_peak_dbfs": -1.578845,
+      "audio_rms_dbfs": -13.778702
+    },
+    "candidate_2": {
+      "context_interval_seconds": [637, 715],
+      "exit_code": 0,
+      "scene_events_above_0_25": 0,
+      "black_intervals_detected": 0,
+      "silence_intervals_detected": 0,
+      "audio_peak_dbfs": -1.688957,
+      "audio_rms_dbfs": -13.187593
+    },
+    "thresholds": {
+      "black_pixel_luma_fraction": 0.10,
+      "black_picture_fraction": 0.98,
+      "black_minimum_seconds": 0.5,
+      "silence_noise_db": -35,
+      "silence_minimum_seconds": 0.7
+    },
+    "limitations": "No threshold events does not establish clean motion, correct scene summaries, absence of noise, or intelligible speech. Audio was not auditioned."
+  },
+  "preservation": {
+    "proxy_digest_unchanged_after_review": true,
+    "source_size_and_mtime_unchanged": true,
+    "source_full_file_before_after_digest_available": false,
+    "protected_existing_files_unchanged": 28,
+    "real_database_opened_read_only_for_verification": true,
+    "new_analysis_requests": 0,
+    "candidate_refinement_performed": false,
+    "new_video_render_performed": false,
+    "credential_access_during_review": false,
+    "review_images_published_or_uploaded": false,
+    "cleanup_performed": false,
+    "ssd_free_gib_observed": 283.54
+  },
+  "status_caveat": "Bounded attempt claim and request are complete. Generic workflow job remains running because standalone path does not finalize full workflow status. No process is pending; do not invoke ordinary resume.",
+  "next_action": "Local full-motion review and temporal-grounding diagnosis before automatic selection or additional paid analysis. Any further provider attempt or video rendering requires separate explicit approval."
+}

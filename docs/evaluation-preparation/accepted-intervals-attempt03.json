@@ -1,0 +1,94 @@
+{
+  "plan_path": "/Volumes/ssd/video-editor/phase2-trip-batch-20261020-attempt03/output/1b4de182-583e-4978-911b-46cdc708b5f8/plans/long.json",
+  "plan_sha256": "6c4056196106b13ca146abec3276ff38ad2804b073104d72ceeb8ad9e3c02661",
+  "report_path": "/Volumes/ssd/video-editor/phase2-trip-batch-20261020-attempt03/output/1b4de182-583e-4978-911b-46cdc708b5f8/report.json",
+  "report_sha256": "c82e47182d5aa8aa7bc5d79ef0b043a58a8d1b3544045e9ad2cd1e798942e8d7",
+  "plan_digest_matches_render_report": true,
+  "output_path": "/Volumes/ssd/video-editor/phase2-trip-batch-20261020-attempt03/output/1b4de182-583e-4978-911b-46cdc708b5f8/long.mp4",
+  "output_exists": true,
+  "output_sha256_reverified": false,
+  "linkage_limit": "Plan digest matches saved render report; accepted video bytes and rendered boundary fidelity were not revalidated during this metadata-only task.",
+  "accepted_source_spans": [
+    {
+      "interval_id": "trip-1-attempt03-review-001",
+      "source_id": "3e980377317a02f4e034b401aa6efc506b97573c5abc922828b71b3a0c19d9db",
+      "source_file": "GX011488.MP4",
+      "start": "112.0",
+      "end": "175.0",
+      "clip_id": "phase2:analysis-chunk-fbba97cbb16497f38543b4b8dd986f3f31f31d21c37c20b4ba0bb86c1f906dda:cand_001",
+      "acceptable": true,
+      "basis": "User acceptance of this exact included interval in generated long.mp4; output-exposed development feedback."
+    },
+    {
+      "interval_id": "trip-1-attempt03-review-002",
+      "source_id": "3e980377317a02f4e034b401aa6efc506b97573c5abc922828b71b3a0c19d9db",
+      "source_file": "GX011488.MP4",
+      "start": "970.0",
+      "end": "1005.0",
+      "clip_id": "phase2:analysis-chunk-54b92fa0417da8e016cd7f99894791635e77556a296449ebbdab98fdcce1a73c:cand_1",
+      "acceptable": true,
+      "basis": "User acceptance of this exact included interval in generated long.mp4; output-exposed development feedback."
+    },
+    {
+      "interval_id": "trip-1-attempt03-review-004",
+      "source_id": "3e980377317a02f4e034b401aa6efc506b97573c5abc922828b71b3a0c19d9db",
+      "source_file": "GX011488.MP4",
+      "start": "2396.552166999999826657585800",
+      "end": "2446.552166999999826657585800",
+      "clip_id": "phase2:analysis-chunk-63a51e073c5fe5aadffe4f99328fc7ded670d37674cfaa0b676bdd592887d8ff:cand_001",
+      "acceptable": true,
+      "basis": "User acceptance of this exact included interval in generated long.mp4; output-exposed development feedback."
+    },
+    {
+      "interval_id": "trip-1-attempt03-review-006",
+      "source_id": "12ecefb255f860f9b8fcdafaa4c0853ece2afe6f5e09fda7e573aa5dc8e36ae6",
+      "source_file": "GX011489.MP4",
+      "start": "305.0",
+      "end": "365.0",
+      "clip_id": "phase2:analysis-chunk-16f306c6a26c674d2ff6914dc688af84b174bee92ced2d977d9ae3e4e2f41693:cand_1",
+      "acceptable": true,
+      "basis": "User acceptance of this exact included interval in generated long.mp4; output-exposed development feedback."
+    },
+    {
+      "interval_id": "trip-1-attempt03-review-007",
+      "source_id": "12ecefb255f860f9b8fcdafaa4c0853ece2afe6f5e09fda7e573aa5dc8e36ae6",
+      "source_file": "GX011489.MP4",
+      "start": "1169.0",
+      "end": "1189.0",
+      "clip_id": "phase2:analysis-chunk-d37206475a9bcde35a65de22c0e156cab35fad34d6c8750ba3f80cd1bf8ebe44:cand_1",
+      "acceptable": true,
+      "basis": "User acceptance of this exact included interval in generated long.mp4; output-exposed development feedback."
+    },
+    {
+      "interval_id": "trip-1-attempt03-review-008",
+      "source_id": "12ecefb255f860f9b8fcdafaa4c0853ece2afe6f5e09fda7e573aa5dc8e36ae6",
+      "source_file": "GX011489.MP4",
+      "start": "1384.0",
+      "end": "1400.0",
+      "clip_id": "phase2:analysis-chunk-d37206475a9bcde35a65de22c0e156cab35fad34d6c8750ba3f80cd1bf8ebe44:cand_2",
+      "acceptable": true,
+      "basis": "User acceptance of this exact included interval in generated long.mp4; output-exposed development feedback."
+    },
+    {
+      "interval_id": "trip-1-attempt03-review-010",
+      "source_id": "12ecefb255f860f9b8fcdafaa4c0853ece2afe6f5e09fda7e573aa5dc8e36ae6",
+      "source_file": "GX011489.MP4",
+      "start": "2332.0",
+      "end": "2354.0",
+      "clip_id": "phase2:analysis-chunk-4eb149cf4391e550f284ff2905799882a4795a3dc4b80f1f1976ba4dd01352f7:cand_1",
+      "acceptable": true,
+      "basis": "User acceptance of this exact included interval in generated long.mp4; output-exposed development feedback."
+    }
+  ],
+  "unreviewed_queue_ids": [
+    "trip-1-attempt03-review-003",
+    "trip-1-attempt03-review-005",
+    "trip-1-attempt03-review-009",
+    "trip-1-attempt03-review-011",
+    "trip-1-attempt03-review-012",
+    "trip-1-attempt03-review-013",
+    "trip-1-attempt03-review-014",
+    "trip-1-attempt03-review-015",
+    "trip-1-attempt03-review-016"
+  ]
+}
