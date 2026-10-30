@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -40,6 +41,24 @@ from video_editor.errors import ErrorCategory, VideoEditorError
 from video_editor.persistence.database import JobStore
 
 UploadValidator = Callable[[str, str, JobStore, PathSettings], AuthorizedUpload]
+_FAILURE_CODES = frozenset(
+    {
+        "provider_response_invalid",
+        "provider_authentication",
+        "provider_invalid_request",
+        "provider_invalid_upload_stream",
+        "provider_file_not_found",
+        "provider_file_reupload_required",
+        "provider_file_timeout",
+        "provider_file_failed",
+        "provider_network",
+        "provider_unavailable",
+        "provider_rate_limited",
+        "pricing_unknown",
+    }
+)
+_TRANSPORT_OPERATIONS = frozenset({"upload", "file_status", "generate", "delete"})
+_EXCEPTION_TYPE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
 
 
 class AnalysisCacheIdentity(AnalysisModel):
@@ -367,6 +386,58 @@ def _provider_error_usage(error: VideoEditorError) -> ProviderUsage | None:
         return None
 
 
+def _is_int(value: object, low: int, high: int) -> bool:
+    return (
+        isinstance(value, int) and not isinstance(value, bool) and low <= value < high
+    )
+
+
+def _safe_transport(raw: str | None) -> dict[str, object] | None:
+    """Rebuild transport facts from allowlisted fields; provider text never passes."""
+    try:
+        data = json.loads(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("operation") not in _TRANSPORT_OPERATIONS:
+        return None
+    attempts: list[dict[str, object]] = []
+    entries = data.get("attempts")
+    for entry in entries[:16] if isinstance(entries, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        chain = entry.get("exception_chain")
+        if (
+            not _is_int(entry.get("elapsed_ms"), 0, 86_400_000)
+            or entry.get("code") not in _FAILURE_CODES
+            or not isinstance(chain, list)
+            or not 1 <= len(chain) <= 4
+            or not all(isinstance(link, dict) for link in chain)
+        ):
+            continue
+        safe_chain: list[dict[str, object]] = []
+        for link in chain:
+            name = link.get("type")
+            safe_link: dict[str, object] = {
+                "type": name
+                if isinstance(name, str)
+                and len(name) <= 128
+                and _EXCEPTION_TYPE.fullmatch(name)
+                else "unrecognized"
+            }
+            if _is_int(link.get("errno"), -(2**31), 2**31):
+                safe_link["errno"] = link["errno"]
+            safe_chain.append(safe_link)
+        attempt: dict[str, object] = {
+            "elapsed_ms": entry["elapsed_ms"],
+            "code": entry["code"],
+            "exception_chain": safe_chain,
+        }
+        if _is_int(entry.get("http_status"), 100, 600):
+            attempt["http_status"] = entry["http_status"]
+        attempts.append(attempt)
+    return {"operation": data["operation"], "attempts": attempts}
+
+
 def _persist_failure_evidence(
     store: JobStore,
     request_id: str,
@@ -378,24 +449,13 @@ def _persist_failure_evidence(
     ).fetchone()
     if row is None:
         raise KeyError("failure has no persisted request")
-    known_codes = {
-        "provider_response_invalid",
-        "provider_authentication",
-        "provider_invalid_request",
-        "provider_invalid_upload_stream",
-        "provider_file_not_found",
-        "provider_file_reupload_required",
-        "provider_file_timeout",
-        "provider_file_failed",
-        "provider_network",
-        "provider_unavailable",
-        "provider_rate_limited",
-        "pricing_unknown",
-    }
     payload: dict[str, object] = {
         "request_id": request_id,
-        "code": error.code if error.code in known_codes else "provider_failure",
+        "code": error.code if error.code in _FAILURE_CODES else "provider_failure",
     }
+    transport = _safe_transport(error.safe_details.get("transport"))
+    if transport is not None:
+        payload["transport"] = transport
     try:
         raw = json.loads(error.safe_details.get("diagnostic", "{}"))
     except (TypeError, ValueError):

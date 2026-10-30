@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -55,6 +56,47 @@ _FILE_POLL_SECONDS = 5.0
 _FILE_PROCESSING_TIMEOUT_SECONDS = 300.0
 _ResponseT = TypeVar("_ResponseT", BroadScanResponse, CandidateRefinementResponse)
 _ValueT = TypeVar("_ValueT")
+_EXCEPTION_TYPE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
+_EXCEPTION_CHAIN_LIMIT = 4
+
+
+def _failed_attempt(
+    error: Exception, mapped: VideoEditorError, started: float
+) -> dict[str, object]:
+    """Describe one failed SDK call by type names and numbers, never by text."""
+    chain: list[dict[str, object]] = []
+    current: BaseException | None = error
+    while current is not None and len(chain) < _EXCEPTION_CHAIN_LIMIT:
+        name = f"{type(current).__module__}.{type(current).__qualname__}"
+        entry: dict[str, object] = {
+            "type": name
+            if len(name) <= 128 and _EXCEPTION_TYPE.fullmatch(name)
+            else "unrecognized"
+        }
+        if isinstance(current, OSError) and isinstance(current.errno, int):
+            entry["errno"] = current.errno
+        chain.append(entry)
+        current = current.__cause__ or (
+            None if current.__suppress_context__ else current.__context__
+        )
+    attempt: dict[str, object] = {
+        "elapsed_ms": max(0, round((time.monotonic() - started) * 1000)),
+        "code": mapped.code,
+        "exception_chain": chain,
+    }
+    status = getattr(error, "code", None)
+    if isinstance(status, int) and not isinstance(status, bool) and 100 <= status < 600:
+        attempt["http_status"] = status
+    return attempt
+
+
+def _with_transport(
+    error: VideoEditorError, operation: str, attempts: list[dict[str, object]]
+) -> VideoEditorError:
+    error.safe_details["transport"] = json.dumps(
+        {"operation": operation, "attempts": attempts}, sort_keys=True
+    )
+    return error
 
 
 def _without_additional_properties(schema: types.Schema | None) -> types.Schema | None:
@@ -338,7 +380,7 @@ class GeminiAdapter:
                     config={"mime_type": "video/mp4"},
                 )
 
-            remote = self._retry(upload_attempt)
+            remote = self._retry(upload_attempt, operation_name="upload")
         return self._uploaded_file(remote, authorization.manifest_id)
 
     def wait_until_active(self, upload: UploadedFile) -> UploadedFile:
@@ -347,7 +389,10 @@ class GeminiAdapter:
         deadline = time.monotonic() + _FILE_PROCESSING_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
             try:
-                remote = self._retry(lambda: self._client.files.get(name=upload.name))
+                remote = self._retry(
+                    lambda: self._client.files.get(name=upload.name),
+                    operation_name="file_status",
+                )
             except VideoEditorError as error:
                 if error.code == "provider_file_not_found":
                     raise self._reupload_required(current) from None
@@ -424,7 +469,10 @@ class GeminiAdapter:
 
     def delete_upload(self, upload: UploadedFile) -> None:
         """Delete provider upload by Files API name."""
-        self._retry(lambda: self._client.files.delete(name=upload.name))
+        self._retry(
+            lambda: self._client.files.delete(name=upload.name),
+            operation_name="delete",
+        )
 
     def _analyze(
         self,
@@ -548,10 +596,12 @@ class GeminiAdapter:
     ) -> tuple[Any | None, list[ProviderAttemptUsage], int, VideoEditorError | None]:
         """Generate within one total attempt budget and retain returned usage."""
         attempts: list[ProviderAttemptUsage] = []
+        failures: list[dict[str, object]] = []
         for attempt in range(1, max_attempts + 1):
             self._require_current_pricing()
             mapped: VideoEditorError | None = None
             response: Any | None = None
+            started = time.monotonic()
             try:
                 response = self._client.models.generate_content(
                     model=MODEL_ID,
@@ -561,9 +611,15 @@ class GeminiAdapter:
             except Exception as error:  # noqa: BLE001 - SDK hierarchy is open-ended
                 attempts.append(self._unknown_attempt(error))
                 mapped = self._provider_error(error)
+                failures.append(_failed_attempt(error, mapped, started))
             if mapped is not None:
                 if not self._is_retryable(mapped) or attempt == max_attempts:
-                    return None, attempts, attempt, mapped
+                    return (
+                        None,
+                        attempts,
+                        attempt,
+                        _with_transport(mapped, "generate", failures),
+                    )
                 self._sleep(attempt)
                 continue
             attempts.append(self._attempt_usage(response))
@@ -579,18 +635,23 @@ class GeminiAdapter:
             ),
         )
 
-    def _retry(self, operation: Callable[[], _ValueT]) -> _ValueT:
+    def _retry(
+        self, operation: Callable[[], _ValueT], *, operation_name: str
+    ) -> _ValueT:
         """Run one SDK operation with retries only for sanitized transient errors."""
+        failures: list[dict[str, object]] = []
         for attempt in range(1, self._retry_policy.max_attempts + 1):
+            started = time.monotonic()
             try:
                 return operation()
             except Exception as error:  # noqa: BLE001 - SDK error hierarchy is open-ended
                 mapped = self._provider_error(error)
+                failures.append(_failed_attempt(error, mapped, started))
             if (
                 not self._is_retryable(mapped)
                 or attempt == self._retry_policy.max_attempts
             ):
-                raise mapped
+                raise _with_transport(mapped, operation_name, failures)
             self._sleep(attempt)
         raise VideoEditorError(
             ErrorCategory.PROVIDER,
@@ -918,11 +979,11 @@ class GeminiAdapter:
             code=error.code,
             safe_details={
                 "usage": json.dumps(usage.safe_payload(), sort_keys=True),
-                **(
-                    {"diagnostic": error.safe_details["diagnostic"]}
-                    if "diagnostic" in error.safe_details
-                    else {}
-                ),
+                **{
+                    key: error.safe_details[key]
+                    for key in ("diagnostic", "transport")
+                    if key in error.safe_details
+                },
             },
         )
 
