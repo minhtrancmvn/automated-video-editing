@@ -135,7 +135,7 @@ def test_real_sdk_transport_does_not_multiply_adapter_attempts(
 
 
 def test_exact_echo_prompt_has_new_version_without_changing_broad() -> None:
-    assert BROAD_PROMPT_VERSION == "broad-v3"
+    assert BROAD_PROMPT_VERSION == "broad-v4"
     assert CANDIDATE_PROMPT_VERSION == "candidate-v4"
     request = AnalysisRequestContext(
         reservation_id="request-1",

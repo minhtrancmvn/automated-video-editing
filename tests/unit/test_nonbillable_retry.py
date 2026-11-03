@@ -363,7 +363,7 @@ def test_migration_preserves_v2_requests_budgets_and_foreign_keys(
     connection.commit()
     connection.close()
     with JobStore(db) as store:
-        assert store.migration_version() == 3
+        assert store.migration_version() == 4
         assert [
             tuple(r)
             for r in store.connection.execute(

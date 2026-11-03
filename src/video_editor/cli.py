@@ -153,6 +153,36 @@ def bounded_broad(
         raise typer.Exit(code=1) from exc
 
 
+@app.command("bounded-evaluation")
+def bounded_evaluation(
+    plan_path: Path,
+    dispatch: bool = typer.Option(False, "--dispatch"),
+    approval: Annotated[Path | None, typer.Option("--approval")] = None,
+    config: Annotated[Path | None, typer.Option("--config")] = None,
+    output: Annotated[Path | None, typer.Option("--output")] = None,
+) -> None:
+    """Price exported evaluation plan; dispatch requires separate exact approval."""
+    import json
+
+    from video_editor.bounded_evaluation import bounded_evaluation as execute
+
+    try:
+        result = execute(
+            plan_path=plan_path,
+            dispatch=dispatch,
+            approval_path=approval,
+            config_path=config,
+            output_path=output,
+        )
+        typer.echo(json.dumps(result, sort_keys=True))
+    except (ValueError, OSError, VideoEditorError):
+        typer.echo(
+            "bounded evaluation refused: check exact plan, approval and local ledger",
+            err=True,
+        )
+        raise typer.Exit(code=1) from None
+
+
 @app.command()
 def resume(
     job_id: str,

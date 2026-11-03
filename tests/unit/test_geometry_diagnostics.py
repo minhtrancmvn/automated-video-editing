@@ -46,7 +46,7 @@ def test_geometry_prompt_has_genuine_version_without_changing_historical_prompt(
         "start": Decimal(1),
         "end": Decimal(3),
     }
-    assert BROAD_PROMPT_VERSION == "broad-v3"
+    assert BROAD_PROMPT_VERSION == "broad-v4"
     assert CANDIDATE_PROMPT_VERSION == "candidate-v4"
     old = GeminiAdapter._prompt("candidate-v3", **kwargs)
     prompt = GeminiAdapter._prompt(CANDIDATE_PROMPT_VERSION, **kwargs)

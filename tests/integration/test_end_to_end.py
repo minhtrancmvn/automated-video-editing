@@ -598,7 +598,7 @@ with JobStore(config.paths.state_dir / "jobs.sqlite3") as store:
 
 
 def test_phase2_public_cli_creates_full_offline_outputs_and_resumes(
-    tmp_path: Path, cli: CliRunner, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, cli: CliRunner, monkeypatch: pytest.MonkeyPatch, synthetic_selection
 ) -> None:
     input_dir = tmp_path / "phase2-input"
     input_dir.mkdir()
@@ -672,6 +672,7 @@ def test_phase2_public_cli_creates_full_offline_outputs_and_resumes(
     ) -> tuple[WorkflowService, JobStore]:
         service, store = original_service(config_path, progress)
         service.provider = provider
+        synthetic_selection(service, allow_test_planning=True)
         return service, store
 
     monkeypatch.setattr(cli_module, "_service", offline_service)

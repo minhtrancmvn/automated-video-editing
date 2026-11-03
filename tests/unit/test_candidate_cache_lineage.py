@@ -61,7 +61,7 @@ class WindowProvider(FakeProvider):
 
 
 @pytest.fixture
-def analysis(tmp_path):
+def analysis(tmp_path, synthetic_selection):
     with JobStore(tmp_path / "state.db") as store:
         job_id = store.create_job({}, {})
         store.initialize_budget(job_id, D(3))
@@ -80,6 +80,8 @@ def analysis(tmp_path):
             store,
             provider=provider,
         )
+        (service.config.paths.workspace_dir / job_id).mkdir(parents=True)
+        synthetic_selection(service)
         chunk = {
             "source_id": "source-1",
             "source_identity": "identity-v1:fingerprint",

@@ -383,7 +383,9 @@ def _config(tmp_path: Path, cost_cap: Decimal = _DEFAULT_CAP) -> AppConfig:
 
 
 @pytest.fixture
-def phase2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+def phase2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_selection: Any
+) -> Any:
     monkeypatch.setenv("GEMINI_API_KEY", SECRET)
     config = _config(tmp_path)
     input_dir = config.paths.input_dir
@@ -391,8 +393,10 @@ def phase2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     _make_source(input_dir / "02.mp4", "darkgreen")
     provider = FakeAnalysisProvider()
     with JobStore(config.paths.state_dir / "jobs.sqlite3") as store:
+        service = WorkflowService(config, store, provider=provider)
+        synthetic_selection(service, allow_test_planning=True)
         yield Phase2Env(
-            WorkflowService(config, store, provider=provider),
+            service,
             provider,
             input_dir,
             config,
@@ -510,7 +514,7 @@ def test_interrupted_segmentation_reuses_only_valid_registered_chunks(
 
 
 def test_exact_echo_version_preserves_broad_cache_and_old_unknown_hold(
-    phase2: Phase2Env, monkeypatch: pytest.MonkeyPatch
+    phase2: Phase2Env, monkeypatch: pytest.MonkeyPatch, synthetic_selection: Any
 ) -> None:
     assert workflow_module.CANDIDATE_PROMPT_VERSION == "candidate-v4"
     job_id = phase2.service._new_job(phase2.input_dir)
@@ -547,7 +551,18 @@ def test_exact_echo_version_preserves_broad_cache_and_old_unknown_hold(
     ]
     broad_calls = phase2.provider.broad_calls
     held = phase2.store.budget_state(job_id).reserved_usd
+    candidate_calls = phase2.provider.candidate_calls
 
+    # A prompt change cannot reuse the consumed approval, even after an unknown
+    # outcome. This assertion uses only the disposable synthetic test ledger.
+    with pytest.raises(VideoEditorError, match="existing reservation does not match"):
+        phase2.service._ensure_analyze(job_id, segmented)
+    assert phase2.provider.candidate_calls == candidate_calls
+    assert phase2.store.budget_state(job_id).reserved_usd == held
+
+    synthetic_selection(
+        phase2.service, approval_id="synthetic-fresh-candidate-v4-approval"
+    )
     analyzed = phase2.service._ensure_analyze(job_id, segmented)
 
     assert analyzed["coverage"]["complete"]
@@ -779,7 +794,8 @@ def test_phase2_missing_output_volume_fails_and_resumes_completed_stages(
     before_failure = phase2.service.status(job_id)
     completed_stage_times = {
         name: before_failure["stages"][name]["completed_at"]
-        for name in ("inspect", "proxy", "segment", "analyze", "rank", "plan")
+        # Analyze must recheck evidence even when every provider result is cached.
+        for name in ("inspect", "proxy", "segment", "rank", "plan")
     }
     provider_calls = (
         phase2.provider.uploads,
@@ -1026,10 +1042,13 @@ def test_resume_reuses_uploads_and_results(phase2: Phase2Env) -> None:
 def test_changed_prompt_invalidates_analyze_onward_only(
     phase2: Phase2Env, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    current_version = workflow_module.BROAD_PROMPT_VERSION
+    assert current_version == "broad-v4"
+    monkeypatch.setattr(workflow_module, "BROAD_PROMPT_VERSION", "broad-v3")
     result = phase2.service.run(phase2.input_dir)
     before = phase2.service.status(result["job_id"])["stages"]
 
-    monkeypatch.setattr(workflow_module, "BROAD_PROMPT_VERSION", "broad-v1-test")
+    monkeypatch.setattr(workflow_module, "BROAD_PROMPT_VERSION", current_version)
     phase2.service.resume(result["job_id"])
     after = phase2.service.status(result["job_id"])["stages"]
 
@@ -1037,7 +1056,7 @@ def test_changed_prompt_invalidates_analyze_onward_only(
         assert after[name]["started_at"] == before[name]["started_at"]
     for name in ("analyze", "rank", "plan"):
         assert after[name]["started_at"] != before[name]["started_at"]
-    assert phase2.provider.prompt_versions[-1] == "broad-v1-test"
+    assert phase2.provider.prompt_versions[-1] == "broad-v4"
 
 
 def test_changed_ranking_settings_invalidate_rank_onward_only(
@@ -1055,8 +1074,9 @@ def test_changed_ranking_settings_invalidate_rank_onward_only(
     phase2.service.resume(result["job_id"])
     after = phase2.service.status(result["job_id"])["stages"]
 
-    for name in ("inspect", "proxy", "segment", "analyze"):
+    for name in ("inspect", "proxy", "segment"):
         assert after[name]["started_at"] == before[name]["started_at"]
+    assert after["analyze"]["started_at"] != before["analyze"]["started_at"]
     assert after["rank"]["started_at"] != before["rank"]["started_at"]
     assert phase2.provider.broad_calls == calls
 

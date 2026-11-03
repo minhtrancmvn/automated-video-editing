@@ -128,6 +128,38 @@ MIGRATIONS = (
             )""",
         ),
     ),
+    Migration(
+        version=4,
+        statements=(
+            """CREATE TABLE IF NOT EXISTS evaluation_requests (
+                request_id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                cache_key TEXT NOT NULL,
+                phase TEXT NOT NULL CHECK(phase IN ('video_grounding', 'editorial_comparison')),
+                status TEXT NOT NULL CHECK(status IN (
+                    'reserved', 'dispatched', 'completed', 'released',
+                    'billing_unknown'
+                )),
+                maximum_cost_microusd INTEGER NOT NULL
+                    CHECK(maximum_cost_microusd >= 0),
+                actual_cost_microusd INTEGER CHECK(actual_cost_microusd >= 0),
+                data_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(job_id, cache_key)
+            )""",
+            """CREATE TABLE IF NOT EXISTS evaluation_results (
+                request_id TEXT PRIMARY KEY
+                    REFERENCES evaluation_requests(request_id) ON DELETE CASCADE,
+                job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                cache_key TEXT NOT NULL,
+                result_json TEXT,
+                usage_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(job_id, cache_key)
+            )""",
+        ),
+    ),
 )
 LATEST_MIGRATION_VERSION = MIGRATIONS[-1].version
 

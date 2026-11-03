@@ -298,7 +298,7 @@ class GeminiAdapter:
     ) -> Decimal:
         """Estimate default-policy broad cost for live preflight without dispatch."""
         if (
-            prompt_version not in {"broad-v1", "broad-v2", "broad-v3"}
+            prompt_version not in {"broad-v1", "broad-v2", "broad-v3", "broad-v4"}
             or not authorization.manifest_id
         ):
             raise ValueError("broad preflight requires a supported prompt and manifest")
@@ -328,6 +328,7 @@ class GeminiAdapter:
             "broad-v1",
             "broad-v2",
             "broad-v3",
+            "broad-v4",
             "candidate-v3",
             "candidate-v4",
         }:
@@ -336,7 +337,7 @@ class GeminiAdapter:
                 "Unsupported request cost identity",
                 code="provider_invalid_request",
             )
-        is_broad = prompt_version in {"broad-v1", "broad-v2", "broad-v3"}
+        is_broad = prompt_version in {"broad-v1", "broad-v2", "broad-v3", "broad-v4"}
         fps = Decimal(str(_BROAD_FPS)) if is_broad else Decimal(5)
         return self._estimate_request_maximum(
             chunk,
@@ -878,11 +879,11 @@ class GeminiAdapter:
     ) -> str:
         interval = f"[{format(start, 'f')}, {format(end, 'f')}] seconds"
         if (
-            prompt_version in {"broad-v1", "broad-v2", "broad-v3"}
+            prompt_version in {"broad-v1", "broad-v2", "broad-v3", "broad-v4"}
             and candidate_id is None
         ):
             serialized_interval = interval
-            if prompt_version in {"broad-v2", "broad-v3"}:
+            if prompt_version in {"broad-v2", "broad-v3", "broad-v4"}:
                 serialized_start, serialized_end = GeminiAdapter._serialized_interval(
                     prompt_version, start, end
                 )
@@ -897,7 +898,7 @@ class GeminiAdapter:
                 f"chunk_id: {chunk_id}",
                 f"interval: {interval}",
             ]
-            if prompt_version in {"broad-v2", "broad-v3"}:
+            if prompt_version in {"broad-v2", "broad-v3", "broad-v4"}:
                 prompt_lines.extend(
                     (
                         f"serialized interval: {serialized_interval}",
@@ -910,6 +911,15 @@ class GeminiAdapter:
                         "All start/end values: elapsed decimal seconds on supplied proxy timeline; do not reset zero at interval start.",
                         "Convert MM:SS by minutes*60+seconds, never concatenate digits: 04:16 = 256, 06:45 = 405, 12:00 = 720.",
                         "Use decimal strings for scenes, speech_presence_ranges and candidates.",
+                    )
+                )
+            if prompt_version == "broad-v4":
+                prompt_lines.extend(
+                    (
+                        "All start/end values: elapsed decimal-second strings on supplied proxy timeline; never reset interval origin.",
+                        "MM:SS = minutes*60+seconds, not joined digits: 04:16 = 256, 06:45 = 405, 12:00 = 720.",
+                        "Each candidate reason must describe only events visible within its own [start,end], not events from other times or whole-scene context.",
+                        "If unsure, use plain visible facts or omit candidate. Cross-scene candidates are allowed when their reasons match their own interval.",
                     )
                 )
             prompt_lines.extend(
@@ -1069,7 +1079,7 @@ class GeminiAdapter:
     def _serialized_interval(
         prompt_version: str, start: Decimal, end: Decimal
     ) -> tuple[str, str]:
-        if prompt_version == "broad-v3":
+        if prompt_version in {"broad-v3", "broad-v4"}:
             start = start.quantize(_NANOSECOND, rounding=ROUND_CEILING)
             end = end.quantize(_NANOSECOND, rounding=ROUND_FLOOR)
             if end <= start:

@@ -58,6 +58,15 @@ from video_editor.analysis.ranking import (
     rank_candidates,
 )
 from video_editor.analysis.segmentation import segment_media
+from video_editor.analysis.selection import (
+    SELECTION_VERSION,
+    RefinementApproval,
+    SelectionProposal,
+    SelectionReview,
+    evaluate_selection,
+    refinement_authorized,
+    selection_digest,
+)
 from video_editor.analysis.tracking import TRACKING_VERSION, track_subject
 from video_editor.config import AppConfig
 from video_editor.errors import ErrorCategory, VideoEditorError
@@ -144,7 +153,7 @@ EXIT_CODES = {
     ErrorCategory.BUDGET: 19,
 }
 _T = TypeVar("_T")
-BROAD_PROMPT_VERSION = "broad-v3"
+BROAD_PROMPT_VERSION = "broad-v4"
 CANDIDATE_PROMPT_VERSION = "candidate-v4"
 CANDIDATE_IDENTITY_VERSION = "broad-lineage-window-v2"
 RANKING_SETTINGS = RankingSettings()
@@ -271,7 +280,11 @@ class WorkflowService:
         progress: Callable[[str], None] | None = None,
         *,
         provider: AnalysisProvider | None = None,
+        selection_reviews: tuple[SelectionReview, ...] = (),
+        refinement_approval: RefinementApproval | None = None,
     ) -> None:
+        self.selection_reviews = selection_reviews
+        self.refinement_approval = refinement_approval
         self.config = config
         self.store = store
         self.progress = progress
@@ -1411,7 +1424,9 @@ class WorkflowService:
         operation: Callable[[], dict[str, Any]],
     ) -> dict[str, Any]:
         job = self.store.get_job(job_id)
-        if self._stage_reusable(job, name, fingerprint, settings):
+        # Analyze always rechecks evidence bytes and selection. Provider caches
+        # still avoid unchanged paid requests; old stage output cannot admit one.
+        if name != "analyze" and self._stage_reusable(job, name, fingerprint, settings):
             return cast(dict[str, Any], job["stages"][name]["result"])
         upstream = _hash([fingerprint, settings])
 
@@ -1427,7 +1442,7 @@ class WorkflowService:
             settings,
             category,
             run,
-            preserve_artifacts=False,
+            preserve_artifacts=name == "analyze",
         )
 
     def _ensure_segment(self, job_id: str, proxied: dict[str, Any]) -> dict[str, Any]:
@@ -1567,6 +1582,10 @@ class WorkflowService:
             "broad_prompt": BROAD_PROMPT_VERSION,
             "candidate_prompt": CANDIDATE_PROMPT_VERSION,
             "candidate_identity": CANDIDATE_IDENTITY_VERSION,
+            "selection_version": SELECTION_VERSION,
+            "selection_reviews": [
+                selection_digest(item) for item in self.selection_reviews
+            ],
             "cost_cap_per_hour": str(self.config.gemini.max_cost_per_source_hour_usd),
         }
 
@@ -1671,8 +1690,85 @@ class WorkflowService:
                     "candidate identities are not unique after chunk qualification",
                     code="provider_response_invalid",
                 )
+            proposals = []
+            for key, broad in broad_by_identity.items():
+                item, request = chunk_context[key[0]]
+                stored = self.store.find_analysis_result(
+                    job_id, analysis_cache_key(request.cache_identity)
+                )
+                if stored is None:
+                    raise VideoEditorError(
+                        ErrorCategory.ANALYSIS,
+                        "selection requires persisted broad lineage",
+                        code="selection_evidence_required",
+                    )
+                proposals.append(
+                    SelectionProposal(
+                        job_id=job_id,
+                        chunk_id=key[0],
+                        broad_cache_key=stored["cache_key"],
+                        broad_result_id=stored["result_id"],
+                        broad_request_id=stored["data"]["request_id"],
+                        source_identity=item["source_identity"],
+                        source_fingerprint=item["source_fingerprint"],
+                        proxy_digest=item["digest"],
+                        mapping_version=item["mapping_version"],
+                        chunk_source_start=Decimal(item["source_start"]),
+                        chunk_source_end=Decimal(item["source_end"]),
+                        chunk_proxy_start=Decimal(item["proxy_start"]),
+                        chunk_proxy_end=Decimal(item["proxy_end"]),
+                        broad=broad,
+                    )
+                )
+            selection = evaluate_selection(proposals, self.selection_reviews)
+            selection_payload = selection.model_dump(mode="json")
+            workspace = self._configured_destination(
+                self.config.paths.workspace_dir, job_id
+            )
+            audit_path = workspace / f"selection-{selection_digest(selection)}.json"
+            audit_bytes = (
+                json.dumps(selection_payload, sort_keys=True) + "\n"
+            ).encode()
+            try:
+                with audit_path.open("xb") as handle:
+                    handle.write(audit_bytes)
+            except FileExistsError:
+                if audit_path.read_bytes() != audit_bytes:
+                    raise VideoEditorError(
+                        ErrorCategory.ANALYSIS,
+                        "selection audit contents do not match current decision",
+                        code="selection_audit_invalid",
+                    ) from None
+            self.store.save_artifact(
+                job_id,
+                "analyze",
+                audit_path,
+                {"digest": hashlib.sha256(audit_bytes).hexdigest()},
+            )
+            if not selection.eligible:
+                pending = any(
+                    row.state
+                    in {"awaiting_evidence", "blocked", "provisional_shortlist"}
+                    for row in selection.decisions
+                )
+                raise VideoEditorError(
+                    ErrorCategory.ANALYSIS,
+                    "selection needs video evidence"
+                    if pending
+                    else "selection found no highlights",
+                    code="selection_evidence_required"
+                    if pending
+                    else "selection_no_highlights",
+                    safe_details={"selection_audit": str(audit_path)},
+                )
+            eligible_keys = {
+                (item.chunk_id, item.broad.candidate_id): selection_digest(item)
+                for item in selection.eligible
+            }
             candidate_requests: list[CandidateAnalysisRequest] = []
             for key, broad in broad_by_identity.items():
+                if key not in eligible_keys:
+                    continue
                 item, request = chunk_context[key[0]]
                 # Keep the provider ID for provider/storage identity. Candidate
                 # results are re-keyed only in the analyze-stage output below.
@@ -1694,6 +1790,16 @@ class WorkflowService:
                 )
                 candidate_requests.append(
                     CandidateAnalysisRequest(
+                        request_id="selection-"
+                        + _hash(
+                            [
+                                job_id,
+                                self.refinement_approval.approval_id
+                                if self.refinement_approval is not None
+                                else None,
+                                eligible_keys[key],
+                            ]
+                        ),
                         manifest_id=item["manifest_id"],
                         candidate=CandidateWindow(
                             chunk_id=item["chunk_id"],
@@ -1709,6 +1815,43 @@ class WorkflowService:
                         ),
                     )
                 )
+            if not refinement_authorized(
+                job_id,
+                selection.eligible,
+                [request.maximum_cost_usd for request in candidate_requests],
+                self.refinement_approval,
+            ):
+                raise VideoEditorError(
+                    ErrorCategory.ANALYSIS,
+                    "selection requires separate bounded refinement approval",
+                    code="selection_authorization_required",
+                    safe_details={"selection_audit": str(audit_path)},
+                )
+            approval = self.refinement_approval
+            assert approval is not None  # Enforced by refinement_authorized above.
+            approval_path = (
+                workspace
+                / f"refinement-approval-{_hash([job_id, approval.approval_id])}.json"
+            )
+            approval_bytes = (
+                json.dumps(approval.model_dump(mode="json"), sort_keys=True) + "\n"
+            ).encode()
+            try:
+                with approval_path.open("xb") as handle:
+                    handle.write(approval_bytes)
+            except FileExistsError:
+                if approval_path.read_bytes() != approval_bytes:
+                    raise VideoEditorError(
+                        ErrorCategory.ANALYSIS,
+                        "refinement approval ID already binds a different scope",
+                        code="selection_authorization_invalid",
+                    ) from None
+            self.store.save_artifact(
+                job_id,
+                "analyze",
+                approval_path,
+                {"digest": hashlib.sha256(approval_bytes).hexdigest()},
+            )
             segmentations = [
                 LocalSegmentation.model_validate_json(Path(path).read_text())
                 for path in segmented.get("segmentations", {}).values()
@@ -1750,6 +1893,7 @@ class WorkflowService:
                 "candidates": candidates,
                 "budget": self.store.budget_state(job_id).model_dump(mode="json"),
                 "request_count": len(requests) + len(candidate_requests),
+                "selection": selection_payload,
             }
 
         return self._phase2_stage(
@@ -1802,6 +1946,25 @@ class WorkflowService:
             operation,
         )
 
+    @staticmethod
+    def _require_final_selection(analyzed: dict[str, Any]) -> None:
+        """Refinement eligibility cannot authorize a final edit or cached plan."""
+        # This contract deliberately has no final-edit acceptance state. A later
+        # evaluator must supply cut/story evidence, not promote provider scores.
+        if not analyzed.get("selection") or not analyzed["selection"].get(
+            "render_ready"
+        ):
+            raise VideoEditorError(
+                ErrorCategory.ANALYSIS,
+                "selection requires final audiovisual cut and story evidence before planning",
+                code="selection_final_evidence_required",
+            )
+        raise VideoEditorError(
+            ErrorCategory.ANALYSIS,
+            "selection final-readiness claims are unsupported by this contract",
+            code="selection_final_evidence_required",
+        )
+
     def _ensure_highlight_plan(
         self,
         job_id: str,
@@ -1809,6 +1972,8 @@ class WorkflowService:
         analyzed: dict[str, Any],
         ranked_result: dict[str, Any],
     ) -> dict[str, Any]:
+        self._require_final_selection(analyzed)
+
         def operation() -> dict[str, Any]:
             job = self.store.get_job(job_id)
             probes = self._source_probes(job)

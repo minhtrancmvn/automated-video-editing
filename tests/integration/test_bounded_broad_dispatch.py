@@ -58,7 +58,7 @@ class OfflineProvider:
         prompt_version: str,
     ) -> ProviderResult[BroadScanResponse]:
         self.scans += 1
-        assert prompt_version == "broad-v3"
+        assert prompt_version == "broad-v4"
         return ProviderResult(
             response=BroadScanResponse(
                 schema_version="broad-v1",

@@ -223,8 +223,8 @@ def test_default_broad_cache_identity_separates_v3_from_historical_results() -> 
         }
     )
 
-    assert BROAD_PROMPT_VERSION == "broad-v3"
-    assert identity.prompt_version == "broad-v3"
+    assert BROAD_PROMPT_VERSION == "broad-v4"
+    assert identity.prompt_version == "broad-v4"
     assert identity.response_schema_version == "broad-v2"
-    legacy = identity.model_copy(update={"prompt_version": "broad-v2"})
+    legacy = identity.model_copy(update={"prompt_version": "broad-v3"})
     assert analysis_cache_key(identity) != analysis_cache_key(legacy)
