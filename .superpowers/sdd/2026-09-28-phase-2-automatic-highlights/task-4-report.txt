@@ -1,0 +1,33 @@
+Task 4: Registered Cloud Proxy Chunks
+Date: 2026-09-29
+Base: 53579279fec99d5998f75f173fa0c2d029915d9c
+Commit: 813e0b3ddc7663540234e11e59f6f1a098dadaab
+Branch: feature/task4-registered-cloud-proxy-chunks
+
+Implemented
+- Deterministic safe-boundary planner with 720-second target, 600-900-second safe window, fixed fallback, and exact contiguous coverage.
+- Shell-free FFmpeg cloud proxies: max width 640, 15 FPS, H.264, mono AAC 64k, MP4, sibling .partial publication.
+- ffprobe validation, actual probed audio bitrate persistence/revalidation, SHA-256, size/device/inode, source and mapping provenance.
+- Atomic typed manifest/chunk registration plus JobStore retrieval APIs.
+- Upload-time symlink/parent, generated-root, configured-root, input/source, hard-link, file replacement, identity, digest, size, stream, settings, and mapping checks.
+- Phase 1 create_analysis_media and storage reserve behavior unchanged.
+
+Verification
+- Focused proxy/database/model suite: 122 passed in 11.31s before final additions; targeted final tests passed.
+- Full suite after final bitrate validation: 439 passed in 35.76s.
+- mypy src: Success: no issues found in 27 source files.
+- ruff check: All checks passed.
+- ruff format --check src tests: 51 files already formatted.
+- git diff --check: passed.
+- Bandit: unavailable; executable not installed. No dependency added.
+- GitNexus compare against 5357927: 5 files, 144 symbols, 20 affected flows, CRITICAL aggregate risk. Impact is driven by new cross-module proxy creation/registration/validation flows and typed persistence model extensions; full suite passed. Direct create_cloud_proxy_chunk impact LOW. Direct _validate_probe impact LOW.
+
+Concerns
+- ProxyManifestData and AnalysisChunkData use compatibility defaults for newly added provenance fields so Task 2 constructors remain valid. Task 4-created records always populate complete provenance; validate_upload_candidate rejects legacy/default records through identity and disk checks.
+- AAC is configured at 64k. Actual stream bitrate varies with encoded content; persisted ffprobe bitrate is compared exactly at upload time rather than required to equal nominal 64,000 bps.
+
+Constraints observed
+- No network.
+- Synthetic local FFmpeg fixtures only.
+- No cache deletion or reserve changes.
+- No push or merge.
