@@ -183,6 +183,64 @@ def bounded_evaluation(
         raise typer.Exit(code=1) from None
 
 
+@app.command("prepare-reviewed")
+def prepare_reviewed(
+    bundle_path: Path,
+    config: Annotated[Path, typer.Option("--config")],
+    output: Annotated[Path, typer.Option("--output")],
+) -> None:
+    """Prepare reviewable V2 drafts from already persisted evidence, offline."""
+    import json
+    import sqlite3
+
+    from video_editor.reviewed import prepare_reviewed as execute
+
+    try:
+        result = execute(
+            bundle_path=bundle_path, config_path=config, output_path=output
+        )
+        typer.echo(json.dumps(result, sort_keys=True))
+    except (ValueError, OSError, KeyError, sqlite3.Error, VideoEditorError):
+        typer.echo(
+            "reviewed preparation refused: check evidence and fresh output", err=True
+        )
+        raise typer.Exit(code=1) from None
+
+
+@app.command("render-reviewed")
+def render_reviewed(
+    draft_path: Path,
+    evaluation_bundle: Annotated[Path, typer.Option("--evaluation-bundle")],
+    config: Annotated[Path, typer.Option("--config")],
+    output: Annotated[Path, typer.Option("--output")],
+    approval: Annotated[Path | None, typer.Option("--approval")] = None,
+) -> None:
+    """Render an exact approved draft locally into a fresh destination."""
+    import json
+    import sqlite3
+
+    from video_editor.reviewed import render_reviewed as execute
+
+    if approval is None:
+        typer.echo("exact draft approval required", err=True)
+        raise typer.Exit(code=1)
+    try:
+        result = execute(
+            draft_path=draft_path,
+            bundle_path=evaluation_bundle,
+            approval_path=approval,
+            config_path=config,
+            output_path=output,
+        )
+        typer.echo(json.dumps(result, sort_keys=True))
+    except (ValueError, OSError, KeyError, sqlite3.Error, VideoEditorError):
+        typer.echo(
+            "reviewed render refused: check exact approval and current evidence",
+            err=True,
+        )
+        raise typer.Exit(code=1) from None
+
+
 @app.command()
 def resume(
     job_id: str,
